@@ -14,7 +14,7 @@ export function FixedStage({ children, className = '', width = 1920, height = 10
   const scale = bounds.width > 0 ? Math.min(bounds.width / width, bounds.height / height) : 0;
   
   return (
-    <div ref={ref} className={`relative overflow-hidden bg-black ${className}`}>
+    <div ref={ref} className={`relative overflow-hidden ${className}`}>
       <div 
         className="absolute left-1/2 top-1/2"
         style={{
