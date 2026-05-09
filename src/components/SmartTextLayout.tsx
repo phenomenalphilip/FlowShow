@@ -1,313 +1,168 @@
-import React, {
-  useMemo,
-  useEffect,
-  useRef,
-  useState
-} from 'react';
-
+import React, { useMemo, useEffect, useRef, useState } from 'react';
 import { tokenize, Token } from '../lib/TokenEngine';
 
 interface SmartTextLayoutProps {
   text: string;
   source?: string;
-  type?: 'lyrics' | 'bible' | string;
+  type?: 'lyrics' | 'scripture' | string;
   className?: string;
-
-  enableAutoFit?: boolean;
-
   styleOverrides?: {
-    global?: React.CSSProperties & {
-      '--font-scale'?: number;
-      verticalAlign?: 'top' | 'center' | 'bottom';
-    };
-
-    words?: {
-      [wordIndex: number]: React.CSSProperties;
-    };
-
-    layout?: {
-      x: number;
-      y: number;
-      width: number;
-      height: number;
-    };
+    global?: React.CSSProperties & { '--font-scale'?: number };
+    words?: { [wordIndex: number]: React.CSSProperties };
+    layout?: { x: number; y: number; width: number; height: number };
   };
-
-  onWordClick?: (
-    wordIndex: number,
-    e: React.MouseEvent
-  ) => void;
-
+  onWordClick?: (wordIndex: number, e: React.MouseEvent) => void;
+  onWordMouseDown?: (wordIndex: number, e: React.MouseEvent) => void;
+  onWordMouseEnter?: (wordIndex: number, e: React.MouseEvent) => void;
+  onWordMouseUp?: (wordIndex: number, e: React.MouseEvent) => void;
   selectedWordIndices?: number[];
+  disableAbsoluteLayout?: boolean;
 }
 
-export function SmartTextLayout({
-  text,
-  source,
-  type,
-  className = '',
-  styleOverrides,
-  onWordClick,
-  selectedWordIndices,
-  enableAutoFit = true
-}: SmartTextLayoutProps) {
-
-  const tokens = useMemo(
-    () => tokenize(text, undefined, styleOverrides?.words),
-    [text, styleOverrides]
-  );
-
+export function SmartTextLayout({ text, source, type, className = '', styleOverrides, onWordClick, onWordMouseDown, onWordMouseEnter, onWordMouseUp, selectedWordIndices, disableAbsoluteLayout }: SmartTextLayoutProps) {
+  const tokens = useMemo(() => tokenize(text, undefined, styleOverrides?.words), [text, styleOverrides]);
   const containerRef = useRef<HTMLDivElement>(null);
   const textContainerRef = useRef<HTMLDivElement>(null);
-
   const [scale, setScale] = useState(1);
 
-  // ----------------------------
-  // SMART FIT ENGINE
-  // ----------------------------
-
+  // Smart FitText behavior
   useEffect(() => {
-    if (!enableAutoFit) {
-      setScale(1);
-      return;
-    }
-
-    if (!containerRef.current || !textContainerRef.current)
-      return;
-
+    if (!containerRef.current || !textContainerRef.current) return;
+    
     const container = containerRef.current;
     const textElem = textContainerRef.current;
-
+    
+    // Reset scale to correctly measure intrinsic size
+    setScale(1);
+    
+    // We need to wait for DOM to update with scale=1
     requestAnimationFrame(() => {
-      if (!container || !textElem) return;
-
-      const containerWidth =
-        container.clientWidth * 0.92;
-
-      const containerHeight =
-        container.clientHeight * 0.92;
-
-      const textWidth = textElem.scrollWidth;
-      const textHeight = textElem.scrollHeight;
-
-      if (textWidth === 0 || textHeight === 0)
-        return;
-
-      const widthScale =
-        containerWidth / textWidth;
-
-      const heightScale =
-        containerHeight / textHeight;
-
-      let nextScale = Math.min(
-        widthScale,
-        heightScale
-      );
-
-      // Prevent extreme scaling
-      nextScale = Math.max(
-        0.3,
-        Math.min(nextScale, 1.5)
-      );
-
-      setScale(nextScale);
+       if (!container || !textElem) return;
+       const computed = window.getComputedStyle(container);
+       
+       const contentWidth = container.clientWidth - parseFloat(computed.paddingLeft) - parseFloat(computed.paddingRight);
+       const contentHeight = container.clientHeight - parseFloat(computed.paddingTop) - parseFloat(computed.paddingBottom);
+       
+       const maxTextWidth = textElem.scrollWidth;
+       const maxTextHeight = textElem.scrollHeight;
+       
+       if (maxTextWidth === 0 || maxTextHeight === 0) return;
+       
+       const scaleWidth = contentWidth / maxTextWidth;
+       const scaleHeight = contentHeight / maxTextHeight;
+       
+       // Choose the smaller scale to ensure it fits both horizontally and vertically
+       let newScale = Math.min(scaleWidth, scaleHeight);
+       
+       // Prevent scaling up infinitely (cap at maybe 1.5x of the base size)
+       newScale = Math.min(newScale, 1.5);
+       
+       setScale(newScale);
     });
+  }, [text, source, type, styleOverrides?.layout]);
 
-  }, [text, styleOverrides, enableAutoFit]);
+  const align = (styleOverrides?.global?.textAlign as string) || 'center';
+  
+  let alignItems = 'center';
+  let origin = 'center center';
+  
+  if (align === 'left') {
+     alignItems = 'flex-start';
+     origin = 'center left';
+  } else if (align === 'right') {
+     alignItems = 'flex-end';
+     origin = 'center right';
+  } else if (align === 'justify') {
+     alignItems = 'stretch';
+     origin = 'center center';
+  }
 
-  // ----------------------------
-  // ALIGNMENT
-  // ----------------------------
+  const useAbsolute = !disableAbsoluteLayout;
 
-  const align =
-    (styleOverrides?.global?.textAlign as string) ||
-    'center';
+  const layoutStyle: React.CSSProperties = useAbsolute ? {
+    position: 'absolute',
+    left: `${(styleOverrides?.layout?.x ?? 0.05) * 100}%`,
+    top: `${(styleOverrides?.layout?.y ?? 0.05) * 100}%`,
+    width: `${(styleOverrides?.layout?.width ?? 0.9) * 100}%`,
+    height: `${(styleOverrides?.layout?.height ?? 0.9) * 100}%`,
+    alignItems
+  } : { alignItems };
 
-  const verticalAlign =
-    styleOverrides?.global?.verticalAlign ||
-    'center';
-
-  const horizontalMap: Record<string, string> = {
-    left: 'flex-start',
-    center: 'center',
-    right: 'flex-end',
-    justify: 'stretch'
-  };
-
-  const verticalMap: Record<string, string> = {
-    top: 'flex-start',
-    center: 'center',
-    bottom: 'flex-end'
-  };
-
-  // ----------------------------
-  // LAYOUT
-  // ----------------------------
-
-  const layoutStyle: React.CSSProperties =
-    styleOverrides?.layout
-      ? {
-          position: 'absolute',
-          left: `${styleOverrides.layout.x * 100}%`,
-          top: `${styleOverrides.layout.y * 100}%`,
-          width: `${styleOverrides.layout.width * 100}%`,
-          height: `${styleOverrides.layout.height * 100}%`,
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: horizontalMap[align],
-          justifyContent:
-            verticalMap[verticalAlign]
-        }
-      : {
-          width: '100%',
-          height: '100%',
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: horizontalMap[align],
-          justifyContent:
-            verticalMap[verticalAlign]
-        };
+  const posClass = useAbsolute ? 'absolute' : 'relative w-full h-full';
 
   return (
-    <div
+    <div 
       ref={containerRef}
-      className={`
-        ${
-          styleOverrides?.layout
-            ? 'absolute'
-            : 'relative w-full h-full p-[5%]'
-        }
-        flex flex-col overflow-hidden
-        ${className}
-      `}
+      className={`${posClass} flex flex-col justify-center overflow-hidden ${className.replace(/relative/g, '').replace(/w-full/g, '').replace(/h-full/g, '')}`}
       style={layoutStyle}
     >
-      <div
+      <div 
         ref={textContainerRef}
-        className={`
-          transition-transform duration-300 ease-out
-          ${
-            align === 'justify'
-              ? 'w-full'
-              : 'inline-block'
-          }
-
-          ${
-            align === 'left'
-              ? 'text-left'
-              : align === 'right'
-              ? 'text-right'
-              : align === 'justify'
-              ? 'text-justify'
-              : 'text-center'
-          }
-        `}
-        style={{
+        className={`transition-transform duration-300 ease-out ${align === 'justify' ? 'w-full' : 'inline-block'} text-${align}`}
+        style={{ 
           transform: `scale(${scale})`,
-          transformOrigin: `${verticalAlign} ${align}`
+          transformOrigin: origin
         }}
       >
-        <h1
-          className={`
-            font-display
-            text-white
-            ${
-              align === 'justify'
-                ? 'w-full block'
-                : 'inline-block'
-            }
-          `}
+        <h1 
+          className={`font-display font-bold text-white uppercase ${align === 'justify' ? 'w-full block' : 'inline-block'} select-none`}
           style={{
-            textAlign: align as any,
-
-            fontSize:
-              styleOverrides?.global?.fontSize ||
-              (type === 'bible'
-                ? '3rem'
-                : '4rem'),
-
-            lineHeight:
-              styleOverrides?.global?.lineHeight ||
-              1.2,
-
-            letterSpacing:
-              styleOverrides?.global
-                ?.letterSpacing ||
-              (type === 'bible'
-                ? 'normal'
-                : '0.02em'),
-
+            textAlign: align as any, // overrides
+            fontSize: styleOverrides?.global?.fontSize || (type === 'scripture' ? '90px' : '110px'),
+            lineHeight: 1.3,
+            letterSpacing: type === 'scripture' ? 'normal' : '0.02em',
+            textShadow: '0 8px 16px rgba(0,0,0,0.8), 0 2px 4px rgba(0,0,0,0.5)',
             whiteSpace: 'pre-wrap',
-
-            wordBreak: 'break-word',
-
-            overflowWrap: 'break-word',
-
             ...styleOverrides?.global
           }}
         >
           {tokens.map((token: Token) => {
-
-            const isClickable =
-              !!onWordClick &&
-              token.wordIndex !== undefined;
-
-            const isSelected =
-              isClickable &&
-              selectedWordIndices?.includes(
-                token.wordIndex as number
-              );
-
+            const isClickable = (!!onWordClick || !!onWordMouseDown) && token.wordIndex !== undefined;
+            const isSelected = isClickable && selectedWordIndices?.includes(token.wordIndex as number);
+            
             return (
-              <span
-                key={token.id}
-
-                onClick={(e) => {
-                  if (isClickable) {
-                    e.stopPropagation();
-
-                    onWordClick!(
-                      token.wordIndex as number,
-                      e
-                    );
-                  }
-                }}
-
-                className={`
-                  transition-colors duration-200
-
-                  ${
-                    isClickable
-                      ? 'cursor-pointer rounded hover:bg-white/10'
-                      : ''
-                  }
-
-                  ${
-                    isSelected
-                      ? 'bg-blue-500/30 outline outline-1 outline-blue-500'
-                      : ''
-                  }
-                `}
-
-                style={token.computedStyles}
+              <span 
+                 key={token.id} 
+                 onMouseDown={(e) => {
+                   if (isClickable && onWordMouseDown) {
+                     e.stopPropagation();
+                     onWordMouseDown(token.wordIndex as number, e);
+                   }
+                 }}
+                 onMouseEnter={(e) => {
+                   if (isClickable && onWordMouseEnter) {
+                     e.stopPropagation();
+                     onWordMouseEnter(token.wordIndex as number, e);
+                   }
+                 }}
+                 onMouseUp={(e) => {
+                   if (isClickable && onWordMouseUp) {
+                     e.stopPropagation();
+                     onWordMouseUp(token.wordIndex as number, e);
+                   }
+                 }}
+                 onClick={(e) => {
+                   if (isClickable) {
+                     e.stopPropagation();
+                     if (onWordClick) onWordClick(token.wordIndex as number, e);
+                   }
+                 }}
+                 className={`transition-colors duration-100 word-token ${isClickable ? 'cursor-pointer rounded hover:bg-white/10' : ''} ${isSelected ? 'bg-[#2563eb] text-white' : ''}`}
+                 style={token.computedStyles}
               >
                 {token.value}
               </span>
             );
           })}
         </h1>
-
         {source && (
-          <h2
-            className="mt-6 text-2xl font-heading font-bold tracking-wide"
+          <h2 
+            className="mt-6 text-2xl font-heading font-bold text-amber-400 text-center tracking-wide"
             style={{
-              textAlign: align as any,
-              color:
-                styleOverrides?.global?.color ||
-                '#fbbf24'
+               textShadow: '0 4px 8px rgba(0,0,0,0.8)'
             }}
           >
-            {source}
+             {source}
           </h2>
         )}
       </div>

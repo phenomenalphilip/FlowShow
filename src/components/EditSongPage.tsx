@@ -3,8 +3,9 @@ import useMeasure from 'react-use-measure';
 import { Rnd } from 'react-rnd';
 import { SlideDefinition } from '../App';
 import { SmartTextLayout } from './SmartTextLayout';
+import { FixedStage } from './FixedStage';
 import { tokenize, Token } from '../lib/TokenEngine';
-import { X, Copy, Trash, EyeOff, Eye, Bold, Italic, Underline as UnderlineIcon, Strikethrough, AlignLeft, AlignCenter, AlignRight, AlignJustify } from 'lucide-react';
+import { X, Copy, Trash, EyeOff, Eye, Bold, Italic, Underline as UnderlineIcon, Strikethrough, AlignLeft, AlignCenter, AlignRight, AlignJustify, Split } from 'lucide-react';
 
 interface EditSongPageProps {
   song: {
@@ -22,7 +23,10 @@ export function EditSongPage({ song, initialSlideIndex = 0, onSave, onClose }: E
   
   const [selectedSlideIndices, setSelectedSlideIndices] = useState<number[]>([initialSlideIndex]);
   const [selectedWordIndices, setSelectedWordIndices] = useState<number[]>([]);
-  const [isEditingText, setIsEditingText] = useState(false);
+  const isDraggingWordRef = React.useRef(false);
+  const dragStartWordIdxRef = React.useRef<number | null>(null);
+  const isDraggingSlideRef = React.useRef(false);
+  const dragStartSlideIdxRef = React.useRef<number | null>(null);
   const [previewRef, bounds] = useMeasure();
   
   // Ref for the left panel container to handle Ctrl+A
@@ -35,15 +39,24 @@ export function EditSongPage({ song, initialSlideIndex = 0, onSave, onClose }: E
          return;
       }
 
-      if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
         e.preventDefault();
         setSelectedSlideIndices(slides.map((_, i) => i));
       }
     };
+
+    const handleMouseUp = () => {
+      isDraggingWordRef.current = false;
+      isDraggingSlideRef.current = false;
+    };
     
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [slides.length]);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [slides]);
   
   const activeSlideIndex = selectedSlideIndices[0] ?? 0;
   const activeSlide = slides[activeSlideIndex] as SlideDefinition | undefined;
@@ -113,6 +126,26 @@ export function EditSongPage({ song, initialSlideIndex = 0, onSave, onClose }: E
     });
   };
 
+  const handleSplit = (idx: number) => {
+    setSlides(prev => {
+      const next = [...prev];
+      const slideToSplit = next[idx];
+      const lines = slideToSplit.text.split('\n');
+      if (lines.length <= 1) return prev;
+      
+      const mid = Math.ceil(lines.length / 2);
+      const firstHalf = lines.slice(0, mid).join('\n');
+      const secondHalf = lines.slice(mid).join('\n');
+      
+      const slide1 = { ...slideToSplit, text: firstHalf };
+      const slide2 = { ...slideToSplit, text: secondHalf, id: `slide-${Date.now()}-${Math.random().toString(36).substring(2, 6)}` };
+      
+      next[idx] = slide1;
+      next.splice(idx + 1, 0, slide2);
+      return next;
+    });
+  };
+
   const handleDelete = (idx: number) => {
     setSlides(prev => {
       const next = [...prev];
@@ -148,13 +181,23 @@ export function EditSongPage({ song, initialSlideIndex = 0, onSave, onClose }: E
            <h2 className="text-sm font-semibold text-neutral-300">Slides</h2>
            <span className="text-xs text-neutral-500">Ctrl+A to select all</span>
         </div>
-        <div className="flex-1 overflow-y-auto p-2 space-y-2 custom-scrollbar">
+        <div 
+          className="flex-1 overflow-y-auto p-2 space-y-2 custom-scrollbar"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) {
+              setSelectedSlideIndices([]);
+            }
+          }}
+        >
            {slides.map((slide, idx) => {
               const isSelected = selectedSlideIndices.includes(idx);
               return (
                  <div 
                    key={slide.id}
-                   onClick={(e) => {
+                   onMouseDown={(e) => {
+                      e.stopPropagation();
+                      isDraggingSlideRef.current = true;
+                      dragStartSlideIdxRef.current = idx;
                       if (e.ctrlKey || e.metaKey) {
                          setSelectedSlideIndices(prev => 
                            prev.includes(idx) ? prev.filter(i => i !== idx) : [...prev, idx]
@@ -168,6 +211,15 @@ export function EditSongPage({ song, initialSlideIndex = 0, onSave, onClose }: E
                       } else {
                          setSelectedSlideIndices([idx]);
                          setSelectedWordIndices([]);
+                      }
+                   }}
+                   onMouseEnter={(e) => {
+                      if (isDraggingSlideRef.current && dragStartSlideIdxRef.current !== null) {
+                         const start = Math.min(dragStartSlideIdxRef.current, idx);
+                         const end = Math.max(dragStartSlideIdxRef.current, idx);
+                         const newSelection = [];
+                         for (let i = start; i <= end; i++) newSelection.push(i);
+                         setSelectedSlideIndices(newSelection);
                       }
                    }}
                    className={`
@@ -185,6 +237,9 @@ export function EditSongPage({ song, initialSlideIndex = 0, onSave, onClose }: E
                    <div className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 flex items-center bg-black/80 rounded overflow-hidden">
                      <button onClick={(e) => { e.stopPropagation(); toggleDisable(idx); }} className="p-1 hover:bg-white/20 text-neutral-400" title="Toggle Disable">
                         {slide.disabled ? <Eye size={12} /> : <EyeOff size={12} />}
+                     </button>
+                     <button onClick={(e) => { e.stopPropagation(); handleSplit(idx); }} className="p-1 hover:bg-white/20 text-neutral-400" title="Split Slide">
+                        <Split size={12} />
                      </button>
                      <button onClick={(e) => { e.stopPropagation(); handleDuplicate(idx); }} className="p-1 hover:bg-white/20 text-neutral-400" title="Duplicate">
                         <Copy size={12} />
@@ -210,102 +265,72 @@ export function EditSongPage({ song, initialSlideIndex = 0, onSave, onClose }: E
          </div>
          
          {activeSlide ? (
-           <div className="flex-1 overflow-y-auto p-8 flex flex-col items-center gap-8 custom-scrollbar">
-              <div 
-                 ref={previewRef}
-                 className={`w-full max-w-4xl aspect-video border border-neutral-800 rounded-lg bg-[#0a0a0a] shadow-xl relative overflow-hidden ${isEditingText ? 'ring-2 ring-blue-500' : ''}`}
-                 onClick={() => {
-                    if (!isEditingText) setSelectedWordIndices([]);
-                 }}
-                 onDoubleClick={() => setIsEditingText(true)}
-              >
-                 {bounds.width > 0 && (
+           <div 
+             className="flex-1 overflow-y-auto p-8 flex flex-col items-center gap-8 custom-scrollbar"
+             onMouseDown={(e) => {
+               if (e.target === e.currentTarget || (e.target as Element).closest('.workspace-bg')) {
+                 setSelectedWordIndices([]);
+               }
+             }}
+           >
+              <FixedStage className="w-full max-w-4xl aspect-video border border-neutral-800 rounded-lg bg-[#0a0a0a] shadow-xl workspace-bg">
+               {(scale) => (
+                 <div
+                   className="w-full h-full relative workspace-bg"
+                   onMouseDown={(e) => {
+                      if (e.target === e.currentTarget) {
+                        setSelectedWordIndices([]);
+                      }
+                   }}
+                 >
                    <Rnd
                      bounds="parent"
+                     scale={scale}
+                     cancel=".word-token"
                      dragHandleClassName="drag-handle"
                      position={{
-                       x: (activeSlide.styleOverrides?.layout?.x ?? 0) * bounds.width,
-                       y: (activeSlide.styleOverrides?.layout?.y ?? 0) * bounds.height
+                       x: (activeSlide.styleOverrides?.layout?.x ?? 0.05) * 1920,
+                       y: (activeSlide.styleOverrides?.layout?.y ?? 0.05) * 1080
                      }}
                      size={{
-                       width: (activeSlide.styleOverrides?.layout?.width ?? 1) * bounds.width,
-                       height: (activeSlide.styleOverrides?.layout?.height ?? 1) * bounds.height
+                       width: (activeSlide.styleOverrides?.layout?.width ?? 0.9) * 1920,
+                       height: (activeSlide.styleOverrides?.layout?.height ?? 0.9) * 1080
                      }}
                      onDragStop={(e, d) => {
                         updateSlideStyle({ 
                           layout: {
                             ...activeSlide.styleOverrides?.layout,
-                            x: d.x / bounds.width,
-                            y: d.y / bounds.height,
-                            width: activeSlide.styleOverrides?.layout?.width ?? 1,
-                            height: activeSlide.styleOverrides?.layout?.height ?? 1
+                            x: d.x / 1920,
+                            y: d.y / 1080,
+                            width: activeSlide.styleOverrides?.layout?.width ?? 0.9,
+                            height: activeSlide.styleOverrides?.layout?.height ?? 0.9
                           } 
                         });
                      }}
                      onResizeStop={(e, direction, refElem, delta, position) => {
                         updateSlideStyle({ 
                           layout: {
-                            x: position.x / bounds.width,
-                            y: position.y / bounds.height,
-                            width: refElem.offsetWidth / bounds.width,
-                            height: refElem.offsetHeight / bounds.height
+                            x: position.x / 1920,
+                            y: position.y / 1080,
+                            width: refElem.offsetWidth / 1920,
+                            height: refElem.offsetHeight / 1080
                           } 
                         });
                      }}
-                     className={`${isEditingText ? "border border-blue-500 bg-white/5" : "border border-transparent hover:border-neutral-500"} transition-colors`}
+                     className="border-2 border-red-500 transition-colors group"
                    >
-                      <div className="w-full h-full drag-handle cursor-move flex flex-col justify-center">
-                        {isEditingText ? (
-                          <textarea
-  autoFocus
-  className="
-    w-full h-full
-    bg-transparent
-    resize-none
-    outline-none
-    border-none
-    custom-scrollbar
-    font-display
-  "
-  style={{
-    ...activeSlide.styleOverrides?.global,
-    fontSize:
-      activeSlide.styleOverrides?.global?.fontSize ||
-      '2rem',
-    lineHeight:
-      activeSlide.styleOverrides?.global?.lineHeight ||
-      1.3,
-    textAlign:
-      (activeSlide.styleOverrides?.global
-        ?.textAlign as any) || 'left'
-  }}
-  value={activeSlide.text}
-  onChange={(e) => {
-    setSlides(prev => {
-      const next = [...prev];
-      next[activeSlideIndex] = {
-        ...next[activeSlideIndex],
-        text: e.target.value
-      };
-      return next;
-    });
-  }}
-  onBlur={() => setIsEditingText(false)}
-  onKeyDown={(e) => {
-    if (e.key === 'Escape') {
-      setIsEditingText(false);
-    }
-  }}
-/>
-                        ) : (
+                      <div className={`w-full h-full drag-handle cursor-move flex flex-col justify-center`}>
                           <SmartTextLayout
                              className="w-full h-full"
                              text={activeSlide.text}
                              source={activeSlide.source}
                              type={activeSlide.type}
-                             styleOverrides={{ ...activeSlide.styleOverrides, layout: undefined }}
+                             styleOverrides={activeSlide.styleOverrides}
+                             disableAbsoluteLayout={true}
                              selectedWordIndices={selectedWordIndices}
-                             onWordClick={(idx, e) => {
+                             onWordMouseDown={(idx, e) => {
+                                isDraggingWordRef.current = true;
+                                dragStartWordIdxRef.current = idx;
                                 if (e.ctrlKey || e.metaKey) {
                                    setSelectedWordIndices(prev => 
                                      prev.includes(idx) ? prev.filter(w => w !== idx) : [...prev, idx]
@@ -314,23 +339,22 @@ export function EditSongPage({ song, initialSlideIndex = 0, onSave, onClose }: E
                                    setSelectedWordIndices([idx]);
                                 }
                              }}
+                             onWordMouseEnter={(idx, e) => {
+                                if (isDraggingWordRef.current && dragStartWordIdxRef.current !== null) {
+                                   const start = Math.min(dragStartWordIdxRef.current, idx);
+                                   const end = Math.max(dragStartWordIdxRef.current, idx);
+                                   const newSelection = [];
+                                   for (let i = start; i <= end; i++) newSelection.push(i);
+                                   setSelectedWordIndices(newSelection);
+                                }
+                             }}
                           />
-                        )}
                       </div>
                    </Rnd>
-                 )}
                   
-                  {!isEditingText && (
-                     <div className="absolute top-2 right-2 flex gap-2 pointer-events-none">
-                        <button 
-                           onClick={(e) => { e.stopPropagation(); setIsEditingText(true); }}
-                           className="text-xs bg-black/50 hover:bg-black p-1.5 px-3 rounded text-neutral-400 hover:text-white transition-colors pointer-events-auto"
-                        >
-                           Edit Text
-                        </button>
-                     </div>
-                  )}
-              </div>
+                 </div>
+               )}
+              </FixedStage>
            </div>
          ) : (
            <div className="flex-1 flex items-center justify-center text-neutral-500">
@@ -353,6 +377,24 @@ export function EditSongPage({ song, initialSlideIndex = 0, onSave, onClose }: E
           </div>
           
           <div className="flex-1 overflow-y-auto p-4 space-y-6 custom-scrollbar">
+             {/* Edit Text */}
+             {selectedSlideIndices.length === 1 && activeSlide && (
+               <div className="space-y-3">
+                 <label className="text-xs font-semibold text-neutral-400 uppercase tracking-wider">Slide Text</label>
+                 <textarea 
+                   className="w-full h-32 bg-neutral-800 border-none rounded p-3 text-sm text-white outline-none focus:ring-1 focus:ring-blue-500 custom-scrollbar resize-y"
+                   value={activeSlide.text}
+                   onChange={(e) => {
+                       setSlides(prev => {
+                          const next = [...prev];
+                          next[activeSlideIndex] = { ...next[activeSlideIndex], text: e.target.value };
+                          return next;
+                       });
+                   }}
+                 />
+               </div>
+             )}
+
              {/* Text Style */}
              <div className="space-y-3">
                <label className="text-xs font-semibold text-neutral-400 uppercase tracking-wider">Style</label>
@@ -431,13 +473,22 @@ export function EditSongPage({ song, initialSlideIndex = 0, onSave, onClose }: E
              
              {/* Size Adjustments */}
              <div className="space-y-3">
-                <label className="text-xs font-semibold text-neutral-400 uppercase tracking-wider">Font Size (%)</label>
-                <input 
-                  type="range" 
-                  min="50" max="200" defaultValue="100"
-                  className="w-full accent-blue-500"
-                  onChange={(e) => updateSlideStyle({ '--font-scale': parseInt(e.target.value) / 100 } as any)}
-                />
+                <label className="text-xs font-semibold text-neutral-400 uppercase tracking-wider">Font Size (px)</label>
+                <div className="flex items-center gap-2">
+                  <input 
+                    type="number" 
+                    min="10" max="400" 
+                    value={parseInt(
+                      (selectedWordIndices.length > 0 
+                        ? activeSlide?.styleOverrides?.words?.[selectedWordIndices[0]]?.fontSize 
+                        : activeSlide?.styleOverrides?.global?.fontSize
+                      ) as string || (activeSlide?.type === 'scripture' ? '90' : '110')
+                    )}
+                    className="w-full bg-neutral-800 border-none rounded p-2 text-sm text-white outline-none focus:ring-1 focus:ring-blue-500"
+                    onChange={(e) => updateSlideStyle({ fontSize: `${e.target.value}px` })}
+                  />
+                  <span className="text-sm text-neutral-500">px</span>
+                </div>
              </div>
              
              <div className="pt-4 border-t border-neutral-800">

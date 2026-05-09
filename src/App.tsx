@@ -5,13 +5,16 @@ import {
   Settings, MonitorPlay, Mic, BookOpen, Music, Image as ImageIcon, 
   Plus, Search, List, Grid, X, LayoutTemplate, Layers, Play,
   SquareSquare, MonitorOff, MonitorUp, EyeOff, FileText,
-  Activity, Upload, ExternalLink, Edit2, Copy, Trash, GripVertical
+  Activity, Upload, ExternalLink, Edit2, Copy, Trash, GripVertical, Split
 } from 'lucide-react';
 
+import { MediaLibrary } from './components/MediaLibrary';
 import { AudioModule } from './components/AudioModule';
 import { AddSongModal } from './components/AddSongModal';
 import { EditSongPage } from './components/EditSongPage';
+import { get, set } from 'idb-keyval';
 import { SmartTextLayout } from './components/SmartTextLayout';
+import { FixedStage } from './components/FixedStage';
 import { BibleVersion, getBibleList, getBible, saveBible, deleteBible, initDatabase } from './lib/bibleDb';
 import { parseBibleXml } from './lib/xmlParser';
 import { BIBLE_BOOKS } from './lib/parser';
@@ -35,7 +38,7 @@ export type SlideDefinition = {
 
 export type PresentState = {
   slide: SlideDefinition | null;
-  globalBackground: string | null;
+  globalBackground: { url: string; type: 'image' | 'video' } | null;
   clearText: boolean;
 };
 
@@ -135,6 +138,20 @@ function ControlPanel() {
   
   // Songs Data
   const [songsList, setSongsList] = useState(MOCK_SONGS);
+
+  useEffect(() => {
+    get('songsList').then((val) => {
+      if (val) {
+        setSongsList(val);
+      }
+    });
+  }, []);
+
+  useEffect(() => {
+    if (songsList !== MOCK_SONGS) {
+      set('songsList', songsList).catch(() => {});
+    }
+  }, [songsList]);
   
   // Context Menu state
   const [contextMenu, setContextMenu] = useState<{ x: number, y: number, type: 'song'|'bible'|'slide', id: string | number } | null>(null);
@@ -166,7 +183,7 @@ function ControlPanel() {
   
   const [liveState, setLiveState] = useState<PresentState>({
     slide: null,
-    globalBackground: MOCK_MEDIA[0].url,
+    globalBackground: null,
     clearText: false
   });
 
@@ -203,6 +220,13 @@ function ControlPanel() {
   useEffect(() => {
     const channel = new BroadcastChannel(CHANNEL_NAME);
     channel.postMessage(liveState);
+    
+    // Listen for requests from new projector windows
+    channel.onmessage = (event) => {
+      if (event.data?.type === 'REQUEST_CURRENT_STATE') {
+        channel.postMessage(liveState);
+      }
+    };
     return () => channel.close();
   }, [liveState]);
 
@@ -355,8 +379,8 @@ function ControlPanel() {
     setBibleSearchResults(results);
   };
 
-  const setGlobalBackground = (url: string) => {
-    setLiveState(prev => ({ ...prev, globalBackground: url }));
+  const setGlobalBackground = (url: string, type: 'image' | 'video' = 'image') => {
+    setLiveState(prev => ({ ...prev, globalBackground: { url, type } }));
   };
 
   const toggleClearText = () => {
@@ -384,6 +408,36 @@ function ControlPanel() {
     });
     
     setEditingSlideIndex(null);
+  };
+
+  const handleSplitSlide = (index: number) => {
+    if (activeTab !== 'songs' || !songsList[activeItemIndex]) return;
+    
+    setSongsList(prev => {
+      const newList = [...prev];
+      const song = { ...newList[activeItemIndex] };
+      const slides = [...song.slides];
+      
+      const slideToSplit = slides[index];
+      const text = slideToSplit.text;
+      
+      const lines = text.split('\n');
+      if (lines.length <= 1) return prev;
+
+      const mid = Math.ceil(lines.length / 2);
+      const firstHalf = lines.slice(0, mid).join('\n');
+      const secondHalf = lines.slice(mid).join('\n');
+
+      const slide1 = { ...slideToSplit, text: firstHalf };
+      const slide2 = { ...slideToSplit, text: secondHalf, id: `slide-${Date.now()}-${Math.random().toString(36).substring(2, 9)}` };
+      
+      slides[index] = slide1;
+      slides.splice(index + 1, 0, slide2);
+      
+      song.slides = slides;
+      newList[activeItemIndex] = song;
+      return newList;
+    });
   };
 
   const handleDuplicateSlide = (index: number) => {
@@ -490,12 +544,18 @@ function ControlPanel() {
                            <div 
                              key={slide.id}
                              onClick={() => goLive(slide)}
-                             className={`w-48 aspect-video rounded-md p-3 cursor-pointer flex flex-col justify-center items-center text-center transition-all border-2
-                               ${isLive ? 'bg-blue-600/20 border-blue-500 text-white' : 'bg-neutral-800 border-neutral-700 hover:border-neutral-500 text-neutral-300 hover:text-white'}
+                             className={`w-48 aspect-video rounded-md cursor-pointer flex flex-col justify-center items-center text-center transition-all border-2 overflow-hidden relative
+                               ${isLive ? 'border-blue-500 ring-2 ring-blue-500/50' : 'bg-[#0a0a0a] border-neutral-700 hover:border-neutral-500'}
                              `}
                            >
-                             <p className="text-sm font-medium line-clamp-4 whitespace-pre-wrap leading-tight">{slide.text}</p>
-                             {slide.source && <span className="text-xs mt-2 text-blue-300">{slide.source}</span>}
+                             <FixedStage className="w-full h-full pointer-events-none">
+                                <SmartTextLayout 
+                                   text={slide.text}
+                                   source={slide.source}
+                                   type={slide.type}
+                                   styleOverrides={slide.styleOverrides}
+                                />
+                             </FixedStage>
                            </div>
                          );
                        })}
@@ -562,20 +622,7 @@ function ControlPanel() {
 
     if (activeTab === 'media') {
       return (
-        <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
-          {MOCK_MEDIA.map(media => (
-            <div 
-              key={media.id}
-              onClick={() => setGlobalBackground(media.url)}
-              className="relative aspect-video rounded-md overflow-hidden cursor-pointer group border-2 border-transparent hover:border-blue-500"
-            >
-              <img src={media.url} alt={media.name} className="absolute inset-0 w-full h-full object-cover" />
-              <div className="absolute inset-x-0 bottom-0 bg-black/60 p-2 text-xs truncate">
-                {media.name}
-              </div>
-            </div>
-          ))}
-        </div>
+        <MediaLibrary onSelectBackground={setGlobalBackground} />
       );
     }
 
@@ -598,6 +645,15 @@ function ControlPanel() {
                   next[idx] = { ...next[idx], slides: updatedSlides };
                }
                return next;
+            });
+            setLiveState(prev => {
+               if (prev.slide) {
+                 const matchingUpdatedSlide = updatedSlides.find(s => s.id === prev.slide!.id);
+                 if (matchingUpdatedSlide) {
+                   return { ...prev, slide: matchingUpdatedSlide };
+                 }
+               }
+               return prev;
             });
           }}
           onClose={() => {
@@ -631,15 +687,22 @@ function ControlPanel() {
               onClick={() => {
                  if (!slide.disabled) goLive(slide);
               }}
-              className={`group w-40 aspect-video rounded-md p-3 cursor-pointer flex flex-col justify-center items-center text-center transition-all border-2 relative select-none
+              className={`group w-40 aspect-video rounded-md cursor-pointer flex flex-col justify-center items-center text-center transition-all border-2 relative select-none overflow-hidden
                 ${slide.disabled ? 'opacity-30 cursor-not-allowed' : ''}
-                ${isLive ? 'bg-blue-600/20 border-blue-500 text-white' : 'bg-neutral-800 border-neutral-700 hover:border-neutral-500 text-neutral-300 hover:text-white'}
+                ${isLive ? 'border-blue-500 ring-2 ring-blue-500/50' : 'bg-[#0a0a0a] border-neutral-700 hover:border-neutral-500'}
                 ${dragOverSlideIndex === i ? 'border-dashed border-blue-400 opacity-70' : ''}
               `}
             >
-              <p className="text-sm font-medium line-clamp-4 pointer-events-none whitespace-pre-wrap leading-tight">{slide.text}</p>
-              {slide.source && <span className="text-xs mt-2 text-blue-300 pointer-events-none">{slide.source}</span>}
-              <div className="absolute bottom-1 right-2 text-[10px] text-neutral-500 pointer-events-none">{i + 1}</div>
+              <FixedStage className="w-full h-full pointer-events-none">
+                 <SmartTextLayout 
+                     text={slide.text}
+                     source={slide.source}
+                     type={slide.type}
+                     styleOverrides={slide.styleOverrides}
+                 />
+              </FixedStage>
+              
+              <div className="absolute bottom-1 right-2 text-[10px] text-neutral-500 pointer-events-none z-10 font-mono bg-black/50 px-1 rounded">{i + 1}</div>
               
               {/* Action Bar (Top Right) */}
               <div className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 flex items-center bg-black/60 rounded overflow-hidden transition-opacity">
@@ -737,48 +800,56 @@ function ControlPanel() {
         <div className="flex-1 flex flex-col overflow-hidden">
           
           {/* Top Row: Preview & Live Displays */}
-          <div className="h-48 lg:h-64 bg-[#141414] border-b border-neutral-800 flex items-center justify-center gap-8 lg:gap-16 shrink-0 p-4 shadow-sm z-10 pb-6">
+          <div className="bg-[#141414] border-b border-neutral-800 flex items-center justify-center gap-8 lg:gap-16 shrink-0 p-6 shadow-sm z-10">
              {/* Preview (Next) */}
-             <div className="flex flex-col h-full aspect-video">
+             <div>
                <div className="mb-2 text-xs font-bold uppercase tracking-widest text-neutral-400">Preview (Next)</div>
-               <div className="flex-1 relative bg-[#1a1a1a] rounded-lg border border-neutral-800 overflow-hidden flex items-center justify-center shadow-inner">
+               <div className="h-32 lg:h-40 xl:h-52 aspect-video relative bg-[#1a1a1a] rounded-lg border border-neutral-800 overflow-hidden flex items-center justify-center shadow-inner">
                  <span className="text-neutral-600 text-sm font-medium">Select a slide...</span>
                </div>
              </div>
 
              {/* Live Panel */}
-             <div className="flex flex-col h-full aspect-video">
+             <div>
                <div className="mb-2 flex justify-between items-center">
                  <span className="text-xs font-bold uppercase tracking-widest text-neutral-400">Live Output</span>
                  <div className={`h-2 w-2 rounded-full ${liveState.slide || liveState.globalBackground ? 'bg-red-500 shadow-[0_0_8px_rgba(239,68,68,1)]' : 'bg-neutral-700'}`}></div>
                </div>
-               <div className="flex-1 relative bg-black rounded-lg border border-neutral-600 overflow-hidden shadow-2xl ring-1 ring-black ring-opacity-50">
-                 {/* Background */}
-                 {liveState.globalBackground && (
-                    <img 
-                       src={liveState.globalBackground} 
-                       className="absolute inset-0 w-full h-full object-cover opacity-60"
-                       alt="Live BG"
-                     />
-                 )}
-                 {/* Text Layer */}
-                 {!liveState.clearText && liveState.slide && (
-                   <div className="absolute inset-0 z-10 flex">
-                     <SmartTextLayout 
-                       text={liveState.slide.text}
-                       source={liveState.slide.source}
-                       type={liveState.slide.type}
-                       styleOverrides={liveState.slide.styleOverrides}
-                     />
-                   </div>
-                 )}
-                 
-                 {/* Placeholder if empty */}
-                 {!liveState.globalBackground && (!liveState.slide || liveState.clearText) && (
-                    <div className="absolute inset-0 flex items-center justify-center bg-[#0a0a0a]">
-                      <span className="text-neutral-700 font-bold tracking-widest uppercase text-3xl">Black</span>
-                    </div>
-                 )}
+              <div className="h-32 lg:h-40 xl:h-52 aspect-video relative rounded-lg border border-neutral-600 overflow-hidden shadow-2xl ring-1 ring-black ring-opacity-50">
+                 <FixedStage className="w-full h-full bg-black">
+                   {/* Background */}
+                   {liveState.globalBackground && liveState.globalBackground.type === 'video' ? (
+                      <video 
+                         src={liveState.globalBackground.url} 
+                         className="absolute inset-0 w-full h-full object-cover opacity-60 pointer-events-none"
+                         autoPlay loop muted playsInline
+                       />
+                   ) : liveState.globalBackground ? (
+                      <img 
+                         src={liveState.globalBackground.url} 
+                         className="absolute inset-0 w-full h-full object-cover opacity-60 pointer-events-none"
+                         alt="Live BG"
+                       />
+                   ) : null}
+                   {/* Text Layer */}
+                   {!liveState.clearText && liveState.slide && (
+                     <div className="absolute inset-0 z-10 flex">
+                       <SmartTextLayout 
+                         text={liveState.slide.text}
+                         source={liveState.slide.source}
+                         type={liveState.slide.type}
+                         styleOverrides={liveState.slide.styleOverrides}
+                       />
+                     </div>
+                   )}
+                   
+                   {/* Placeholder if empty */}
+                   {!liveState.globalBackground && (!liveState.slide || liveState.clearText) && (
+                      <div className="absolute inset-0 flex items-center justify-center bg-[#0a0a0a]">
+                        <span className="text-neutral-700 font-bold tracking-widest uppercase text-3xl">Black</span>
+                      </div>
+                   )}
+                 </FixedStage>
                </div>
              </div>
           </div>
@@ -840,72 +911,74 @@ function ControlPanel() {
           <div className="flex-1 flex overflow-hidden">
           
           {/* List Panel (Left) */}
-          <div className="w-64 bg-[#1a1a1a] border-r border-neutral-800 flex flex-col flex-shrink-0">
-            <div className="p-3 border-b border-neutral-800">
-               <div className="relative">
-                 <Search size={14} className="absolute left-2.5 top-2.5 text-neutral-500" />
-                 <input 
-                   type="text" 
-                   placeholder={`Search ${activeTab}...`} 
-                   className="w-full bg-[#252525] border border-neutral-700 rounded text-sm px-8 py-2 focus:outline-none focus:border-blue-500 transition-colors"
-                 />
-               </div>
-            </div>
-            <div className="flex-1 overflow-y-auto relative">
-              {activeTab === 'songs' && songsList.map((song, i) => (
-                <div 
-                  key={song.id}
-                  onContextMenu={(e) => handleContextMenu(e, 'song', song.id)}
-                  onClick={() => setActiveItemIndex(i)}
-                  className={`group relative px-4 py-3 cursor-pointer border-b border-neutral-800/50 flex items-center transition-colors ${activeItemIndex === i ? 'bg-blue-600/10 border-l-2 border-l-blue-500' : 'hover:bg-[#252525] border-l-2 border-l-transparent'}`}
-                >
-                  <div className="flex-1 flex items-center gap-3 min-w-0">
-                     <FileText size={16} className="text-neutral-500 shrink-0" />
-                     <span className="text-sm font-medium truncate">{song.title}</span>
-                  </div>
-                </div>
-              ))}
-              {activeTab === 'songs' && (
-                <button
-                  onClick={() => setIsAddSongModalOpen(true)}
-                  className="absolute bottom-4 right-4 w-12 h-12 bg-blue-600 hover:bg-blue-500 text-white rounded-full flex items-center justify-center shadow-lg shadow-blue-900/20 transition-all hover:scale-105"
-                  title="Add New Song"
-                >
-                  <Plus size={24} />
-                </button>
-              )}
-               {activeTab === 'bibles' && (
-                 <div className="flex flex-col h-full">
-                    <div className="p-3 border-b border-neutral-800">
-                       <label className="flex items-center justify-center gap-2 w-full bg-blue-600/10 hover:bg-blue-600/20 text-blue-400 text-sm py-2 rounded border border-blue-500/30 cursor-pointer transition-colors">
-                          {isUploading ? <Activity size={14} className="animate-spin" /> : <Upload size={14} />}
-                          {isUploading ? 'Parsing XML...' : 'Import XML Bible'}
-                          <input type="file" accept=".xml" className="hidden" onChange={handleFileUpload} disabled={isUploading} />
-                       </label>
-                    </div>
-                    {bibleList.length === 0 ? (
-                       <div className="p-6 text-center text-sm text-neutral-500">
-                          No Bibles imported.<br/>Upload a Zefania or OpenSong XML file.
-                       </div>
-                    ) : (
-                       bibleList.map((bible) => (
-                        <div 
-                          key={bible.id}
-                          onContextMenu={(e) => handleContextMenu(e, 'bible', bible.id)}
-                          onClick={() => setActiveBibleId(bible.id)}
-                          className={`group relative px-4 py-3 cursor-pointer border-b border-neutral-800/50 flex items-center transition-colors ${activeBibleId === bible.id ? 'bg-blue-600/10 border-l-2 border-l-blue-500' : 'hover:bg-[#252525] border-l-2 border-l-transparent'}`}
-                        >
-                          <div className="flex-1 flex items-center gap-3 min-w-0">
-                             <BookOpen size={16} className="text-neutral-500 shrink-0" />
-                             <span className="text-sm font-medium truncate">{bible.name}</span>
-                          </div>
-                        </div>
-                      ))
-                    )}
+          {(activeTab !== 'media' && activeTab !== 'audio') && (
+            <div className="w-64 bg-[#1a1a1a] border-r border-neutral-800 flex flex-col flex-shrink-0">
+              <div className="p-3 border-b border-neutral-800">
+                 <div className="relative">
+                   <Search size={14} className="absolute left-2.5 top-2.5 text-neutral-500" />
+                   <input 
+                     type="text" 
+                     placeholder={`Search ${activeTab}...`} 
+                     className="w-full bg-[#252525] border border-neutral-700 rounded text-sm px-8 py-2 focus:outline-none focus:border-blue-500 transition-colors"
+                   />
                  </div>
-              )}
+              </div>
+              <div className="flex-1 overflow-y-auto relative">
+                {activeTab === 'songs' && songsList.map((song, i) => (
+                  <div 
+                    key={song.id}
+                    onContextMenu={(e) => handleContextMenu(e, 'song', song.id)}
+                    onClick={() => setActiveItemIndex(i)}
+                    className={`group relative px-4 py-3 cursor-pointer border-b border-neutral-800/50 flex items-center transition-colors ${activeItemIndex === i ? 'bg-blue-600/10 border-l-2 border-l-blue-500' : 'hover:bg-[#252525] border-l-2 border-l-transparent'}`}
+                  >
+                    <div className="flex-1 flex items-center gap-3 min-w-0">
+                       <FileText size={16} className="text-neutral-500 shrink-0" />
+                       <span className="text-sm font-medium truncate">{song.title}</span>
+                    </div>
+                  </div>
+                ))}
+                {activeTab === 'songs' && (
+                  <button
+                    onClick={() => setIsAddSongModalOpen(true)}
+                    className="absolute bottom-4 right-4 w-12 h-12 bg-blue-600 hover:bg-blue-500 text-white rounded-full flex items-center justify-center shadow-lg shadow-blue-900/20 transition-all hover:scale-105"
+                    title="Add New Song"
+                  >
+                    <Plus size={24} />
+                  </button>
+                )}
+                 {activeTab === 'bibles' && (
+                   <div className="flex flex-col h-full">
+                      <div className="p-3 border-b border-neutral-800">
+                         <label className="flex items-center justify-center gap-2 w-full bg-blue-600/10 hover:bg-blue-600/20 text-blue-400 text-sm py-2 rounded border border-blue-500/30 cursor-pointer transition-colors">
+                            {isUploading ? <Activity size={14} className="animate-spin" /> : <Upload size={14} />}
+                            {isUploading ? 'Parsing XML...' : 'Import XML Bible'}
+                            <input type="file" accept=".xml" className="hidden" onChange={handleFileUpload} disabled={isUploading} />
+                         </label>
+                      </div>
+                      {bibleList.length === 0 ? (
+                         <div className="p-6 text-center text-sm text-neutral-500">
+                            No Bibles imported.<br/>Upload a Zefania or OpenSong XML file.
+                         </div>
+                      ) : (
+                         bibleList.map((bible) => (
+                          <div 
+                            key={bible.id}
+                            onContextMenu={(e) => handleContextMenu(e, 'bible', bible.id)}
+                            onClick={() => setActiveBibleId(bible.id)}
+                            className={`group relative px-4 py-3 cursor-pointer border-b border-neutral-800/50 flex items-center transition-colors ${activeBibleId === bible.id ? 'bg-blue-600/10 border-l-2 border-l-blue-500' : 'hover:bg-[#252525] border-l-2 border-l-transparent'}`}
+                          >
+                            <div className="flex-1 flex items-center gap-3 min-w-0">
+                               <BookOpen size={16} className="text-neutral-500 shrink-0" />
+                               <span className="text-sm font-medium truncate">{bible.name}</span>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                   </div>
+                )}
+              </div>
             </div>
-          </div>
+          )}
 
           {/* Workspace Panel (Middle) */}
           <div className="flex-1 flex flex-col bg-[#141414] overflow-hidden min-w-0">
@@ -969,6 +1042,15 @@ function ControlPanel() {
                  <Copy size={14}/> Duplicate
                </button>
                <button
+                 className="w-full text-left px-4 py-2 hover:bg-[#333] text-neutral-300 hover:text-white text-sm transition-colors flex items-center gap-2"
+                 onClick={() => {
+                   handleSplitSlide(contextMenu.id as number);
+                   setContextMenu(null);
+                 }}
+               >
+                 <Split size={14}/> Split
+               </button>
+               <button
                  className="w-full text-left px-4 py-2 hover:bg-red-500/20 text-red-500 text-sm transition-colors flex items-center gap-2"
                  onClick={() => {
                    handleDeleteSlide(contextMenu.id as number);
@@ -1030,23 +1112,31 @@ function ProjectorView() {
 
   return (
     <div className="w-screen h-screen bg-black flex flex-col items-center justify-center overflow-hidden relative cursor-none select-none">
-      {liveState.globalBackground && (
-        <img 
-          src={liveState.globalBackground} 
-          className="absolute inset-0 w-full h-full object-cover opacity-80 transition-opacity duration-500 ease-in-out"
-          alt="bg"
-        />
-      )}
-      
-      {!liveState.clearText && liveState.slide && (
-         <SmartTextLayout 
-            text={liveState.slide.text}
-            source={liveState.slide.source}
-            type={liveState.slide.type}
-            styleOverrides={liveState.slide.styleOverrides}
-            className="relative z-10 w-full h-full animate-in fade-in duration-300"
-         />
-      )}
+      <FixedStage className="w-full h-full relative">
+        {liveState.globalBackground && liveState.globalBackground.type === 'video' ? (
+          <video 
+            src={liveState.globalBackground.url} 
+            className="absolute inset-0 w-full h-full object-cover opacity-80 transition-opacity duration-500 ease-in-out pointer-events-none"
+            autoPlay loop muted playsInline
+          />
+        ) : liveState.globalBackground ? (
+          <img 
+            src={liveState.globalBackground.url} 
+            className="absolute inset-0 w-full h-full object-cover opacity-80 transition-opacity duration-500 ease-in-out pointer-events-none"
+            alt="bg"
+          />
+        ) : null}
+        
+        {!liveState.clearText && liveState.slide && (
+           <SmartTextLayout 
+              text={liveState.slide.text}
+              source={liveState.slide.source}
+              type={liveState.slide.type}
+              styleOverrides={liveState.slide.styleOverrides}
+              className="relative z-10 w-full h-full animate-in fade-in duration-300"
+           />
+        )}
+      </FixedStage>
     </div>
   );
 }
