@@ -2,7 +2,8 @@ import React, { useMemo, useEffect, useRef, useState } from 'react';
 import { tokenize, Token } from '../lib/TokenEngine';
 
 interface SmartTextLayoutProps {
-  text: string;
+  text?: string;
+  lines?: string[];
   source?: string;
   type?: 'lyrics' | 'scripture' | string;
   className?: string;
@@ -19,8 +20,13 @@ interface SmartTextLayoutProps {
   disableAbsoluteLayout?: boolean;
 }
 
-export function SmartTextLayout({ text, source, type, className = '', styleOverrides, onWordClick, onWordMouseDown, onWordMouseEnter, onWordMouseUp, selectedWordIndices, disableAbsoluteLayout }: SmartTextLayoutProps) {
-  const tokens = useMemo(() => tokenize(text, undefined, styleOverrides?.words), [text, styleOverrides]);
+export function SmartTextLayout({ text, lines, source, type, className = '', styleOverrides, onWordClick, onWordMouseDown, onWordMouseEnter, onWordMouseUp, selectedWordIndices, disableAbsoluteLayout }: SmartTextLayoutProps) {
+  const renderedLines = useMemo(() => {
+     if (lines) return lines.map(l => tokenize(l, undefined, styleOverrides?.words));
+     if (text) return text.split('\n').map(l => tokenize(l, undefined, styleOverrides?.words));
+     return [];
+  }, [text, lines, styleOverrides]);
+  
   const containerRef = useRef<HTMLDivElement>(null);
   const textContainerRef = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(1);
@@ -104,7 +110,7 @@ export function SmartTextLayout({ text, source, type, className = '', styleOverr
           transformOrigin: origin
         }}
       >
-        <h1 
+        <div 
           className={`font-display font-bold text-white uppercase ${align === 'justify' ? 'w-full block' : 'inline-block'} select-none`}
           style={{
             textAlign: align as any, // overrides
@@ -112,49 +118,52 @@ export function SmartTextLayout({ text, source, type, className = '', styleOverr
             lineHeight: 1.3,
             letterSpacing: type === 'scripture' ? 'normal' : '0.02em',
             textShadow: '0 8px 16px rgba(0,0,0,0.8), 0 2px 4px rgba(0,0,0,0.5)',
-            whiteSpace: 'pre-wrap',
             ...styleOverrides?.global
           }}
         >
-          {tokens.map((token: Token) => {
-            const isClickable = (!!onWordClick || !!onWordMouseDown) && token.wordIndex !== undefined;
-            const isSelected = isClickable && selectedWordIndices?.includes(token.wordIndex as number);
-            
-            return (
-              <span 
-                 key={token.id} 
-                 onMouseDown={(e) => {
-                   if (isClickable && onWordMouseDown) {
-                     e.stopPropagation();
-                     onWordMouseDown(token.wordIndex as number, e);
-                   }
-                 }}
-                 onMouseEnter={(e) => {
-                   if (isClickable && onWordMouseEnter) {
-                     e.stopPropagation();
-                     onWordMouseEnter(token.wordIndex as number, e);
-                   }
-                 }}
-                 onMouseUp={(e) => {
-                   if (isClickable && onWordMouseUp) {
-                     e.stopPropagation();
-                     onWordMouseUp(token.wordIndex as number, e);
-                   }
-                 }}
-                 onClick={(e) => {
-                   if (isClickable) {
-                     e.stopPropagation();
-                     if (onWordClick) onWordClick(token.wordIndex as number, e);
-                   }
-                 }}
-                 className={`transition-colors duration-100 word-token ${isClickable ? 'cursor-pointer rounded hover:bg-white/10' : ''} ${isSelected ? 'bg-[#2563eb] text-white' : ''}`}
-                 style={token.computedStyles}
-              >
-                {token.value}
-              </span>
-            );
-          })}
-        </h1>
+          {renderedLines.map((lineTokens, lineIdx) => (
+             <div key={`line-${lineIdx}`} className="min-h-[1em]">
+               {lineTokens.map((token: Token) => {
+                 const isClickable = (!!onWordClick || !!onWordMouseDown) && token.wordIndex !== undefined;
+                 const isSelected = isClickable && selectedWordIndices?.includes(token.wordIndex as number);
+                 
+                 return (
+                   <span 
+                      key={token.id} 
+                      onMouseDown={(e) => {
+                        if (isClickable && onWordMouseDown) {
+                          e.stopPropagation();
+                          onWordMouseDown(token.wordIndex as number, e);
+                        }
+                      }}
+                      onMouseEnter={(e) => {
+                        if (isClickable && onWordMouseEnter) {
+                          e.stopPropagation();
+                          onWordMouseEnter(token.wordIndex as number, e);
+                        }
+                      }}
+                      onMouseUp={(e) => {
+                        if (isClickable && onWordMouseUp) {
+                          e.stopPropagation();
+                          onWordMouseUp(token.wordIndex as number, e);
+                        }
+                      }}
+                      onClick={(e) => {
+                        if (isClickable) {
+                          e.stopPropagation();
+                          if (onWordClick) onWordClick(token.wordIndex as number, e);
+                        }
+                      }}
+                      className={`transition-colors duration-100 word-token ${isClickable ? 'cursor-pointer rounded hover:bg-white/10' : ''} ${isSelected ? 'bg-[#2563eb] text-white' : ''}`}
+                      style={token.computedStyles}
+                   >
+                     {token.value}
+                   </span>
+                 );
+               })}
+             </div>
+          ))}
+        </div>
         {source && (
           <h2 
             className="mt-6 text-2xl font-heading font-bold text-amber-400 text-center tracking-wide"

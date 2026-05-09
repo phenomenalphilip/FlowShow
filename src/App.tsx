@@ -1,12 +1,20 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { 
   Settings, MonitorPlay, Mic, BookOpen, Music, Image as ImageIcon, 
   Plus, Search, List, Grid, X, LayoutTemplate, Layers, Play,
   SquareSquare, MonitorOff, MonitorUp, EyeOff, FileText,
-  Activity, Upload, ExternalLink, Edit2, Copy, Trash, GripVertical, Split
+  Activity, Upload, ExternalLink, Edit2, Copy, Trash, GripVertical, Split,
+  Pause, Volume2, VolumeX
 } from 'lucide-react';
+
+function formatTime(seconds: number) {
+  if (isNaN(seconds) || !isFinite(seconds)) return "0:00";
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s < 10 ? '0' : ''}${s}`;
+}
 
 import { MediaLibrary } from './components/MediaLibrary';
 import { AudioModule } from './components/AudioModule';
@@ -40,6 +48,11 @@ export type PresentState = {
   slide: SlideDefinition | null;
   globalBackground: { url: string; type: 'image' | 'video' } | null;
   clearText: boolean;
+  videoInitState?: {
+    time: number;
+    muted: boolean;
+    playing: boolean;
+  };
 };
 
 const CHANNEL_NAME = 'flowshow_presence_channel';
@@ -187,9 +200,82 @@ function ControlPanel() {
     clearText: false
   });
 
+  const liveVideoRef = useRef<HTMLVideoElement>(null);
+  const [videoDuration, setVideoDuration] = useState(0);
+  const [videoCurrentTime, setVideoCurrentTime] = useState(0);
+  const [isVideoPlaying, setIsVideoPlaying] = useState(true);
+  const [isVideoMuted, setIsVideoMuted] = useState(true);
+
+  useEffect(() => {
+    const video = liveVideoRef.current;
+    if (!video) return;
+
+    const handleTimeUpdate = () => setVideoCurrentTime(video.currentTime);
+    const handleDurationChange = () => setVideoDuration(video.duration);
+    const handlePlay = () => setIsVideoPlaying(true);
+    const handlePause = () => setIsVideoPlaying(false);
+
+    video.addEventListener('timeupdate', handleTimeUpdate);
+    video.addEventListener('durationchange', handleDurationChange);
+    video.addEventListener('play', handlePlay);
+    video.addEventListener('pause', handlePause);
+
+    return () => {
+      video.removeEventListener('timeupdate', handleTimeUpdate);
+      video.removeEventListener('durationchange', handleDurationChange);
+      video.removeEventListener('play', handlePlay);
+      video.removeEventListener('pause', handlePause);
+    };
+  }, [liveState.globalBackground]);
+
+  const broadcastVideoCommand = (command: string, value?: any) => {
+    const channel = new BroadcastChannel(CHANNEL_NAME);
+    channel.postMessage({ type: 'VIDEO_CMD', command, value });
+    channel.close();
+  };
+
+  const togglePlay = () => {
+    if (liveVideoRef.current) {
+      if (isVideoPlaying) {
+        liveVideoRef.current.pause();
+        broadcastVideoCommand('pause');
+      } else {
+        liveVideoRef.current.play();
+        broadcastVideoCommand('play');
+      }
+    }
+  };
+
+  const toggleMute = () => {
+    if (liveVideoRef.current) {
+      const newMuted = !isVideoMuted;
+      liveVideoRef.current.muted = newMuted;
+      setIsVideoMuted(newMuted);
+      broadcastVideoCommand('mute', newMuted);
+    }
+  };
+
+  const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (liveVideoRef.current) {
+      const time = parseFloat(e.target.value);
+      liveVideoRef.current.currentTime = time;
+      setVideoCurrentTime(time);
+      broadcastVideoCommand('seek', time);
+    }
+  };
+
   // Load bibles list on mount
   useEffect(() => {
     initDatabase().then(() => {
+      getBibleList().then(list => {
+        setBibleList(list);
+        if (list.length > 0) {
+          setActiveBibleId(list[0].id);
+        }
+      });
+    }).catch(err => {
+      console.error("InitDatabase Error:", err);
+      // Fallback: still try to load what we can
       getBibleList().then(list => {
         setBibleList(list);
         if (list.length > 0) {
@@ -224,11 +310,18 @@ function ControlPanel() {
     // Listen for requests from new projector windows
     channel.onmessage = (event) => {
       if (event.data?.type === 'REQUEST_CURRENT_STATE') {
-        channel.postMessage(liveState);
+        channel.postMessage({ 
+          ...liveState, 
+          videoInitState: { 
+             time: liveVideoRef.current?.currentTime || 0, 
+             muted: isVideoMuted, 
+             playing: isVideoPlaying 
+          } 
+        });
       }
     };
     return () => channel.close();
-  }, [liveState]);
+  }, [liveState, isVideoMuted, isVideoPlaying]);
 
   const openProjector = () => {
     setProjectorOpen(true);
@@ -360,7 +453,7 @@ function ControlPanel() {
            const v = matchedChapter.verses[i];
            results.push({
              id: `b-${matchedBook.name}-${cNum}-${v.v}`,
-             text: v.text,
+             text: v.lines.join('\n'),
              source: `${matchedBook.name} ${cNum}:${v.v}`,
              type: 'scripture'
            });
@@ -370,7 +463,7 @@ function ControlPanel() {
       // Show first few verses of the chapter
       results = matchedChapter.verses.slice(0, 10).map(v => ({
              id: `b-${matchedBook.name}-${cNum}-${v.v}`,
-             text: v.text,
+             text: v.lines.join('\n'),
              source: `${matchedBook.name} ${cNum}:${v.v}`,
              type: 'scripture'
       }));
@@ -594,7 +687,7 @@ function ControlPanel() {
                     {activeBibleBookIndex !== null && activeBibleChapterIndex !== null && activeBibleData?.books[activeBibleBookIndex]?.chapters[activeBibleChapterIndex]?.verses.map(verse => {
                        const slide: SlideDefinition = {
                           id: `b-${activeBibleData.books[activeBibleBookIndex].name}-${activeBibleData.books[activeBibleBookIndex].chapters[activeBibleChapterIndex].c}-${verse.v}`,
-                          text: verse.text,
+                          text: verse.lines.join('\n'),
                           source: `${activeBibleData.books[activeBibleBookIndex].name} ${activeBibleData.books[activeBibleBookIndex].chapters[activeBibleChapterIndex].c}:${verse.v}`,
                           type: 'scripture'
                        };
@@ -608,7 +701,7 @@ function ControlPanel() {
                           >
                              <div className="flex gap-4">
                                 <span className={`text-xs font-bold mt-0.5 shrink-0 w-6 text-right ${isLive ? 'text-blue-400' : 'text-neutral-500 group-hover:text-neutral-400'}`}>{verse.v}</span>
-                                <p className={`text-sm ${isLive ? 'text-white' : 'text-neutral-300 group-hover:text-white'}`}>{verse.text}</p>
+                                <p className={`text-sm ${isLive ? 'text-white' : 'text-neutral-300 group-hover:text-white'} whitespace-pre-wrap`}>{verse.lines.join('\n')}</p>
                              </div>
                           </div>
                        );
@@ -820,9 +913,10 @@ function ControlPanel() {
                    {/* Background */}
                    {liveState.globalBackground && liveState.globalBackground.type === 'video' ? (
                       <video 
+                         ref={liveVideoRef}
                          src={liveState.globalBackground.url} 
                          className="absolute inset-0 w-full h-full object-cover opacity-60 pointer-events-none"
-                         autoPlay loop muted playsInline
+                         autoPlay loop muted={isVideoMuted} playsInline
                        />
                    ) : liveState.globalBackground ? (
                       <img 
@@ -851,6 +945,28 @@ function ControlPanel() {
                    )}
                  </FixedStage>
                </div>
+               
+               {liveState.globalBackground?.type === 'video' && (
+                 <div className="mt-2 flex items-center gap-2 bg-[#1a1a1a] border border-neutral-800 rounded p-2 text-neutral-300 shadow-sm">
+                    <button onClick={togglePlay} className="hover:text-white hover:bg-neutral-800 p-1 rounded transition-colors">
+                      {isVideoPlaying ? <Pause size={14} /> : <Play size={14} />}
+                    </button>
+                    <button onClick={toggleMute} className="hover:text-white hover:bg-neutral-800 p-1 rounded transition-colors ml-1 cursor-pointer">
+                      {isVideoMuted ? <VolumeX size={14} /> : <Volume2 size={14} />}
+                    </button>
+                    <div className="text-[10px] text-neutral-500 font-mono w-8 text-right ml-1">{formatTime(videoCurrentTime)}</div>
+                    <input 
+                       type="range" 
+                       min="0" 
+                       step="0.1"
+                       max={videoDuration || 100} 
+                       value={videoCurrentTime}
+                       onChange={handleSeek}
+                       className="flex-1 h-1.5 bg-neutral-700 rounded-lg appearance-none cursor-pointer accent-blue-500 hover:accent-blue-400"
+                    />
+                    <div className="text-[10px] text-neutral-500 font-mono w-8">{formatTime(videoDuration)}</div>
+                 </div>
+               )}
              </div>
           </div>
 
@@ -1097,14 +1213,32 @@ function ProjectorView() {
     globalBackground: null,
     clearText: false
   });
+  const projectorVideoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
     const channel = new BroadcastChannel(CHANNEL_NAME);
     channel.postMessage({ type: 'REQUEST_CURRENT_STATE' });
     
     channel.onmessage = (event) => {
-      if (event.data && !event.data.type?.startsWith('REQUEST_')) {
+      if (event.data?.type === 'VIDEO_CMD') {
+        const { command, value } = event.data;
+        if (projectorVideoRef.current) {
+           if (command === 'play') projectorVideoRef.current.play().catch(console.error);
+           else if (command === 'pause') projectorVideoRef.current.pause();
+           else if (command === 'mute') projectorVideoRef.current.muted = value;
+           else if (command === 'seek') projectorVideoRef.current.currentTime = value;
+        }
+      } else if (event.data && !event.data.type?.startsWith('REQUEST_')) {
          setLiveState(event.data);
+         if (event.data.videoInitState && projectorVideoRef.current) {
+             projectorVideoRef.current.currentTime = event.data.videoInitState.time;
+             projectorVideoRef.current.muted = event.data.videoInitState.muted;
+             if (event.data.videoInitState.playing) {
+                 projectorVideoRef.current.play().catch(console.error);
+             } else {
+                 projectorVideoRef.current.pause();
+             }
+         }
       }
     };
     return () => channel.close();
@@ -1115,9 +1249,10 @@ function ProjectorView() {
       <FixedStage className="w-full h-full relative">
         {liveState.globalBackground && liveState.globalBackground.type === 'video' ? (
           <video 
+            ref={projectorVideoRef}
             src={liveState.globalBackground.url} 
             className="absolute inset-0 w-full h-full object-cover opacity-80 transition-opacity duration-500 ease-in-out pointer-events-none"
-            autoPlay loop muted playsInline
+            autoPlay loop playsInline
           />
         ) : liveState.globalBackground ? (
           <img 

@@ -2,7 +2,7 @@ import { get, set, keys, del } from 'idb-keyval';
 
 export type Verse = {
   v: number;
-  text: string;
+  lines: string[];
 };
 
 export type Chapter = {
@@ -25,16 +25,26 @@ export type BibleVersion = {
 const memoryBibles: Record<string, BibleVersion> = {};
 
 export async function initDatabase() {
-  const deletedKjv = localStorage.getItem('deleted_bible_kjv');
-  if (deletedKjv) return;
-
   try {
-    const existingKjv = await get('bible_kjv');
-    if (!existingKjv) {
+    const existingKjv = await get('bible_kjv') as BibleVersion | undefined;
+    if (!existingKjv || existingKjv.books?.length < 66) {
       // First time loading the KJV
       const response = await fetch('/kjv-formatted.json');
       if (response.ok) {
-        const kjvBible = await response.json();
+        const kjvBibleRaw = await response.json();
+        const kjvBible = {
+          ...kjvBibleRaw,
+          books: kjvBibleRaw.books.map((b: any) => ({
+            ...b,
+            chapters: b.chapters.map((c: any) => ({
+              ...c,
+              verses: c.verses.map((v: any) => ({
+                ...v,
+                lines: v.text ? [v.text] : (v.lines || [])
+              }))
+            }))
+          }))
+        };
         await saveBible(kjvBible);
       }
     }
@@ -43,7 +53,20 @@ export async function initDatabase() {
     if (!memoryBibles['bible_kjv']) {
       const response = await fetch('/kjv-formatted.json');
       if (response.ok) {
-        const kjvBible = await response.json();
+        const kjvBibleRaw = await response.json();
+        const kjvBible = {
+          ...kjvBibleRaw,
+          books: kjvBibleRaw.books.map((b: any) => ({
+            ...b,
+            chapters: b.chapters.map((c: any) => ({
+              ...c,
+              verses: c.verses.map((v: any) => ({
+                ...v,
+                lines: v.text ? [v.text] : (v.lines || [])
+              }))
+            }))
+          }))
+        };
         memoryBibles['bible_kjv'] = kjvBible;
       }
     }
@@ -62,7 +85,23 @@ export async function saveBible(bible: BibleVersion) {
 export async function getBible(id: string): Promise<BibleVersion | undefined> {
   try {
     const b = await get(`bible_${id}`);
-    if (b) return b as BibleVersion;
+    if (b) {
+      // Compatibility migration for old 'text' format
+      if (b.books?.[0]?.chapters?.[0]?.verses?.[0] && !('lines' in b.books[0].chapters[0].verses[0])) {
+         b.books = b.books.map((bk: any) => ({
+           ...bk,
+           chapters: bk.chapters.map((c: any) => ({
+             ...c,
+             verses: c.verses.map((v: any) => ({
+               ...v,
+               lines: v.text ? [v.text] : (v.lines || [])
+             }))
+           }))
+         }));
+         await saveBible(b as BibleVersion);
+      }
+      return b as BibleVersion;
+    }
   } catch (e) {}
   return memoryBibles[`bible_${id}`];
 }

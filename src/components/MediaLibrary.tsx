@@ -254,7 +254,7 @@ export function MediaLibrary({ onSelectBackground }: { onSelectBackground: (url:
    return (
       <div className="flex h-full bg-[#1e1e1e] border border-neutral-800 rounded-lg overflow-hidden min-h-[500px]">
          {/* Sidebar */}
-         <div className="w-64 border-r border-neutral-800 bg-[#141414] flex flex-col shrink-0 flex-1 h-full min-h-0">
+         <div className="w-48 md:w-56 border-r border-neutral-800 bg-[#141414] flex flex-col shrink-0 h-full min-h-0">
              <div className="p-3 border-b border-neutral-800 bg-[#1a1a1a]">
                 <h3 className="text-sm font-semibold text-white flex items-center gap-2">
                    <ImageIcon size={16} className="text-blue-500" />
