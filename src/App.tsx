@@ -5,7 +5,7 @@ import {
   Plus, Search, List, Grid, X, LayoutTemplate, Layers, Play,
   SquareSquare, MonitorOff, MonitorUp, EyeOff, FileText,
   Activity, Upload, ExternalLink, Edit2, Copy, Trash, GripVertical, Split,
-  Pause, Volume2, VolumeX, Save, ChevronDown, ExternalLink as LaunchIcon
+  Pause, Volume2, VolumeX, Save, ChevronDown, ExternalLink as LaunchIcon, Clock, Lock, PanelLeft, PanelLeftClose
 } from 'lucide-react';
 
 function formatTime(seconds: number) {
@@ -47,9 +47,10 @@ export interface OutputSettings {
   enabled: boolean;
   defaultBackground: { url?: string; color?: string; type: 'image' | 'video' | 'color' | 'none', fileName?: string } | null;
   lyricsStyleEnabled: boolean;
-  lyricsStyle: React.CSSProperties;
+  lyricsStyle: { global?: React.CSSProperties & { '--font-scale'?: number }; layout?: { x: number; y: number; width: number; height: number } } | React.CSSProperties;
   bibleStyleEnabled: boolean;
-  bibleStyle: React.CSSProperties;
+  bibleStyle: { global?: React.CSSProperties & { '--font-scale'?: number }; layout?: { x: number; y: number; width: number; height: number } } | React.CSSProperties;
+  displayId?: string;
 }
 
 export interface GlobalSettings {
@@ -109,23 +110,38 @@ export type PresentState = {
 
 const CHANNEL_NAME = 'flowshow_presence_channel';
 
-const applyGlobalStyles = (slide: SlideDefinition | null, outputConfig?: OutputSettings) => {
+const applyGlobalStyles = (slide: SlideDefinition | null, outputConfig?: OutputSettings): SlideDefinition['styleOverrides'] => {
   if (!slide) return undefined;
   if (!outputConfig) return slide.styleOverrides;
 
+  let mergedStyle = { ...slide.styleOverrides };
+
   if (slide.type === 'lyrics' && outputConfig.lyricsStyleEnabled) {
-     return { ...slide.styleOverrides, global: { ...slide.styleOverrides?.global, ...outputConfig.lyricsStyle } };
+     mergedStyle = {
+       ...mergedStyle,
+       global: { ...mergedStyle.global, ...(outputConfig.lyricsStyle as any)?.global || outputConfig.lyricsStyle },
+       layout: (outputConfig.lyricsStyle as any)?.layout || mergedStyle.layout,
+     };
   }
   if (slide.type === 'scripture' && outputConfig.bibleStyleEnabled) {
-     return { ...slide.styleOverrides, global: { ...slide.styleOverrides?.global, ...outputConfig.bibleStyle } };
+     mergedStyle = {
+       ...mergedStyle,
+       global: { ...mergedStyle.global, ...(outputConfig.bibleStyle as any)?.global || outputConfig.bibleStyle },
+       layout: (outputConfig.bibleStyle as any)?.layout || mergedStyle.layout,
+     };
   }
-  return slide.styleOverrides;
+  return mergedStyle;
 };
+
+// We import the new component for settings
+import { OutputStyleEditor, OutputStyleConfig } from './components/OutputStyleEditor';
 
 function SettingsModal({ isOpen, onClose, settings, onSave }: any) {
   const [activeTab, setActiveTab] = useState('outputs');
   const [activeOutputId, setActiveOutputId] = useState('main');
   const [local, setLocal] = useState<GlobalSettings>(settings);
+  const [editingStyleType, setEditingStyleType] = useState<'lyrics' | 'scripture' | null>(null);
+  const [detectedScreens, setDetectedScreens] = useState<any[]>([]);
 
   useEffect(() => { setLocal(settings); }, [settings, isOpen]);
   useEffect(() => {
@@ -144,85 +160,98 @@ function SettingsModal({ isOpen, onClose, settings, onSave }: any) {
   const handleMediaUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const type = file.type.startsWith('video') ? 'video' : 'image';
+    const type = file.type.startsWith('video/') ? 'video' : 'image';
     const fileName = file.name;
     const reader = new FileReader();
     reader.onload = (ev) => updateOutput(activeOutputId, { defaultBackground: { type, url: ev.target?.result as string, fileName } });
     reader.readAsDataURL(file);
   };
 
-  const StyleConfigurator = ({ title, enabled, styleObj, onToggle, onChange }: any) => (
-    <div className="bg-[#1a1a1a] border border-neutral-800 p-5 rounded-lg mb-4">
-      <label className="flex items-center gap-3 mb-4 cursor-pointer">
-         <input type="checkbox" checked={enabled} onChange={(e) => onToggle(e.target.checked)} className="w-4 h-4 accent-blue-500 rounded" />
-         <span className="font-bold uppercase text-sm text-neutral-300">{title}</span>
-      </label>
-      
-      {enabled && (
-         <div className="grid grid-cols-2 gap-4 mt-2 bg-[#141414] p-4 rounded border border-neutral-800">
-           <div>
-             <label className="block text-xs text-neutral-500 mb-1">Text Color</label>
-             <div className="flex items-center gap-2">
-               <input type="color" value={styleObj.color || '#ffffff'} onChange={e => onChange({...styleObj, color: e.target.value})} className="h-8 w-12 rounded cursor-pointer bg-transparent border-none" />
-               <span className="text-sm font-mono text-neutral-400">{styleObj.color || '#ffffff'}</span>
-             </div>
-           </div>
-           <div>
-             <label className="block text-xs text-neutral-500 mb-1">Alignment</label>
-             <select value={styleObj.textAlign || 'center'} onChange={e => onChange({...styleObj, textAlign: e.target.value})} className="w-full bg-[#252525] border border-neutral-700 rounded px-3 py-1.5 text-sm text-white outline-none">
-               <option value="left">Left</option>
-               <option value="center">Center</option>
-               <option value="right">Right</option>
-             </select>
-           </div>
-           <div>
-             <label className="block text-xs text-neutral-500 mb-1">Font Weight</label>
-             <select value={styleObj.fontWeight || 'bold'} onChange={e => onChange({...styleObj, fontWeight: e.target.value})} className="w-full bg-[#252525] border border-neutral-700 rounded px-3 py-1.5 text-sm text-white outline-none">
-               <option value="normal">Normal</option>
-               <option value="bold">Bold</option>
-               <option value="800">Extra Bold</option>
-             </select>
-           </div>
-           <div>
-             <label className="block text-xs text-neutral-500 mb-1">Font Style</label>
-             <select value={styleObj.fontStyle || 'normal'} onChange={e => onChange({...styleObj, fontStyle: e.target.value})} className="w-full bg-[#252525] border border-neutral-700 rounded px-3 py-1.5 text-sm text-white outline-none">
-               <option value="normal">Normal</option>
-               <option value="italic">Italic</option>
-             </select>
-           </div>
-         </div>
-      )}
-    </div>
-  );
+  const detectScreens = async () => {
+    try {
+        if ('getScreenDetails' in window) {
+            const details = await (window as any).getScreenDetails();
+            setDetectedScreens(details.screens);
+        } else {
+            alert('Screen detection not supported in this browser or iframe.');
+        }
+    } catch (err: any) {
+        console.warn(err);
+        alert('Could not detect screens. ' + err.message);
+    }
+  };
+
+  const StyleConfigurator = ({ title, enabled, styleObj, onToggle, onEdit }: any) => {
+    return (
+      <div className="bg-[#121214] border border-white/5 p-6 rounded-xl mb-4 shadow-sm">
+        <div className="flex items-center justify-between">
+          <label className="flex items-center gap-3 cursor-pointer group">
+             <input type="checkbox" checked={enabled} onChange={(e) => onToggle(e.target.checked)} className="w-4 h-4 accent-blue-500 rounded cursor-pointer" />
+             <span className="font-bold uppercase tracking-wider text-sm text-neutral-300 group-hover:text-white transition-colors">{title}</span>
+          </label>
+          <button 
+             disabled={!enabled}
+             onClick={onEdit} 
+             className="bg-white/5 hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-white/5 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors border border-white/5"
+          >
+             Edit Layout & Format
+          </button>
+        </div>
+      </div>
+    );
+  };
 
   return (
-    <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4 lg:p-8 animate-in fade-in duration-200">
-       <div className="bg-[#1e1e1e] border border-neutral-800 rounded-xl w-full max-w-5xl h-[85vh] flex overflow-hidden shadow-2xl">
-          <div className="w-48 bg-[#141414] border-r border-neutral-800 p-4 flex flex-col gap-2 shrink-0">
-             <div className="text-xs font-bold uppercase tracking-widest text-neutral-500 mb-4 px-2">Settings</div>
-             <button onClick={() => setActiveTab('outputs')} className={`text-left px-3 py-2 rounded text-sm transition-colors ${activeTab === 'outputs' ? 'bg-blue-600/20 text-blue-400' : 'text-neutral-400 hover:bg-[#252525] hover:text-white'}`}>Outputs</button>
-             <button onClick={() => setActiveTab('style')} className={`text-left px-3 py-2 rounded text-sm transition-colors ${activeTab === 'style' ? 'bg-blue-600/20 text-blue-400' : 'text-neutral-400 hover:bg-[#252525] hover:text-white'}`}>Style & Theme</button>
-             <button onClick={() => setActiveTab('help')} className={`text-left px-3 py-2 rounded text-sm transition-colors ${activeTab === 'help' ? 'bg-blue-600/20 text-blue-400' : 'text-neutral-400 hover:bg-[#252525] hover:text-white'}`}>Help</button>
+    <>
+    <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center p-4 lg:p-8 animate-in fade-in duration-200">
+       <div className="bg-[#09090B] border border-white/10 rounded-2xl w-full max-w-5xl h-[85vh] flex overflow-hidden shadow-2xl">
+          <div className="w-56 bg-[#030303] border-r border-white/5 p-6 flex flex-col gap-2 shrink-0">
+             <div className="text-[10px] font-bold uppercase tracking-widest text-neutral-500 mb-6 px-2">Global Settings</div>
+             <button onClick={() => setActiveTab('outputs')} className={`text-left px-4 py-2.5 rounded-lg text-sm font-medium transition-all ${activeTab === 'outputs' ? 'bg-blue-600/20 text-blue-400 font-semibold' : 'text-neutral-400 hover:bg-white/5 hover:text-white'}`}>Outputs</button>
+             <button onClick={() => setActiveTab('style')} className={`text-left px-4 py-2.5 rounded-lg text-sm font-medium transition-all ${activeTab === 'style' ? 'bg-blue-600/20 text-blue-400 font-semibold' : 'text-neutral-400 hover:bg-white/5 hover:text-white'}`}>Style & Theme</button>
+             <button onClick={() => setActiveTab('help')} className={`text-left px-4 py-2.5 rounded-lg text-sm font-medium transition-all ${activeTab === 'help' ? 'bg-blue-600/20 text-blue-400 font-semibold' : 'text-neutral-400 hover:bg-white/5 hover:text-white'}`}>Help</button>
           </div>
-          <div className="flex-1 flex flex-col min-w-0 bg-[#1e1e1e]">
-             <div className="flex-1 overflow-y-auto p-6 md:p-8 custom-scrollbar">
+          <div className="flex-1 flex flex-col min-w-0 bg-[#09090B]">
+             <div className="flex-1 overflow-y-auto p-8 lg:p-10 custom-scrollbar">
                {activeTab === 'outputs' && (
-                  <div className="space-y-6 max-w-2xl">
+                  <div className="space-y-8 max-w-2xl">
                      <div>
-                       <h2 className="text-2xl font-bold text-white">Active Screens</h2>
-                       <p className="text-sm text-neutral-400 mt-1 mb-6">Enable additional projector screens like Livestream or Stage Display.</p>
+                       <h2 className="text-3xl font-bold text-white tracking-tight">Active Screens</h2>
+                       <p className="text-sm text-neutral-400 mt-2">Enable additional projector screens like Livestream or Stage Display.</p>
                      </div>
                      <div className="space-y-4">
+                        <div className="mb-4">
+                           <button onClick={detectScreens} className="bg-white/5 hover:bg-white/10 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors border border-white/10">Detect Attached Displays</button>
+                           {detectedScreens.length > 0 && <span className="ml-3 text-sm text-green-400">{detectedScreens.length} display(s) detected</span>}
+                        </div>
                         {local.outputs.map(out => (
-                           <div key={out.id} className="bg-[#1a1a1a] border border-neutral-800 p-5 rounded-lg flex items-center justify-between">
-                              <div>
-                                 <h3 className="text-sm font-bold uppercase text-neutral-200">{out.name}</h3>
-                                 <p className="text-xs text-neutral-500 mt-1">{out.id === 'main' ? 'The primary presentation screen.' : `Secondary output for ${out.name.toLowerCase()}.`}</p>
+                           <div key={out.id} className="bg-[#121214] border border-white/5 p-6 rounded-xl flex flex-col gap-4 shadow-sm">
+                              <div className="flex items-center justify-between">
+                                <div>
+                                   <h3 className="text-sm font-bold uppercase tracking-wider text-neutral-200">{out.name}</h3>
+                                   <p className="text-sm text-neutral-500 mt-1">{out.id === 'main' ? 'The primary presentation screen.' : `Secondary output for ${out.name.toLowerCase()}.`}</p>
+                                </div>
+                                <label className="flex items-center gap-3 cursor-pointer group">
+                                   <span className={`text-sm font-semibold transition-colors ${out.enabled ? 'text-blue-400' : 'text-neutral-500 group-hover:text-neutral-400'}`}>{out.enabled ? 'Enabled' : 'Disabled'}</span>
+                                   <input type="checkbox" checked={out.enabled} disabled={out.id === 'main'} onChange={(e) => updateOutput(out.id, { enabled: e.target.checked })} className="w-5 h-5 accent-blue-500 cursor-pointer rounded bg-white/10" />
+                                </label>
                               </div>
-                              <label className="flex items-center gap-3 cursor-pointer">
-                                 <span className={`text-sm font-medium ${out.enabled ? 'text-blue-400' : 'text-neutral-500'}`}>{out.enabled ? 'Enabled' : 'Disabled'}</span>
-                                 <input type="checkbox" checked={out.enabled} disabled={out.id === 'main'} onChange={(e) => updateOutput(out.id, { enabled: e.target.checked })} className="w-5 h-5 accent-blue-500 cursor-pointer rounded" />
-                              </label>
+                              {out.enabled && (
+                                <div className="border-t border-white/5 pt-4 flex flex-col gap-2">
+                                   <label className="text-xs uppercase font-bold tracking-widest text-neutral-500">Target Display</label>
+                                   <select 
+                                      value={out.displayId || ''} 
+                                      onChange={(e) => updateOutput(out.id, { displayId: e.target.value })}
+                                      className="bg-[#09090B] border border-white/10 rounded-lg text-sm px-3 py-2 text-white outline-none focus:border-blue-500 max-w-sm"
+                                   >
+                                      <option value="">-- No Display Selected --</option>
+                                      {detectedScreens.map((s, i) => (
+                                         <option key={s.label || i} value={s.label}>{s.label || `Display ${i + 1}`}</option>
+                                      ))}
+                                   </select>
+                                   {!out.displayId && <p className="text-[10px] text-orange-400">Warning: You must select a display to go LIVE to {out.name}.</p>}
+                                </div>
+                              )}
                            </div>
                         ))}
                      </div>
@@ -230,64 +259,89 @@ function SettingsModal({ isOpen, onClose, settings, onSave }: any) {
                )}
                {activeTab === 'help' && (
                   <div>
-                     <h2 className="text-2xl font-bold text-white mb-2">Help & Documentation</h2>
-                     <p className="text-neutral-400">Documentation and shortcut keys are coming soon.</p>
+                     <h2 className="text-3xl font-bold text-white mb-4 tracking-tight">Help & Documentation</h2>
+                     <p className="text-neutral-400 leading-relaxed text-sm">Documentation and shortcut keys are coming soon.</p>
                   </div>
                )}
                {activeTab === 'style' && (
-                  <div className="space-y-6 max-w-3xl">
+                  <div className="space-y-8 max-w-3xl">
                      <div className="flex items-center justify-between">
                        <div>
-                         <h2 className="text-2xl font-bold text-white">Style Profiles</h2>
-                         <p className="text-sm text-neutral-400 mt-1">Manage backgrounds and typography overrides per output screen.</p>
+                         <h2 className="text-3xl font-bold text-white tracking-tight">Style Profiles</h2>
+                         <p className="text-sm text-neutral-400 mt-2">Manage backgrounds and typography overrides per output screen.</p>
                        </div>
-                       <div className="bg-[#141414] border border-neutral-800 p-1 rounded-lg flex gap-1 shadow-inner">
+                       <div className="bg-[#030303] border border-white/5 p-1.5 rounded-xl flex gap-1 shadow-inner">
                           {local.outputs.filter(o => o.enabled).map(out => (
-                             <button key={out.id} onClick={() => setActiveOutputId(out.id)} className={`px-4 py-1.5 rounded text-sm font-medium transition-all ${activeOutputId === out.id ? 'bg-[#2a2a2a] text-white shadow' : 'text-neutral-500 hover:text-neutral-300'}`}>{out.name}</button>
+                             <button key={out.id} onClick={() => setActiveOutputId(out.id)} className={`px-5 py-2 rounded-lg text-sm font-medium transition-all ${activeOutputId === out.id ? 'bg-white/10 text-white shadow' : 'text-neutral-500 hover:text-neutral-300'}`}>{out.name}</button>
                           ))}
                        </div>
                      </div>
-                     <div className="h-px bg-neutral-800 w-full my-6"></div>
-                     <h3 className="text-lg font-bold text-blue-400 mb-4">{activeOutput?.name || 'Output'} Configuration</h3>
+                     <div className="h-px bg-white/5 w-full my-8"></div>
+                     <h3 className="text-xl font-bold text-blue-400 mb-6">{activeOutput?.name || 'Output'} Configuration</h3>
 
                      {activeOutput && (
                         <>
-                           <div className="bg-[#1a1a1a] border border-neutral-800 p-5 rounded-lg mb-6">
-                              <h3 className="text-sm font-bold uppercase text-neutral-300 mb-2">Default Background</h3>
-                              <p className="text-xs text-neutral-500 mb-4">{activeOutputId === 'main' ? "Fallback background shown when no live media is active." : `The dedicated background for the ${activeOutput.name}. It ignores live media sent from the control panel.`}</p>
+                           <div className="bg-[#121214] border border-white/5 p-6 rounded-xl mb-6 shadow-sm">
+                              <h3 className="text-sm font-bold uppercase tracking-wider text-neutral-200 mb-2">Default Background</h3>
+                              <p className="text-sm text-neutral-500 mb-6">{activeOutputId === 'main' ? "Fallback background shown when no live media is active." : `The dedicated background for the ${activeOutput.name}. It ignores live media sent from the control panel.`}</p>
                               <div className="flex flex-wrap items-center gap-4">
-                                <select className="bg-[#252525] border border-neutral-700 text-white rounded px-3 py-2 text-sm outline-none" value={activeOutput.defaultBackground ? activeOutput.defaultBackground.type : 'none'} onChange={(e) => { const val = e.target.value; if (val === 'none') updateOutput(activeOutputId, { defaultBackground: null }); else if (val === 'color') updateOutput(activeOutputId, { defaultBackground: { type: 'color', color: '#0a0a0a' } }); else if (val === 'image') updateOutput(activeOutputId, { defaultBackground: { type: 'image', url: '' } }); }}>
+                                <select className="bg-white/5 border border-white/10 text-white rounded-lg px-4 py-2.5 text-sm outline-none focus:border-white/20 transition-all font-medium min-w-[200px]" value={activeOutput.defaultBackground ? activeOutput.defaultBackground.type : 'none'} onChange={(e) => { const val = e.target.value; if (val === 'none') updateOutput(activeOutputId, { defaultBackground: null }); else if (val === 'color') updateOutput(activeOutputId, { defaultBackground: { type: 'color', color: '#0a0a0a' } }); else if (val === 'image') updateOutput(activeOutputId, { defaultBackground: { type: 'image', url: '' } }); }}>
                                   <option value="none">Transparent (None)</option>
                                   <option value="color">Solid Color</option>
                                   <option value="image">Media (Image / Video)</option>
                                 </select>
                                 {activeOutput.defaultBackground?.type === 'color' && (
-                                  <input type="color" value={activeOutput.defaultBackground.color || '#0a0a0a'} onChange={e => updateOutput(activeOutputId, { defaultBackground: { type: 'color', color: e.target.value }})} className="h-9 w-16 cursor-pointer border-none bg-transparent" />
+                                  <input type="color" value={activeOutput.defaultBackground.color || '#0a0a0a'} onChange={e => updateOutput(activeOutputId, { defaultBackground: { type: 'color', color: e.target.value }})} className="h-10 w-16 cursor-pointer border-none bg-transparent" />
                                 )}
                                 {(activeOutput.defaultBackground?.type === 'image' || activeOutput.defaultBackground?.type === 'video') && (
-                                  <div className="flex items-center gap-3 bg-[#141414] px-3 py-2 rounded border border-neutral-800 flex-1">
-                                    <label className="bg-blue-600 hover:bg-blue-500 text-white px-3 py-1.5 rounded text-sm cursor-pointer transition-colors shrink-0">Browse File... <input type="file" accept="image/*,video/*" onChange={handleMediaUpload} className="hidden" /></label>
+                                  <div className="flex items-center gap-4 bg-[#030303] px-3 py-2 rounded-lg border border-white/5 flex-1 shadow-inner">
+                                    <label className="bg-white/10 hover:bg-white/20 text-white px-4 py-2 rounded-md text-sm font-medium cursor-pointer transition-colors shrink-0">Browse File... <input type="file" accept="image/*,video/*" onChange={handleMediaUpload} className="hidden" /></label>
                                     {activeOutput.defaultBackground.url ? (
-                                      <span className="text-xs text-neutral-300 truncate flex-1 font-mono">{activeOutput.defaultBackground.fileName || 'Local Media File'}</span>
-                                    ) : ( <span className="text-xs text-red-400 italic">No media selected yet</span> )}
+                                      <span className="text-sm text-neutral-300 truncate flex-1 font-mono">{activeOutput.defaultBackground.fileName || 'Local Media File'}</span>
+                                    ) : ( <span className="text-sm text-red-400 italic">No media selected yet</span> )}
                                   </div>
                                 )}
                               </div>
                            </div>
-                           <StyleConfigurator title="Override Lyrics Style" enabled={activeOutput.lyricsStyleEnabled} styleObj={activeOutput.lyricsStyle} onToggle={(val: boolean) => updateOutput(activeOutputId, { lyricsStyleEnabled: val })} onChange={(obj: React.CSSProperties) => updateOutput(activeOutputId, { lyricsStyle: obj })} />
-                           <StyleConfigurator title="Override Bible Style" enabled={activeOutput.bibleStyleEnabled} styleObj={activeOutput.bibleStyle} onToggle={(val: boolean) => updateOutput(activeOutputId, { bibleStyleEnabled: val })} onChange={(obj: React.CSSProperties) => updateOutput(activeOutputId, { bibleStyle: obj })} />
+                           <StyleConfigurator title="Override Lyrics Style" enabled={activeOutput.lyricsStyleEnabled} onToggle={(val: boolean) => updateOutput(activeOutputId, { lyricsStyleEnabled: val })} onEdit={() => setEditingStyleType('lyrics')} />
+                           <StyleConfigurator title="Override Bible Style" enabled={activeOutput.bibleStyleEnabled} onToggle={(val: boolean) => updateOutput(activeOutputId, { bibleStyleEnabled: val })} onEdit={() => setEditingStyleType('scripture')} />
                         </>
                      )}
                   </div>
                )}
              </div>
-             <div className="p-4 border-t border-neutral-800 bg-[#141414] flex justify-end gap-3 shrink-0">
-                <button onClick={onClose} className="px-5 py-2 hover:bg-[#252525] text-neutral-300 transition-colors rounded text-sm font-medium">Cancel</button>
-                <button onClick={() => { onSave(local); onClose(); }} className="px-6 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded text-sm font-medium transition-colors flex items-center gap-2 shadow-lg"><Save size={16} /> Save Settings</button>
+             <div className="p-6 border-t border-white/5 bg-[#030303] flex justify-end gap-3 shrink-0">
+                <button onClick={onClose} className="px-6 py-2.5 hover:bg-white/5 text-neutral-300 transition-colors rounded-lg text-sm font-medium">Cancel</button>
+                <button onClick={() => { onSave(local); onClose(); }} className="px-8 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-sm font-medium transition-colors flex items-center gap-2 shadow-lg"><Save size={16} /> Save Settings</button>
              </div>
           </div>
        </div>
     </div>
+    
+    {editingStyleType && activeOutput && (
+       <OutputStyleEditor
+          type={editingStyleType}
+          outputName={activeOutput.name}
+          initialStyle={
+             (() => {
+                const raw = editingStyleType === 'lyrics' ? activeOutput.lyricsStyle : activeOutput.bibleStyle;
+                if (!raw) return { global: {} };
+                if ('global' in raw || 'layout' in raw) return raw as OutputStyleConfig;
+                return { global: raw as React.CSSProperties };
+             })()
+          }
+          onSave={(newStyle: OutputStyleConfig) => {
+             if (editingStyleType === 'lyrics') {
+                updateOutput(activeOutputId, { lyricsStyle: newStyle as any });
+             } else {
+                updateOutput(activeOutputId, { bibleStyle: newStyle as any });
+             }
+             setEditingStyleType(null);
+          }}
+          onCancel={() => setEditingStyleType(null)}
+       />
+    )}
+    </>
   );
 }
 
@@ -316,8 +370,10 @@ function ControlPanel() {
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
   const [globalSettings, setGlobalSettings] = useState<GlobalSettings>(DEFAULT_SETTINGS);
   const [songsList, setSongsList] = useState(MOCK_SONGS);
+  const [songSearchQuery, setSongSearchQuery] = useState('');
   
   const [previewSlide, setPreviewSlide] = useState<SlideDefinition | null>(null);
+  const [isSidebarVisible, setIsSidebarVisible] = useState(true);
 
   useEffect(() => {
     get('globalSettings').then((val: any) => { 
@@ -347,10 +403,16 @@ function ControlPanel() {
     return () => window.removeEventListener('click', handleGlobalClick);
   }, []);
 
+  // --- BIBLE STATE ---
   const [bibleList, setBibleList] = useState<{id: string, name: string}[]>([]);
   const [activeBibleId, setActiveBibleId] = useState<string | null>(null);
   const [activeBibleData, setActiveBibleData] = useState<BibleVersion | null>(null);
+  
   const [bibleSearchQuery, setBibleSearchQuery] = useState('');
+  const [bibleKeywordQuery, setBibleKeywordQuery] = useState('');
+  const [bibleKeywordResults, setBibleKeywordResults] = useState<SlideDefinition[]>([]);
+  const [bibleHistory, setBibleHistory] = useState<SlideDefinition[]>([]);
+  const [showBibleHistory, setShowBibleHistory] = useState(false);
   
   const [isUploading, setIsUploading] = useState(false);
   const [activeBibleBookIndex, setActiveBibleBookIndex] = useState<number | null>(null);
@@ -360,12 +422,50 @@ function ControlPanel() {
   const bIndexRef = useRef(activeBibleBookIndex);
   const cIndexRef = useRef(activeBibleChapterIndex);
   const vIndexRef = useRef(activeBibleVerseIndex);
+  const verseListRef = useRef<HTMLDivElement>(null);
+  const bookListRef = useRef<HTMLDivElement>(null);
+  const chapterListRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => { bIndexRef.current = activeBibleBookIndex; }, [activeBibleBookIndex]);
   useEffect(() => { cIndexRef.current = activeBibleChapterIndex; }, [activeBibleChapterIndex]);
   useEffect(() => { vIndexRef.current = activeBibleVerseIndex; }, [activeBibleVerseIndex]);
 
-  const verseListRef = useRef<HTMLDivElement>(null);
+  // SMART AUTO-SCROLL HOOKS
+  const isShowingThreeColumns = !bibleSearchQuery && !bibleKeywordQuery && !showBibleHistory;
+
+  useEffect(() => {
+      if (activeBibleBookIndex !== null && isShowingThreeColumns) {
+          setTimeout(() => {
+              if (bookListRef.current) {
+                  const el = bookListRef.current.children[activeBibleBookIndex] as HTMLElement;
+                  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+              }
+          }, 20);
+      }
+  }, [activeBibleBookIndex, isShowingThreeColumns]);
+
+  useEffect(() => {
+      if (activeBibleChapterIndex !== null && isShowingThreeColumns) {
+          setTimeout(() => {
+              if (chapterListRef.current) {
+                  const el = chapterListRef.current.children[activeBibleChapterIndex] as HTMLElement;
+                  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+              }
+          }, 20);
+      }
+  }, [activeBibleChapterIndex, isShowingThreeColumns]);
+
+  useEffect(() => {
+      if (activeBibleVerseIndex !== null && isShowingThreeColumns) {
+          setTimeout(() => {
+              if (verseListRef.current) {
+                  const el = verseListRef.current.children[activeBibleVerseIndex] as HTMLElement;
+                  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              }
+          }, 20);
+      }
+  }, [activeBibleVerseIndex, isShowingThreeColumns]);
+
 
   const [isAddSongModalOpen, setIsAddSongModalOpen] = useState(false);
   const [isEditingSong, setIsEditingSong] = useState(false);
@@ -440,6 +540,7 @@ function ControlPanel() {
     };
   }, [liveState.globalBackground, liveState.settings, activeTab]); 
 
+  // Global Video Controls (Synchronizes Preview and Program monitors)
   const broadcastVideoCommand = (command: string, value?: any) => {
     const channel = new BroadcastChannel(CHANNEL_NAME);
     channel.postMessage({ type: 'VIDEO_CMD', command, value });
@@ -447,28 +548,41 @@ function ControlPanel() {
   };
 
   const togglePlay = () => {
-    if (liveVideoRef.current) {
-      if (isVideoPlaying) { liveVideoRef.current.pause(); broadcastVideoCommand('pause'); } 
-      else { liveVideoRef.current.play(); broadcastVideoCommand('play'); }
-    }
+    const nextState = !isVideoPlaying;
+    setIsVideoPlaying(nextState);
+    
+    // Control all local preview videos globally
+    document.querySelectorAll<HTMLVideoElement>('.bg-video-player').forEach(v => {
+       if (nextState) v.play().catch(()=>{});
+       else v.pause();
+    });
+
+    broadcastVideoCommand(nextState ? 'play' : 'pause');
   };
 
   const toggleMute = () => {
-    if (liveVideoRef.current) {
-      const newMuted = !isVideoMuted;
-      liveVideoRef.current.muted = newMuted;
-      setIsVideoMuted(newMuted);
-      broadcastVideoCommand('mute', newMuted);
-    }
+    const nextState = !isVideoMuted;
+    setIsVideoMuted(nextState);
+    broadcastVideoCommand('mute', nextState);
   };
 
   const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (liveVideoRef.current) {
-      const time = parseFloat(e.target.value);
-      liveVideoRef.current.currentTime = time;
-      setVideoCurrentTime(time);
-      broadcastVideoCommand('seek', time);
-    }
+    const time = parseFloat(e.target.value);
+    setVideoCurrentTime(time);
+    
+    document.querySelectorAll<HTMLVideoElement>('.bg-video-player').forEach(v => {
+        v.currentTime = time;
+    });
+
+    broadcastVideoCommand('seek', time);
+  };
+
+  const pushToBibleHistory = (slide: SlideDefinition) => {
+     if (slide.type !== 'scripture') return;
+     setBibleHistory(prev => {
+        const filtered = prev.filter(s => s.id !== slide.id);
+        return [slide, ...filtered].slice(0, 50);
+     });
   };
 
   // Keyboard Navigation Support
@@ -491,7 +605,7 @@ function ControlPanel() {
                setPreviewSlide(currentSong.slides[0]);
                goLive(currentSong.slides[0]);
             }
-         } else if (activeTab === 'bibles') {
+         } else if (activeTab === 'bibles' && isShowingThreeColumns) {
             if (!activeBibleData || activeBibleBookIndex === null || activeBibleChapterIndex === null) return;
             const verses = activeBibleData.books[activeBibleBookIndex].chapters[activeBibleChapterIndex].verses;
             const currentIdx = activeBibleVerseIndex ?? -1;
@@ -503,12 +617,8 @@ function ControlPanel() {
                const c = b.chapters[activeBibleChapterIndex];
                const slide: SlideDefinition = { id: `b-${b.name}-${c.c}-${v.v}`, text: v.lines.join('\n'), source: `${b.name} ${c.c}:${v.v}`, type: 'scripture' };
                setPreviewSlide(slide);
+               pushToBibleHistory(slide);
                if (liveState.slide?.type === 'scripture' && !liveState.clearText) goLive(slide);
-               // Auto-scroll list
-               if (verseListRef.current) {
-                  const verseEls = verseListRef.current.children;
-                  if (verseEls[nextIdx]) verseEls[nextIdx].scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-               }
             }
          }
       } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
@@ -523,7 +633,7 @@ function ControlPanel() {
                setPreviewSlide(prevSlide);
                goLive(prevSlide);
             }
-         } else if (activeTab === 'bibles') {
+         } else if (activeTab === 'bibles' && isShowingThreeColumns) {
             if (!activeBibleData || activeBibleBookIndex === null || activeBibleChapterIndex === null) return;
             const verses = activeBibleData.books[activeBibleBookIndex].chapters[activeBibleChapterIndex].verses;
             const currentIdx = activeBibleVerseIndex ?? 0;
@@ -535,19 +645,15 @@ function ControlPanel() {
                const c = b.chapters[activeBibleChapterIndex];
                const slide: SlideDefinition = { id: `b-${b.name}-${c.c}-${v.v}`, text: v.lines.join('\n'), source: `${b.name} ${c.c}:${v.v}`, type: 'scripture' };
                setPreviewSlide(slide);
+               pushToBibleHistory(slide);
                if (liveState.slide?.type === 'scripture' && !liveState.clearText) goLive(slide);
-               // Auto-scroll list
-               if (verseListRef.current) {
-                  const verseEls = verseListRef.current.children;
-                  if (verseEls[prevIdx]) verseEls[prevIdx].scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-               }
             }
          }
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [activeTab, activeItemIndex, activeBibleData, activeBibleBookIndex, activeBibleChapterIndex, activeBibleVerseIndex, liveState, previewSlide, songsList]);
+  }, [activeTab, activeItemIndex, activeBibleData, activeBibleBookIndex, activeBibleChapterIndex, activeBibleVerseIndex, liveState, previewSlide, songsList, isShowingThreeColumns]);
 
 
   useEffect(() => {
@@ -578,7 +684,7 @@ function ControlPanel() {
                     const v = data.books[bIdx].chapters[cIdx].verses[vIdx];
                     const slide: SlideDefinition = { id: `b-${data.books[bIdx].name}-${data.books[bIdx].chapters[cIdx].c}-${v.v}`, text: v.lines.join('\n'), source: `${data.books[bIdx].name} ${data.books[bIdx].chapters[cIdx].c}:${v.v}`, type: 'scripture' };
                     
-                    setPreviewSlide(slide); // Prepare it on preview, but do not GoLive automatically!
+                    setPreviewSlide(slide); 
                 }
             }
         }); 
@@ -603,8 +709,28 @@ function ControlPanel() {
   }, [liveState, isVideoMuted, isVideoPlaying]);
 
   const openProjector = async (outputId: string) => {
+    const config = liveState.settings?.outputs.find(o => o.id === outputId);
+    if (!config?.displayId) {
+        alert(`You must select a display screen for ${config?.name || outputId} before it can go LIVE. Please check Settings > Outputs.`);
+        return;
+    }
+
     const label = `projector-${outputId}`;
     const url = `/projector/${outputId}`;
+
+    let wFeatures = 'width=1280,height=720,menubar=no,toolbar=no';
+    try {
+        if ('getScreenDetails' in window) {
+             const details = await (window as any).getScreenDetails();
+             const screen = details.screens.find((s: any) => s.label === config.displayId);
+             if (screen) {
+                 wFeatures = `left=${screen.availLeft},top=${screen.availTop},width=${screen.width},height=${screen.height},menubar=no,toolbar=no,fullscreen=yes`;
+             }
+        }
+    } catch(err) {
+        console.warn('Could not query window management params', err);
+    }
+
     if ('__TAURI_INTERNALS__' in window || '__TAURI__' in window) {
       try {
         const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow');
@@ -614,7 +740,8 @@ function ControlPanel() {
         return;
       } catch (err) { console.warn('Failed to open Tauri native window', err); }
     }
-    window.open(url, `FlowShow_${outputId}`, 'width=1280,height=720,menubar=no,toolbar=no');
+    
+    window.open(url, `FlowShow_${outputId}`, wFeatures);
   };
 
   const goLive = (slide: SlideDefinition) => {
@@ -624,56 +751,197 @@ function ControlPanel() {
   
   const setGlobalBackground = (url: string | null, type: 'image' | 'video' = 'image') => setLiveState(prev => ({ ...prev, globalBackground: url ? { url, type } : null, clearedOutputs: {} }));
 
-  // Smart Click Logic
+  const handleJumpToVerse = (slide: SlideDefinition, isDoubleClick: boolean = false) => {
+      if (activeBibleData && slide.source) {
+          const match = slide.source.match(/^(.+)\s+(\d+):(\d+)$/);
+          if (match) {
+              const bName = match[1];
+              const cNum = parseInt(match[2], 10);
+              const vNum = parseInt(match[3], 10);
+
+              const bIdx = activeBibleData.books.findIndex(b => b.name === bName);
+              if (bIdx !== -1) {
+                  setActiveBibleBookIndex(bIdx);
+                  const cIdx = activeBibleData.books[bIdx].chapters.findIndex(c => c.c === cNum);
+                  if (cIdx !== -1) {
+                      setActiveBibleChapterIndex(cIdx);
+                      const vIdx = activeBibleData.books[bIdx].chapters[cIdx].verses.findIndex(v => v.v === vNum);
+                      if (vIdx !== -1) {
+                          setActiveBibleVerseIndex(vIdx);
+                      }
+                  }
+              }
+          }
+      }
+
+      setBibleSearchQuery('');
+      setBibleKeywordQuery('');
+      setShowBibleHistory(false);
+      
+      setPreviewSlide(slide);
+      pushToBibleHistory(slide);
+
+      if (isDoubleClick) {
+         goLive(slide);
+      } else if (liveState.slide?.type === 'scripture' && !liveState.clearText) {
+         goLive(slide);
+      }
+  };
+
   const handleVerseClick = (slide: SlideDefinition, vIdx: number) => {
      setActiveBibleVerseIndex(vIdx);
      setPreviewSlide(slide);
-     // If scripture is currently live, single click advances naturally. Otherwise it just previews.
-     if (liveState.slide?.type === 'scripture' && !liveState.clearText) {
-         goLive(slide);
-     }
+     pushToBibleHistory(slide);
+     if (liveState.slide?.type === 'scripture' && !liveState.clearText) goLive(slide);
   };
 
   const handleVerseDoubleClick = (slide: SlideDefinition, vIdx: number) => {
      setActiveBibleVerseIndex(vIdx);
+     pushToBibleHistory(slide);
      goLive(slide);
   };
 
-  // Smart Bible Search Logic (FreeShow Style)
-  const performBibleSearch = (query: string) => {
-    setBibleSearchQuery(query);
-    if (!activeBibleData || !query.trim()) return;
+  const handleKeywordSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+      const val = e.target.value;
+      setBibleKeywordQuery(val);
+      setBibleSearchQuery('');
+      setShowBibleHistory(false);
+      
+      if (!activeBibleData || !val.trim()) {
+          setBibleKeywordResults([]);
+          return;
+      }
+
+      const terms = val.toLowerCase().split(/\s+/).filter(Boolean);
+      let results: {slide: SlideDefinition, score: number}[] = [];
+      
+      for (const b of activeBibleData.books) {
+         for (const c of b.chapters) {
+            for (const v of c.verses) {
+               const text = v.lines.join(' ').toLowerCase();
+               let score = 0;
+               let allMatch = true;
+               for (const t of terms) {
+                  if (text.includes(t)) score += 1;
+                  else allMatch = false; 
+               }
+               if (allMatch) {
+                  if (text.includes(val.toLowerCase())) score += 10;
+                  results.push({
+                     slide: { id: `b-${b.name}-${c.c}-${v.v}`, text: v.lines.join('\n'), source: `${b.name} ${c.c}:${v.v}`, type: 'scripture' },
+                     score
+                  });
+               }
+            }
+         }
+      }
+      results.sort((a, b) => b.score - a.score);
+      setBibleKeywordResults(results.slice(0, 50).map(r => r.slide));
+  };
+
+  const handleBibleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    let val = e.target.value;
+    setBibleKeywordQuery('');
+    setShowBibleHistory(false);
     
-    const match = query.match(/^(\d?\s*[a-zA-Z]+)\s*(\d+)?(?:[:\s]+(\d+))?/);
-    if (!match) return;
+    if (!activeBibleData) {
+        setBibleSearchQuery(val);
+        return;
+    }
 
-    const bNameQuery = match[1].toLowerCase().replace(/\s+/g, '');
-    const cNum = match[2] ? parseInt(match[2], 10) : null;
-    const vNum = match[3] ? parseInt(match[3], 10) : null;
+    const match = val.match(/^(\d?\s*[a-zA-Z]+)(?:([\s:]+)(\d+))?(?:([\s:]+)(\d+))?([:\s]*)$/);
+    
+    if (match) {
+        const bStr = match[1];
+        const cSep = match[2] || '';
+        const cStr = match[3];
+        const vSep = match[4] || '';
+        const vStr = match[5];
+        const trailing = match[6] || '';
 
-    const bIdx = activeBibleData.books.findIndex(b => b.name.toLowerCase().replace(/\s+/g, '').startsWith(bNameQuery));
-    if (bIdx !== -1) {
-        setActiveBibleBookIndex(bIdx);
-        if (cNum !== null) {
-            const cIdx = activeBibleData.books[bIdx].chapters.findIndex(c => c.c === cNum);
-            if (cIdx !== -1) {
-                setActiveBibleChapterIndex(cIdx);
-                if (vNum !== null) {
-                    const vIdx = activeBibleData.books[bIdx].chapters[cIdx].verses.findIndex(v => v.v === vNum);
-                    if (vIdx !== -1) {
-                       setActiveBibleVerseIndex(vIdx);
-                       if (verseListRef.current && verseListRef.current.children[vIdx]) {
-                           verseListRef.current.children[vIdx].scrollIntoView({ behavior: 'smooth', block: 'center' });
-                       }
+        const resolveAlias = (q: string) => {
+            const str = q.toLowerCase().replace(/\s/g, '');
+            if (str === 'duet' || str === 'deut') return 'deuteronomy';
+            if (str === 'ps') return 'psalms';
+            if (str === 'song' || str === 'sos') return 'songofsolomon';
+            if (str === 'rev') return 'revelation';
+            return str;
+        };
+
+        const bSearch = resolveAlias(bStr);
+        const bIdx = activeBibleData.books.findIndex(b => b.name.toLowerCase().replace(/\s/g, '').startsWith(bSearch));
+        
+        if (bIdx !== -1) {
+            setActiveBibleBookIndex(bIdx);
+            const book = activeBibleData.books[bIdx];
+            let finalVal = bStr;
+            
+            if (cStr) {
+                let cNum = parseInt(cStr, 10);
+                const maxC = book.chapters.length;
+                if (cNum > maxC) cNum = maxC; 
+                if (cNum < 1) cNum = 1;
+                finalVal += cSep + cNum;
+                
+                const cIdx = cNum - 1;
+                if (cIdx >= 0 && cIdx < maxC) {
+                    setActiveBibleChapterIndex(cIdx);
+                    const chapter = book.chapters[cIdx];
+                    
+                    if (vStr) {
+                        let vNum = parseInt(vStr, 10);
+                        const maxV = Math.max(...chapter.verses.map(v => v.v));
+                        if (vNum > maxV) vNum = maxV;
+                        if (vNum < 1) vNum = 1;
+                        finalVal += vSep + vNum;
+
+                        const vIdx = chapter.verses.findIndex(v => v.v === vNum);
+                        if (vIdx !== -1) {
+                            setActiveBibleVerseIndex(vIdx);
+                        }
+                    } else {
+                        setActiveBibleVerseIndex(null);
                     }
-                } else setActiveBibleVerseIndex(null);
+                }
             } else {
                 setActiveBibleChapterIndex(null);
                 setActiveBibleVerseIndex(null);
             }
-        } else {
-            setActiveBibleChapterIndex(null);
-            setActiveBibleVerseIndex(null);
+            finalVal += trailing;
+            val = finalVal;
+        }
+    }
+    setBibleSearchQuery(val);
+  };
+
+  const handleBibleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (!activeBibleData) return;
+    
+    if (e.key === ' ' || e.key === 'ArrowRight') {
+        if (activeBibleBookIndex !== null) {
+            const book = activeBibleData.books[activeBibleBookIndex];
+            
+            if (!/\d/.test(bibleSearchQuery) || /^[1-3]\s*[a-zA-Z]+$/.test(bibleSearchQuery)) {
+                e.preventDefault();
+                setBibleSearchQuery(`${book.name} `);
+                return;
+            }
+            
+            const chapMatch = bibleSearchQuery.match(/^(\d?\s*[a-zA-Z]+\s+\d+)$/);
+            if (chapMatch) {
+                e.preventDefault();
+                setBibleSearchQuery(`${chapMatch[1]}:`);
+                return;
+            }
+        }
+    } else if (e.key === 'Enter') {
+        e.preventDefault();
+        if (activeBibleBookIndex !== null && activeBibleChapterIndex !== null && activeBibleVerseIndex !== null) {
+            const b = activeBibleData.books[activeBibleBookIndex];
+            const c = b.chapters[activeBibleChapterIndex];
+            const v = c.verses[activeBibleVerseIndex];
+            const slide = { id: `b-${b.name}-${c.c}-${v.v}`, text: v.lines.join('\n'), source: `${b.name} ${c.c}:${v.v}`, type: 'scripture' as SlideType };
+            handleJumpToVerse(slide, true);
         }
     }
   };
@@ -696,7 +964,9 @@ function ControlPanel() {
          } else foundText = `[Chapter ${chapterSearch} not found]`;
        } else foundText = `[Book ${bookSearch} not found]`;
      }
-     goLive({ id: `auto-${Date.now()}`, type: 'scripture', text: foundText, source: sourceString });
+     const slide = { id: `auto-${Date.now()}`, type: 'scripture' as SlideType, text: foundText, source: sourceString };
+     pushToBibleHistory(slide);
+     goLive(slide);
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -731,8 +1001,14 @@ function ControlPanel() {
     if (activeBibleId === id) setActiveBibleId(list.length > 0 ? list[0].id : null);
   };
 
-  const toggleClearText = () => setLiveState(prev => ({ ...prev, clearText: !prev.clearText }));
-  const clearAll = () => setLiveState(prev => ({ ...prev, slide: null, globalBackground: null, clearText: false, clearedOutputs: {} }));
+  const toggleClearText = () => {
+     setLiveState(prev => ({ ...prev, clearText: !prev.clearText }));
+     setPreviewSlide(null);
+  };
+  const clearAll = () => {
+     setLiveState(prev => ({ ...prev, slide: undefined, globalBackground: null, clearText: false, clearedOutputs: {} }));
+     setPreviewSlide(null);
+  };
 
   const handleSplitSlide = (index: number) => {
     if (activeTab !== 'songs' || !songsList[activeItemIndex]) return;
@@ -782,23 +1058,47 @@ function ControlPanel() {
 
   const renderSidebarList = () => {
     if (activeTab === 'songs') {
+      const filteredSongs = songsList.filter(song => {
+         if (!songSearchQuery.trim()) return true;
+         const q = songSearchQuery.toLowerCase();
+         if (song.title.toLowerCase().includes(q)) return true;
+         return song.slides.some(s => s.text.toLowerCase().includes(q));
+      }).sort((a, b) => {
+         if (!songSearchQuery.trim()) return 0;
+         const q = songSearchQuery.toLowerCase();
+         const aTitle = a.title.toLowerCase().includes(q);
+         const bTitle = b.title.toLowerCase().includes(q);
+         if (aTitle && !bTitle) return -1;
+         if (!aTitle && bTitle) return 1;
+         return 0;
+      });
+
       return (
-        <div className="flex flex-col h-full bg-[#1a1a1a]">
-          <div className="p-3 border-b border-neutral-800 shrink-0">
+        <div className="flex flex-col h-full bg-[#121214]">
+          <div className="p-4 border-b border-white/5 shrink-0">
              <div className="relative">
-               <Search size={14} className="absolute left-2.5 top-2.5 text-neutral-500" />
-               <input type="text" placeholder="Search Songs..." className="w-full bg-[#252525] border border-neutral-700 rounded text-sm px-8 py-2 outline-none focus:border-blue-500 transition-colors text-neutral-200" />
+               <Search size={14} className="absolute left-3 top-3 text-neutral-500" />
+               <input 
+                 type="text" 
+                 placeholder="Search Songs & Lyrics..." 
+                 value={songSearchQuery}
+                 onChange={(e) => setSongSearchQuery(e.target.value)}
+                 className="w-full bg-white/5 border border-white/10 rounded-lg text-sm px-9 py-2 outline-none focus:border-white/20 transition-all text-neutral-200 placeholder:text-neutral-500" 
+               />
              </div>
           </div>
           <div className="flex-1 overflow-y-auto custom-scrollbar relative">
-            {songsList.map((song, i) => (
-              <div key={song.id} onContextMenu={(e) => handleContextMenu(e, 'song', song.id)} onClick={() => setActiveItemIndex(i)} className={`group px-4 py-3 cursor-pointer border-b border-neutral-800/50 flex items-center transition-colors ${activeItemIndex === i ? 'bg-blue-600/10 border-l-2 border-l-blue-500 text-white' : 'hover:bg-[#252525] border-l-2 border-l-transparent text-neutral-400'}`}>
-                <div className="flex items-center gap-3 min-w-0"><FileText size={14} className={activeItemIndex === i ? "text-blue-500" : "text-neutral-500"} /><span className="text-sm font-medium truncate">{song.title}</span></div>
-              </div>
-            ))}
+            {filteredSongs.map((song) => {
+              const originalIndex = songsList.findIndex(s => s.id === song.id);
+              return (
+                 <div key={song.id} onContextMenu={(e) => handleContextMenu(e, 'song', song.id)} onClick={() => setActiveItemIndex(originalIndex)} className={`group px-4 py-3 cursor-pointer border-b border-white/5 flex items-center transition-colors ${activeItemIndex === originalIndex ? 'bg-blue-600/10 border-l-2 border-l-blue-500 text-white' : 'hover:bg-white/5 border-l-2 border-l-transparent text-neutral-400'}`}>
+                   <div className="flex items-center gap-3 min-w-0"><FileText size={14} className={activeItemIndex === originalIndex ? "text-blue-500" : "text-neutral-500 transition-colors group-hover:text-neutral-400"} /><span className="text-sm font-medium truncate">{song.title}</span></div>
+                 </div>
+              );
+            })}
           </div>
-          <div className="p-3 border-t border-neutral-800 shrink-0">
-             <button onClick={() => setIsAddSongModalOpen(true)} className="w-full py-2 bg-[#252525] hover:bg-[#333] border border-neutral-700 rounded text-sm text-neutral-300 flex justify-center items-center gap-2 transition-colors"><Plus size={14} /> New Song</button>
+          <div className="p-4 border-t border-white/5 shrink-0">
+             <button onClick={() => setIsAddSongModalOpen(true)} className="w-full py-2.5 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-sm font-medium text-neutral-300 flex justify-center items-center gap-2 transition-all"><Plus size={14} /> New Song</button>
           </div>
         </div>
       );
@@ -806,9 +1106,9 @@ function ControlPanel() {
     
     if (activeTab === 'bibles') {
       return (
-        <div className="flex flex-col h-full bg-[#1a1a1a]">
-          <div className="p-3 border-b border-neutral-800 shrink-0">
-             <label className="flex items-center justify-center gap-2 w-full bg-[#252525] hover:bg-[#333] border border-neutral-700 text-neutral-300 text-sm py-2 rounded cursor-pointer transition-colors">
+        <div className="flex flex-col h-full bg-[#121214]">
+          <div className="p-4 border-b border-white/5 shrink-0">
+             <label className="flex items-center justify-center gap-2 w-full bg-white/5 hover:bg-white/10 border border-white/10 text-neutral-300 font-medium text-sm py-2.5 rounded-lg cursor-pointer transition-all">
                 {isUploading ? <Activity size={14} className="animate-spin" /> : <Upload size={14} />} {isUploading ? 'Parsing XML...' : 'Import XML Bible'}
                 <input type="file" accept=".xml" className="hidden" onChange={handleFileUpload} disabled={isUploading} />
              </label>
@@ -836,8 +1136,8 @@ function ControlPanel() {
                          goLive(slide);
                       }
                   }}
-                  className={`group px-4 py-3 cursor-pointer border-b border-neutral-800/50 flex items-center transition-colors ${activeBibleId === bible.id ? 'bg-blue-600/10 border-l-2 border-l-blue-500 text-white' : 'hover:bg-[#252525] border-l-2 border-l-transparent text-neutral-400'}`}>
-                  <div className="flex items-center gap-3 min-w-0"><BookOpen size={14} className={activeBibleId === bible.id ? "text-blue-500" : "text-neutral-500"} /><span className="text-sm font-medium truncate">{bible.name}</span></div>
+                  className={`group px-4 py-3 cursor-pointer border-b border-white/5 flex items-center transition-colors ${activeBibleId === bible.id ? 'bg-blue-600/10 border-l-2 border-l-blue-500 text-white' : 'hover:bg-white/5 border-l-2 border-l-transparent text-neutral-400'}`}>
+                  <div className="flex items-center gap-3 min-w-0"><BookOpen size={14} className={activeBibleId === bible.id ? "text-blue-500" : "text-neutral-500 transition-colors group-hover:text-neutral-400"} /><span className="text-sm font-medium truncate">{bible.name}</span></div>
                 </div>
               ))
             )}
@@ -866,63 +1166,130 @@ function ControlPanel() {
     }
 
     if (activeTab === 'bibles') {
+      const isSearchingKeyword = bibleKeywordQuery.trim().length > 0;
+
       return (
-        <div className="flex flex-col h-full">
-           <div className="p-4 border-b border-neutral-800 shrink-0 flex gap-4 items-center bg-[#111]">
-              <div className="relative max-w-md w-full">
+        <div className="flex flex-col h-full bg-[#09090B]">
+           <div className="p-4 border-b border-white/5 shrink-0 flex flex-wrap gap-4 items-center bg-[#09090B] shadow-sm z-10 relative">
+              <div className="relative flex-1 min-w-[200px]">
                  <Search size={16} className="absolute left-3 top-2.5 text-neutral-500" />
                  <input 
                    type="text" 
                    value={bibleSearchQuery} 
-                   onChange={e => performBibleSearch(e.target.value)}
-                   onKeyDown={(e) => {
-                      if (e.key === 'Enter' && activeBibleData && activeBibleBookIndex !== null && activeBibleChapterIndex !== null && activeBibleVerseIndex !== null) {
-                          const b = activeBibleData.books[activeBibleBookIndex];
-                          const c = b.chapters[activeBibleChapterIndex];
-                          const v = c.verses[activeBibleVerseIndex];
-                          goLive({ id: `b-${b.name}-${c.c}-${v.v}`, text: v.lines.join('\n'), source: `${b.name} ${c.c}:${v.v}`, type: 'scripture' });
-                      }
-                   }}
-                   placeholder="Search (e.g. Joh 3 16)..." 
-                   className="w-full bg-[#1a1a1a] border border-neutral-700 rounded-md text-sm px-10 py-2 outline-none focus:border-blue-500 transition-colors text-white"
+                   onChange={handleBibleSearchChange}
+                   onKeyDown={handleBibleSearchKeyDown}
+                   placeholder="Ref (Joh 3 16)..." 
+                   className="w-full bg-white/5 border border-white/10 rounded-lg text-sm px-9 py-2 outline-none focus:border-white/20 transition-all text-white placeholder:text-neutral-500"
                  />
               </div>
-              <span className="text-sm font-medium text-neutral-400">{activeBibleData?.name || 'No Bible Selected'}</span>
+              <div className="relative flex-1 min-w-[200px]">
+                 <Search size={16} className="absolute left-3 top-2.5 text-neutral-500" />
+                 <input 
+                   type="text" 
+                   value={bibleKeywordQuery} 
+                   onChange={handleKeywordSearchChange}
+                   placeholder="Keyword (God so loved)..." 
+                   className="w-full bg-white/5 border border-white/10 rounded-lg text-sm px-9 py-2 outline-none focus:border-white/20 transition-all text-white placeholder:text-neutral-500"
+                 />
+              </div>
+              <button 
+                 onClick={() => {
+                     setBibleSearchQuery('');
+                     setBibleKeywordQuery('');
+                     setShowBibleHistory(!showBibleHistory);
+                 }}
+                 className={`px-4 py-2 rounded-lg flex items-center gap-2 text-sm font-medium transition-all ${showBibleHistory ? 'bg-blue-600 text-white shadow-md' : 'bg-white/5 border border-transparent text-neutral-400 hover:text-white hover:bg-white/10'}`}
+              >
+                 <Clock size={16} /> History
+              </button>
+              <span className="text-sm font-medium text-neutral-400 ml-auto">{activeBibleData?.name || 'No Bible Selected'}</span>
            </div>
 
-           <div className="flex flex-1 min-h-0 overflow-hidden bg-[#141414]">
-              <div className="w-48 border-r border-neutral-800 overflow-y-auto custom-scrollbar bg-[#1a1a1a] shrink-0">
-                 {activeBibleData?.books.map((book, idx) => (
-                    <button key={book.name} onClick={() => { setActiveBibleBookIndex(idx); setActiveBibleChapterIndex(0); setActiveBibleVerseIndex(0); setBibleSearchQuery(''); }} className={`w-full text-left px-4 py-2.5 text-sm border-b border-neutral-800/50 transition-colors truncate ${activeBibleBookIndex === idx ? 'bg-blue-600 text-white font-medium shadow-inner' : 'text-neutral-400 hover:bg-[#252525] hover:text-white'}`}>{book.name}</button>
-                 ))}
+           {showBibleHistory ? (
+              <div className="p-6 overflow-y-auto custom-scrollbar flex-1 bg-[#09090B]">
+                 <h2 className="text-lg font-bold text-white mb-6 flex items-center gap-2"><Clock size={20}/> Session History</h2>
+                 {bibleHistory.length === 0 ? (
+                    <div className="text-neutral-500 text-sm">No verses viewed in this session yet.</div>
+                 ) : (
+                    <div className="flex flex-col gap-3 max-w-4xl mx-auto">
+                       {bibleHistory.map((slide, idx) => {
+                         const isLive = liveState.slide?.id === slide.id;
+                         const isPreview = previewSlide?.id === slide.id;
+                         return (
+                           <div 
+                              key={`${slide.id}-${idx}`} 
+                              onClick={() => handleJumpToVerse(slide, false)}
+                              onDoubleClick={() => handleJumpToVerse(slide, true)}
+                              className={`p-5 rounded-xl cursor-pointer border transition-all flex gap-5 ${isLive ? 'bg-red-600/10 border-red-500/50 text-white shadow-lg' : isPreview ? 'bg-blue-600/10 border-blue-500/50 text-white' : 'bg-[#030303] border-white/5 hover:border-white/20 text-neutral-300 shadow-sm'}`}
+                           >
+                              <span className={`text-xs font-bold mt-1.5 shrink-0 w-24 text-right ${isLive || isPreview ? 'text-white/80' : 'text-neutral-500'}`}>{slide.source}</span>
+                              <p className="text-[15px] whitespace-pre-wrap leading-relaxed">{slide.text}</p>
+                           </div>
+                         );
+                       })}
+                    </div>
+                 )}
               </div>
-              <div className="w-20 border-r border-neutral-800 overflow-y-auto custom-scrollbar bg-[#1a1a1a] shrink-0">
-                 {activeBibleBookIndex !== null && activeBibleData?.books[activeBibleBookIndex]?.chapters.map((chapter, idx) => (
-                    <button key={chapter.c} onClick={() => { setActiveBibleChapterIndex(idx); setActiveBibleVerseIndex(0); setBibleSearchQuery(''); }} className={`w-full text-center px-2 py-2.5 text-sm border-b border-neutral-800/50 transition-colors ${activeBibleChapterIndex === idx ? 'bg-blue-600 text-white font-medium shadow-inner' : 'text-neutral-400 hover:bg-[#252525] hover:text-white'}`}>{chapter.c}</button>
-                 ))}
+           ) : isSearchingKeyword ? (
+              <div className="p-6 overflow-y-auto custom-scrollbar flex-1 bg-[#09090B]">
+                 {bibleKeywordResults.length === 0 ? (
+                    <div className="text-center text-neutral-500 text-sm mt-10">No keyword matches found.</div>
+                 ) : (
+                    <div className="flex flex-col gap-3 max-w-4xl mx-auto">
+                       {bibleKeywordResults.map((slide) => {
+                         const isLive = liveState.slide?.id === slide.id;
+                         const isPreview = previewSlide?.id === slide.id;
+                         return (
+                           <div 
+                              key={slide.id} 
+                              onClick={() => handleJumpToVerse(slide, false)}
+                              onDoubleClick={() => handleJumpToVerse(slide, true)}
+                              className={`p-5 rounded-xl cursor-pointer border transition-all flex gap-5 ${isLive ? 'bg-red-600/10 border-red-500/50 text-white shadow-lg' : isPreview ? 'bg-blue-600/10 border-blue-500/50 text-white' : 'bg-[#030303] border-white/5 hover:border-white/20 text-neutral-300 shadow-sm'}`}
+                           >
+                              <span className={`text-xs font-bold mt-1.5 shrink-0 w-24 text-right ${isLive || isPreview ? 'text-white/80' : 'text-neutral-500'}`}>{slide.source}</span>
+                              <p className="text-[15px] whitespace-pre-wrap leading-relaxed">{slide.text}</p>
+                           </div>
+                         );
+                       })}
+                    </div>
+                 )}
               </div>
-              <div className="flex-1 overflow-y-auto custom-scrollbar p-6 bg-[#141414]">
-                 <div className="flex flex-col gap-2 max-w-4xl mx-auto" ref={verseListRef}>
-                   {activeBibleBookIndex !== null && activeBibleChapterIndex !== null && activeBibleData?.books[activeBibleBookIndex]?.chapters[activeBibleChapterIndex]?.verses.map((verse, vIdx) => {
-                      const slide: SlideDefinition = { id: `b-${activeBibleData.books[activeBibleBookIndex].name}-${activeBibleData.books[activeBibleBookIndex].chapters[activeBibleChapterIndex].c}-${verse.v}`, text: verse.lines.join('\n'), source: `${activeBibleData.books[activeBibleBookIndex].name} ${activeBibleData.books[activeBibleBookIndex].chapters[activeBibleChapterIndex].c}:${verse.v}`, type: 'scripture' };
-                      const isLive = liveState.slide?.id === slide.id;
-                      const isPreview = previewSlide?.id === slide.id;
-                      
-                      return (
-                         <div 
-                            key={verse.v} 
-                            onClick={() => handleVerseClick(slide, vIdx)}
-                            onDoubleClick={() => handleVerseDoubleClick(slide, vIdx)}
-                            className={`p-4 rounded-lg cursor-pointer border transition-all flex gap-4 ${isLive ? 'bg-red-600/20 border-red-500 text-white shadow-lg' : isPreview ? 'bg-blue-600/20 border-blue-500 text-white' : 'bg-[#1a1a1a] border-neutral-800 hover:border-neutral-600 hover:bg-[#222] text-neutral-300'}`}
-                         >
-                            <span className={`text-xs font-bold mt-0.5 shrink-0 w-6 text-right ${isLive || isPreview ? 'text-white/80' : 'text-neutral-500'}`}>{verse.v}</span>
-                            <p className="text-sm whitespace-pre-wrap leading-relaxed">{verse.lines.join('\n')}</p>
-                         </div>
-                      );
-                   })}
+           ) : (
+              <div className="flex flex-1 min-h-0 overflow-hidden bg-[#09090B]">
+                 <div className="w-48 border-r border-white/5 overflow-y-auto custom-scrollbar bg-[#121214] shrink-0" ref={bookListRef}>
+                    {activeBibleData?.books.map((book, idx) => (
+                       <button key={book.name} onClick={() => { setActiveBibleBookIndex(idx); setActiveBibleChapterIndex(0); setActiveBibleVerseIndex(0); setBibleSearchQuery(''); }} className={`w-full text-left px-5 py-3 text-sm border-b border-white/5 transition-colors truncate ${activeBibleBookIndex === idx ? 'bg-blue-600/10 text-blue-400 font-semibold border-l-2 border-l-blue-500' : 'text-neutral-400 hover:bg-white/5 hover:text-white border-l-2 border-l-transparent'}`}>{book.name}</button>
+                    ))}
+                 </div>
+                 <div className="w-20 border-r border-white/5 overflow-y-auto custom-scrollbar bg-[#121214] shrink-0" ref={chapterListRef}>
+                    {activeBibleBookIndex !== null && activeBibleData?.books[activeBibleBookIndex]?.chapters.map((chapter, idx) => (
+                       <button key={chapter.c} onClick={() => { setActiveBibleChapterIndex(idx); setActiveBibleVerseIndex(0); setBibleSearchQuery(''); }} className={`w-full text-center px-2 py-3 text-sm border-b border-white/5 transition-colors ${activeBibleChapterIndex === idx ? 'bg-blue-600/10 text-blue-400 font-semibold shadow-inner' : 'text-neutral-400 hover:bg-white/5 hover:text-white'}`}>{chapter.c}</button>
+                    ))}
+                 </div>
+                 <div className="flex-1 overflow-y-auto custom-scrollbar p-8 bg-[#09090B]">
+                    <div className="flex flex-col gap-3 max-w-4xl mx-auto" ref={verseListRef}>
+                      {activeBibleBookIndex !== null && activeBibleChapterIndex !== null && activeBibleData?.books[activeBibleBookIndex]?.chapters[activeBibleChapterIndex]?.verses.map((verse, vIdx) => {
+                         const slide: SlideDefinition = { id: `b-${activeBibleData.books[activeBibleBookIndex].name}-${activeBibleData.books[activeBibleBookIndex].chapters[activeBibleChapterIndex].c}-${verse.v}`, text: verse.lines.join('\n'), source: `${activeBibleData.books[activeBibleBookIndex].name} ${activeBibleData.books[activeBibleBookIndex].chapters[activeBibleChapterIndex].c}:${verse.v}`, type: 'scripture' };
+                         const isLive = liveState.slide?.id === slide.id;
+                         const isPreview = previewSlide?.id === slide.id;
+                         const isNextLogical = activeBibleVerseIndex !== null && vIdx === activeBibleVerseIndex + 1;
+                         
+                         return (
+                            <div 
+                               key={verse.v} 
+                               onClick={() => handleVerseClick(slide, vIdx)}
+                               onDoubleClick={() => handleVerseDoubleClick(slide, vIdx)}
+                               className={`p-5 rounded-xl cursor-pointer border transition-all flex gap-5 ${isLive ? 'bg-red-600/10 border-red-500/50 text-white shadow-lg' : isPreview ? 'bg-blue-600/10 border-blue-500/50 text-white' : isNextLogical ? 'border-dashed border-white/30 bg-[#0a0a0a]' : 'bg-[#030303] border-white/5 hover:border-white/20 text-neutral-300 shadow-sm'}`}
+                            >
+                               <span className={`text-xs font-bold mt-1.5 shrink-0 w-8 text-right ${isLive || isPreview ? 'text-white/80' : 'text-neutral-500'}`}>{verse.v}</span>
+                               <p className="text-[15px] whitespace-pre-wrap leading-relaxed">{verse.lines.join('\n')}</p>
+                            </div>
+                         );
+                      })}
+                    </div>
                  </div>
               </div>
-           </div>
+           )}
         </div>
       );
     }
@@ -932,29 +1299,34 @@ function ControlPanel() {
       if (!activeSong) return <div className="flex-1 flex items-center justify-center text-neutral-500">No Song Selected</div>;
 
       return (
-        <div className="flex flex-col h-full">
+        <div className="flex flex-col h-full bg-[#09090B]">
            {/* Toolbar */}
-           <div className="h-14 bg-[#111] border-b border-neutral-800 flex items-center justify-between px-6 shrink-0">
+           <div className="h-14 bg-[#09090B] border-b border-white/5 flex items-center justify-between px-6 shrink-0 shadow-sm">
              <div className="flex items-center gap-3">
                 <Music size={18} className="text-blue-500" />
-                <h2 className="text-lg font-bold text-white">{activeSong.title}</h2>
+                <h2 className="text-lg font-semibold text-white tracking-wide">{activeSong.title}</h2>
              </div>
-             <button className="text-xs bg-[#252525] hover:bg-[#333] border border-neutral-700 px-3 py-1.5 rounded transition-colors text-neutral-300">Edit Layout</button>
+             <button className="text-xs bg-white/5 hover:bg-white/10 px-4 py-2 rounded-lg transition-colors text-neutral-300 font-medium">Edit Layout</button>
            </div>
            
            {/* Slide Grid */}
-           <div className="flex-1 overflow-y-auto p-6 bg-[#141414] custom-scrollbar">
+           <div className="flex-1 overflow-y-auto p-6 bg-[#09090B] custom-scrollbar">
               <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6 content-start">
                  {activeSong.slides.map((slide, i) => {
                     const isLive = liveState.slide?.id === slide.id;
                     const isPreview = previewSlide?.id === slide.id;
+                    
+                    const currentSlideId = previewSlide?.id || liveState.slide?.id;
+                    const currentIndex = activeSong.slides.findIndex(s => s.id === currentSlideId);
+                    const isNextLogical = currentIndex !== -1 && i === currentIndex + 1;
+
                     return (
                        <div 
                          key={slide.id} draggable
                          onDragStart={(e) => { setDraggedSlideIndex(i); e.dataTransfer.effectAllowed = 'move'; }} onDragOver={(e) => { e.preventDefault(); setDragOverSlideIndex(i); }} onDrop={(e) => { e.preventDefault(); handleDropSlide(i); }}
                          onContextMenu={(e) => handleContextMenu(e, 'slide', i)} onClick={() => { if (!slide.disabled) { setPreviewSlide(slide); goLive(slide); } }}
-                         className={`group aspect-video rounded-lg cursor-pointer flex flex-col justify-center items-center text-center transition-all border-2 relative select-none overflow-hidden
-                           ${slide.disabled ? 'opacity-30 cursor-not-allowed' : ''} ${isLive ? 'border-red-500 shadow-[0_0_20px_rgba(220,38,38,0.3)]' : isPreview ? 'border-blue-500' : 'bg-[#1a1a1a] border-neutral-800 hover:border-neutral-600 hover:bg-[#222]'} ${dragOverSlideIndex === i ? 'border-dashed border-blue-400 opacity-70' : ''}
+                         className={`group aspect-[16/9] rounded-xl cursor-pointer flex flex-col justify-center items-center text-center transition-all border-2 relative select-none overflow-hidden
+                           ${slide.disabled ? 'opacity-30 cursor-not-allowed' : ''} ${isLive ? 'border-red-500 shadow-[0_0_20px_rgba(239,68,68,0.2)]' : isPreview ? 'border-blue-500 shadow-[0_0_20px_rgba(59,130,246,0.15)]' : isNextLogical ? 'border-dashed border-white/30 bg-[#0a0a0a]' : 'bg-[#030303] border-white/5 hover:border-white/20 shadow-lg'} ${dragOverSlideIndex === i ? 'border-dashed border-blue-400 opacity-70' : ''}
                          `}
                        >
                          <FixedStage className="w-full h-full pointer-events-none">
@@ -962,14 +1334,14 @@ function ControlPanel() {
                          </FixedStage>
                          
                          {/* Slide Number Badge */}
-                         <div className="absolute top-2 left-2 text-[10px] font-bold text-neutral-500 bg-[#111]/80 px-2 py-0.5 rounded shadow-sm border border-neutral-800/50 backdrop-blur-sm z-10">{i + 1}</div>
+                         <div className="absolute top-3 left-3 text-[10px] font-bold text-neutral-500 bg-[#09090B]/80 px-2 py-1 rounded shadow-sm border border-white/10 backdrop-blur-md z-10">{i + 1}</div>
                          
                          {/* Hover Actions */}
-                         <div className="absolute bottom-2 right-2 opacity-0 group-hover:opacity-100 flex items-center bg-[#111]/90 rounded-md border border-neutral-700/50 shadow-lg overflow-hidden transition-all backdrop-blur-sm z-20">
-                           <button onClick={(e) => { e.stopPropagation(); setIsEditingSong(true); setEditingSlideIndex(i); setEditingSlideText(slide.text); }} className="p-2 hover:bg-blue-600/30 text-neutral-300 hover:text-white transition-colors" title="Edit"><Edit2 size={12} /></button>
-                           <button onClick={(e) => { e.stopPropagation(); handleDuplicateSlide(i); }} className="p-2 hover:bg-blue-600/30 text-neutral-300 hover:text-white transition-colors border-l border-neutral-700/50" title="Duplicate"><Copy size={12} /></button>
-                           <button onClick={(e) => { e.stopPropagation(); handleSplitSlide(i); }} className="p-2 hover:bg-blue-600/30 text-neutral-300 hover:text-white transition-colors border-l border-neutral-700/50" title="Split"><Split size={12} /></button>
-                           <button onClick={(e) => { e.stopPropagation(); handleDeleteSlide(i); }} className="p-2 hover:bg-red-500/50 text-neutral-300 hover:text-white transition-colors border-l border-neutral-700/50" title="Delete"><Trash size={12} /></button>
+                         <div className="absolute bottom-3 right-3 opacity-0 group-hover:opacity-100 flex items-center bg-[#09090B]/90 rounded-lg border border-white/10 shadow-xl overflow-hidden transition-all backdrop-blur-md z-20">
+                           <button onClick={(e) => { e.stopPropagation(); setIsEditingSong(true); setEditingSlideIndex(i); setEditingSlideText(slide.text); }} className="p-2 hover:bg-white/10 text-neutral-300 hover:text-white transition-colors" title="Edit"><Edit2 size={12} /></button>
+                           <button onClick={(e) => { e.stopPropagation(); handleDuplicateSlide(i); }} className="p-2 hover:bg-white/10 text-neutral-300 hover:text-white transition-colors border-l border-white/5" title="Duplicate"><Copy size={12} /></button>
+                           <button onClick={(e) => { e.stopPropagation(); handleSplitSlide(i); }} className="p-2 hover:bg-white/10 text-neutral-300 hover:text-white transition-colors border-l border-white/5" title="Split"><Split size={12} /></button>
+                           <button onClick={(e) => { e.stopPropagation(); handleDeleteSlide(i); }} className="p-2 hover:bg-red-500/20 text-red-400 transition-colors border-l border-white/5" title="Delete"><Trash size={12} /></button>
                          </div>
                        </div>
                     );
@@ -981,274 +1353,296 @@ function ControlPanel() {
     }
   };
 
-  const renderRightPanel = () => {
+  const renderMonitorBridge = () => {
      const mainConfig = liveState.settings?.outputs.find(o => o.id === 'main');
      const otherOutputs = liveState.settings?.outputs.filter(o => o.enabled && o.id !== 'main') || [];
+     
+     let previewBg = mainConfig?.defaultBackground;
+     if (liveState.globalBackground) {
+        previewBg = liveState.globalBackground;
+     }
 
      return (
-       <div className="flex flex-col h-full bg-[#111]">
-          {/* Output Controls (Clear Buttons) */}
-          <div className="p-4 border-b border-neutral-800 flex justify-between gap-2 shrink-0 bg-[#141414]">
-            <button onClick={toggleClearText} className={`flex-1 py-2 flex justify-center items-center gap-2 rounded text-sm font-medium transition-colors ${liveState.clearText ? 'bg-red-500/20 text-red-400 border border-red-500/30' : 'bg-[#252525] text-neutral-300 hover:bg-[#333] border border-neutral-700'}`} title="Clear Text"><EyeOff size={16} /><span className="hidden xl:inline">Clear Text</span></button>
-            <button onClick={() => setGlobalBackground(null)} className="flex-1 py-2 flex justify-center items-center gap-2 rounded text-sm font-medium transition-colors bg-[#252525] text-neutral-300 hover:bg-[#333] border border-neutral-700" title="Clear BG"><MonitorOff size={16} /><span className="hidden xl:inline">Clear BG</span></button>
-            <button onClick={clearAll} className="flex-1 py-2 flex justify-center items-center gap-2 rounded text-sm font-medium transition-colors bg-red-900/40 text-red-300 hover:bg-red-800/60 border border-red-900/50" title="Clear All"><X size={16} /><span className="hidden xl:inline">Clear All</span></button>
-          </div>
-
-          {/* Displays Scroller (PROGRAM OUTPUT) */}
-          <div className="flex-1 overflow-hidden p-4 flex flex-col gap-4">
-             
-             {/* Main Output */}
-             <div className="flex flex-col gap-1.5">
-                <div className="flex justify-between items-center px-1">
-                   <button 
-                     onClick={() => toggleLockOutput('main')} 
-                     className={`text-[10px] font-bold uppercase tracking-widest transition-colors ${liveState.lockedOutputs?.['main'] ? 'text-red-500 line-through' : 'text-neutral-400 hover:text-white'}`}
-                     title={liveState.lockedOutputs?.['main'] ? "Screen Locked (Frozen)" : "Lock Screen (Freeze current state)"}
-                   >
-                     Main Output
-                   </button>
-                   <div className="flex items-center gap-2">
-                      <button onClick={() => toggleClearOutput('main')} className={`p-1 rounded transition-colors text-[10px] flex items-center gap-1 ${liveState.clearedOutputs?.['main'] ? 'bg-red-500/20 text-red-400 font-bold' : 'text-neutral-500 hover:text-white hover:bg-[#333]'}`} title="Clear Text from Main"><X size={10} /> {liveState.clearedOutputs?.['main'] ? 'Text Cleared' : 'Clear Text'}</button>
-                      <button onClick={() => openProjector('main')} className="text-neutral-500 hover:text-white p-1 rounded hover:bg-[#333] transition-colors" title="Launch Output Screen"><LaunchIcon size={12} /></button>
-                      <div className={`h-1.5 w-1.5 rounded-full ${liveState.isPresenting && (liveState.slide || liveState.globalBackground) && !liveState.clearedOutputs?.['main'] && !liveState.lockedOutputs?.['main'] ? 'bg-red-500 shadow-[0_0_8px_rgba(239,68,68,1)]' : 'bg-neutral-700'}`}></div>
-                   </div>
-                </div>
-                
-                <div className={`w-full aspect-video relative rounded-lg border bg-black transition-all duration-300 overflow-hidden ${liveState.isPresenting && !liveState.lockedOutputs?.['main'] ? 'border-neutral-600 shadow-lg' : 'border-neutral-800 opacity-50 grayscale-[50%]'}`}>
-                   <FixedStage className="w-full h-full pointer-events-none">
-                      
-                      {(() => {
-                         const isLocked = !!liveState.lockedOutputs?.['main'];
-                         const frozenState = liveState.frozenStates?.['main'];
-                         const isCleared = !!liveState.clearedOutputs?.['main'];
+       <div className="bg-[#030303] flex p-4 gap-6 shrink-0 z-20 h-64 lg:h-72 w-full justify-center shadow-2xl relative">
+          <div className="flex gap-6 w-full max-w-[2000px]">
+              {/* PREVIEW CONTAINER */}
+              <div className="flex-1 flex flex-col min-w-0">
+                 <div className="flex justify-between items-center px-1 mb-2 shrink-0">
+                    <span className="text-[11px] font-bold uppercase tracking-widest text-[#4ade80]">Preview (Next)</span>
+                 </div>
+                 
+                 <div className="flex-1 w-full min-h-0 bg-black rounded-xl border border-white/10 overflow-hidden relative shadow-inner flex items-center justify-center">
+                     <FixedStage className="w-full h-full pointer-events-none">
+                         {previewBg?.type === 'color' && <div className="absolute inset-0 w-full h-full" style={{ backgroundColor: previewBg.color || '#000' }}></div>}
+                         {previewBg?.url && previewBg.type === 'video' ? (
+                            <video className="bg-video-player absolute inset-0 w-full h-full object-cover opacity-80" src={previewBg.url} autoPlay loop muted playsInline />
+                         ) : previewBg?.url ? (
+                            <img src={previewBg.url} className="absolute inset-0 w-full h-full object-cover opacity-80" alt="bg" />
+                         ) : null}
                          
-                         const displaySlide = isLocked ? frozenState?.slide : liveState.slide;
-                         const displayBg = isLocked ? frozenState?.bg : (liveState.globalBackground || mainConfig?.defaultBackground);
-                         const displayClearText = isLocked ? frozenState?.clearText : liveState.clearText;
+                         {previewSlide && (
+                            <div className="absolute inset-0 z-10 flex">
+                               <SmartTextLayout text={previewSlide.text} source={previewSlide.source} type={previewSlide.type} styleOverrides={applyGlobalStyles(previewSlide, mainConfig)} />
+                            </div>
+                         )}
 
-                         return (
-                            <>
-                               {displayBg?.type === 'color' && <div className="absolute inset-0 w-full h-full" style={{ backgroundColor: displayBg.color || '#000' }}></div>}
-                               {displayBg?.url && displayBg.type === 'video' ? (
-                                  <video ref={liveVideoRef} src={displayBg.url} className="absolute inset-0 w-full h-full object-cover opacity-80" autoPlay loop muted={isVideoMuted} playsInline />
-                               ) : displayBg?.url ? (
-                                  <img src={displayBg.url} className="absolute inset-0 w-full h-full object-cover opacity-80" alt="bg" />
-                               ) : null}
-                               
-                               {!isCleared && !displayClearText && displaySlide && (
-                                  <SmartTextLayout text={displaySlide.text} source={displaySlide.source} type={displaySlide.type} styleOverrides={applyGlobalStyles(displaySlide, mainConfig)} className="relative z-10 w-full h-full animate-in fade-in duration-300" />
-                               )}
-                               
-                               {isCleared && (
-                                  <div className="absolute inset-0 flex items-center justify-center bg-[#0a0a0a]/40 backdrop-blur-sm z-20"><span className="text-neutral-300 font-bold tracking-widest uppercase text-base flex items-center gap-2"><X size={16}/> Text Cleared</span></div>
-                               )}
+                         {!previewBg && !previewSlide && (
+                            <div className="absolute inset-0 flex items-center justify-center bg-transparent"><span className="text-white/10 font-bold tracking-widest uppercase text-2xl">Black</span></div>
+                         )}
+                     </FixedStage>
+                 </div>
+              </div>
 
-                               {!displayBg && (!displaySlide || displayClearText || isCleared) && (
-                                  <div className="absolute inset-0 flex items-center justify-center bg-[#0a0a0a]"><span className="text-neutral-800 font-bold tracking-widest uppercase text-3xl">Black</span></div>
-                               )}
-                            </>
-                         )
-                      })()}
-
-                   </FixedStage>
-                </div>
-
-                {/* Video Controls under Main Output */}
-                {(liveState.lockedOutputs?.['main'] ? liveState.frozenStates?.['main']?.bg : (liveState.globalBackground || mainConfig?.defaultBackground))?.type === 'video' && (
-                  <div className="mt-1 flex items-center gap-2 bg-[#1a1a1a] border border-neutral-800 rounded p-1.5 text-neutral-300 shadow-sm shrink-0">
-                     <button onClick={togglePlay} className="hover:text-white hover:bg-neutral-800 p-1 rounded transition-colors">{isVideoPlaying ? <Pause size={14} /> : <Play size={14} />}</button>
-                     <button onClick={toggleMute} className="hover:text-white hover:bg-neutral-800 p-1 rounded transition-colors ml-1 cursor-pointer">{isVideoMuted ? <VolumeX size={14} /> : <Volume2 size={14} />}</button>
-                     <div className="text-xs text-neutral-500 font-mono w-10 text-right ml-1">{formatTime(videoCurrentTime)}</div>
-                     <input type="range" min="0" step="0.1" max={videoDuration || 100} value={videoCurrentTime} onChange={handleSeek} className="flex-1 h-1 bg-neutral-700 rounded-lg appearance-none cursor-pointer accent-blue-500 hover:accent-blue-400" />
-                  </div>
-                )}
-             </div>
-
-             {/* Other Outputs */}
-             {otherOutputs.map(out => {
-                const isOutLocked = !!liveState.lockedOutputs?.[out.id];
-                const isOutCleared = !!liveState.clearedOutputs?.[out.id];
-                
-                return (
-                   <div key={out.id} className="flex flex-col gap-1.5">
-                      <div className="flex justify-between items-center px-1">
-                         <button 
-                           onClick={() => toggleLockOutput(out.id)} 
-                           className={`text-[10px] font-bold uppercase tracking-widest transition-colors ${isOutLocked ? 'text-red-500 line-through' : 'text-neutral-500 hover:text-white'}`}
-                           title={isOutLocked ? "Screen Locked (Frozen)" : "Lock Screen (Freeze current state)"}
-                         >
-                           {out.name}
-                         </button>
-                         <div className="flex items-center gap-2">
-                            <button onClick={() => toggleClearOutput(out.id)} className={`p-1 rounded transition-colors text-[10px] flex items-center gap-1 ${isOutCleared ? 'bg-red-500/20 text-red-400 font-bold' : 'text-neutral-500 hover:text-white hover:bg-[#333]'}`} title="Blank Screen (Transparent)"><X size={10} /> {isOutCleared ? 'Cleared' : 'Clear'}</button>
-                            <button onClick={() => openProjector(out.id)} className="text-neutral-600 hover:text-white p-1 rounded hover:bg-[#333] transition-colors"><LaunchIcon size={12} /></button>
-                            <div className={`h-1.5 w-1.5 rounded-full ${liveState.isPresenting && (liveState.slide || out.defaultBackground) && !isOutCleared && !isOutLocked ? 'bg-red-500 shadow-[0_0_5px_rgba(239,68,68,1)]' : 'bg-neutral-800'}`}></div>
-                         </div>
-                      </div>
-                      
-                      <div className={`w-full aspect-video relative rounded-md border bg-black transition-all duration-300 overflow-hidden ${liveState.isPresenting && !isOutLocked && !isOutCleared ? 'border-neutral-700 shadow-md' : 'border-neutral-800 opacity-50 grayscale-[50%]'}`}>
-                         <FixedStage className="w-full h-full pointer-events-none">
+              {/* PROGRAM CONTAINER */}
+              <div className="flex-1 flex flex-col min-w-0">
+                 <div className="flex justify-between items-center px-1 mb-2 shrink-0">
+                    <div className="flex items-center gap-2">
+                       <span className="text-[11px] font-bold uppercase tracking-widest text-red-500">Program (Live)</span>
+                    </div>
+                    
+                    <div className="flex items-center gap-2">
+                        <button 
+                          onClick={() => toggleLockOutput('main')} 
+                          className={`text-[10px] font-bold uppercase tracking-widest transition-colors flex items-center gap-1 ${liveState.lockedOutputs?.['main'] ? 'text-red-500' : 'text-neutral-500 hover:text-white'}`}
+                          title="Lock Screen"
+                        >
+                          Lock
+                        </button>
+                        <button onClick={() => toggleClearOutput('main')} className={`p-1 rounded transition-colors text-[10px] flex items-center gap-1 ${liveState.clearedOutputs?.['main'] ? 'bg-red-500/20 text-red-400 font-bold' : 'text-neutral-500 hover:text-white hover:bg-white/5'}`} title="Clear Text from Main"><EyeOff size={10} /> {liveState.clearedOutputs?.['main'] ? 'Cleared' : 'Clear'}</button>
+                        <button onClick={() => openProjector('main')} className="text-neutral-500 hover:text-white p-1 rounded hover:bg-white/5 transition-colors" title="Launch Output Screen"><LaunchIcon size={12} /></button>
+                    </div>
+                 </div>
+                 
+                 <div className={`flex-1 w-full min-h-0 bg-black rounded-xl border-2 overflow-hidden relative shadow-inner flex items-center justify-center transition-all duration-300 ${liveState.isPresenting && !liveState.lockedOutputs?.['main'] ? 'border-red-500/50 shadow-[0_0_20px_rgba(239,68,68,0.15)]' : 'border-white/5 opacity-80'}`}>
+                    <FixedStage className="w-full h-full pointer-events-none bg-black">
+                        {(() => {
+                            const isLocked = !!liveState.lockedOutputs?.['main'];
+                            const frozenState = liveState.frozenStates?.['main'];
+                            const isCleared = !!liveState.clearedOutputs?.['main'];
                             
-                            {(() => {
-                               const frozenState = liveState.frozenStates?.[out.id];
-                               const displaySlide = isOutLocked ? frozenState?.slide : liveState.slide;
-                               const displayBg = isOutLocked ? frozenState?.bg : out.defaultBackground;
-                               const displayClearText = isOutLocked ? frozenState?.clearText : liveState.clearText;
-                               const hideBg = isOutCleared; // Clears the whole screen for non-main outputs
+                            const displaySlide = isLocked ? frozenState?.slide : liveState.slide;
+                            const displayBg = isLocked ? frozenState?.bg : (liveState.globalBackground || mainConfig?.defaultBackground);
+                            const displayClearText = isLocked ? frozenState?.clearText : liveState.clearText;
 
-                               return (
-                                 <>
-                                    {!hideBg && displayBg?.type === 'color' && <div className="absolute inset-0 w-full h-full" style={{ backgroundColor: displayBg.color || '#000' }}></div>}
-                                    {!hideBg && displayBg?.url && displayBg.type === 'video' ? (
-                                       <video src={displayBg.url} className="absolute inset-0 w-full h-full object-cover opacity-80" autoPlay loop muted playsInline />
-                                    ) : !hideBg && displayBg?.url ? (
-                                       <img src={displayBg.url} className="absolute inset-0 w-full h-full object-cover opacity-80" alt="bg" />
-                                    ) : null}
-                                    
-                                    {!isOutCleared && !displayClearText && displaySlide && (
-                                       <SmartTextLayout text={displaySlide.text} source={displaySlide.source} type={displaySlide.type} styleOverrides={applyGlobalStyles(displaySlide, out)} className="relative z-10 w-full h-full animate-in fade-in duration-300" />
-                                    )}
+                            return (
+                              <>
+                                  {displayBg?.type === 'color' && <div className="absolute inset-0 w-full h-full" style={{ backgroundColor: displayBg.color || '#000' }}></div>}
+                                  {displayBg?.url && displayBg.type === 'video' ? (
+                                    <video ref={liveVideoRef} src={displayBg.url} className="absolute inset-0 w-full h-full object-cover opacity-80" autoPlay loop muted={isVideoMuted} playsInline />
+                                  ) : displayBg?.url ? (
+                                    <img src={displayBg.url} className="absolute inset-0 w-full h-full object-cover opacity-80" alt="bg" />
+                                  ) : null}
+                                  
+                                  {!isCleared && !displayClearText && displaySlide && (
+                                    <SmartTextLayout text={displaySlide.text} source={displaySlide.source} type={displaySlide.type} styleOverrides={applyGlobalStyles(displaySlide, mainConfig)} className="relative z-10 w-full h-full animate-in fade-in duration-300" />
+                                  )}
+                                  
+                                  {isCleared && (
+                                    <div className="absolute inset-0 flex items-center justify-center bg-[#0a0a0a]/40 backdrop-blur-sm z-20"><span className="text-neutral-500 font-bold tracking-widest uppercase text-base flex items-center gap-2"><EyeOff size={32}/></span></div>
+                                  )}
+                                  {isLocked && (
+                                    <div className="absolute inset-0 flex items-center justify-center bg-red-900/40 backdrop-blur-[2px] z-30"><Lock size={48} className="text-red-500 bg-black/60 p-2.5 rounded-full shadow-[0_0_25px_rgba(239,68,68,0.8)]" /></div>
+                                  )}
+                                  {liveState.isPresenting && !isCleared && !isLocked && (
+                                     <div className="absolute top-3 right-3 bg-red-600 text-white text-[10px] tracking-widest font-bold px-2 py-0.5 rounded shadow-[0_0_15px_rgba(239,68,68,1)] z-40 animate-pulse">LIVE</div>
+                                  )}
 
-                                    {isOutCleared && (
-                                       <div className="absolute inset-0 flex items-center justify-center bg-[#0a0a0a]/80 backdrop-blur-sm z-20"><span className="text-neutral-600 font-bold tracking-widest uppercase text-sm flex items-center gap-1"><X size={14}/> Cleared</span></div>
-                                    )}
-                                 </>
-                               )
-                            })()}
+                                  {!displayBg && (!displaySlide || displayClearText || isCleared) && (
+                                    <div className="absolute inset-0 flex items-center justify-center bg-transparent"><span className="text-white/5 font-bold tracking-widest uppercase text-2xl">Black</span></div>
+                                  )}
+                              </>
+                            )
+                        })()}
+                    </FixedStage>
+                 </div>
+              </div>
 
-                         </FixedStage>
-                      </div>
-                   </div>
-                );
-             })}
+              {/* SIDE SCREENS (Stacked) */}
+              <div className="w-56 xl:w-64 2xl:w-72 flex flex-col gap-3 shrink-0 h-full overflow-y-auto custom-scrollbar pr-1">
+                 {otherOutputs.map(out => {
+                    const isOutLocked = !!liveState.lockedOutputs?.[out.id];
+                    const isOutCleared = !!liveState.clearedOutputs?.[out.id];
 
+                    return (
+                        <div key={out.id} className="flex flex-col shrink-0 min-h-0 flex-1">
+                           <div className="flex justify-between items-center mb-1.5 px-1">
+                              <span className="text-[10px] uppercase font-bold tracking-widest text-[#a1a1aa]">{out.name}</span>
+                              <div className="flex items-center gap-1">
+                                 <button onClick={() => toggleLockOutput(out.id)} className={`text-[10px] uppercase font-bold tracking-widest px-1 ${isOutLocked ? 'text-red-500' : 'text-neutral-600 hover:text-white transition-colors'}`}>Lock</button>
+                                 <button onClick={() => toggleClearOutput(out.id)} className={`p-0.5 rounded transition-colors text-neutral-600 hover:text-white hover:bg-white/10 ${isOutCleared ? 'text-red-500' : ''}`}><EyeOff size={10} /></button>
+                                 <button onClick={() => openProjector(out.id)} className="text-neutral-600 hover:text-white p-0.5 rounded hover:bg-white/10 transition-colors"><LaunchIcon size={10} /></button>
+                              </div>
+                           </div>
+                           <div className={`flex-1 aspect-video bg-black rounded-xl border overflow-hidden relative shadow-inner ${liveState.isPresenting && !isOutLocked && !isOutCleared ? 'border-white/10' : 'border-transparent opacity-50 grayscale-[50%]'}`}>
+                               <FixedStage className="w-full h-full pointer-events-none bg-black">
+                                  {(() => {
+                                     const frozenState = liveState.frozenStates?.[out.id];
+                                     const displaySlide = isOutLocked ? frozenState?.slide : liveState.slide;
+                                     const displayBg = isOutLocked ? frozenState?.bg : out.defaultBackground;
+                                     const displayClearText = isOutLocked ? frozenState?.clearText : liveState.clearText;
+                                     const hideBg = isOutCleared;
+
+                                     return (
+                                       <>
+                                          {!hideBg && displayBg?.type === 'color' && <div className="absolute inset-0 w-full h-full" style={{ backgroundColor: displayBg.color || '#000' }}></div>}
+                                          {!hideBg && displayBg?.url && displayBg.type === 'video' ? (
+                                             <video className="bg-video-player absolute inset-0 w-full h-full object-cover opacity-80" src={displayBg.url} autoPlay loop muted playsInline />
+                                          ) : !hideBg && displayBg?.url ? (
+                                             <img src={displayBg.url} className="absolute inset-0 w-full h-full object-cover opacity-80" alt="bg" />
+                                          ) : null}
+                                          
+                                          {!isOutCleared && !displayClearText && displaySlide && (
+                                             <SmartTextLayout text={displaySlide.text} source={displaySlide.source} type={displaySlide.type} styleOverrides={applyGlobalStyles(displaySlide, out)} className="relative z-10 w-full h-full animate-in fade-in duration-300" />
+                                          )}
+
+                                          {isOutCleared && (
+                                             <div className="absolute inset-0 flex items-center justify-center bg-[#0a0a0a]/80 backdrop-blur-sm z-20"><span className="text-neutral-500 flex items-center gap-1"><EyeOff size={24}/></span></div>
+                                          )}
+                                          {isOutLocked && (
+                                             <div className="absolute inset-0 flex items-center justify-center bg-red-900/40 backdrop-blur-[2px] z-30"><Lock size={32} className="text-red-500 bg-black/60 p-2 rounded-full shadow-[0_0_15px_rgba(239,68,68,0.8)]" /></div>
+                                          )}
+                                          {liveState.isPresenting && !isOutCleared && !isOutLocked && (
+                                              <div className="absolute top-2 right-2 bg-red-600 text-white text-[8px] tracking-widest font-bold px-1.5 py-0.5 rounded shadow-[0_0_10px_rgba(239,68,68,1)] z-40 animate-pulse">LIVE</div>
+                                          )}
+                                       </>
+                                     )
+                                  })()}
+                               </FixedStage>
+                           </div>
+                        </div>
+                    );
+                 })}
+              </div>
           </div>
        </div>
      );
   };
 
+  const renderActionBar = () => {
+     const mainConfig = liveState.settings?.outputs.find(o => o.id === 'main');
+     const frozenState = liveState.frozenStates?.['main'];
+     const isLocked = !!liveState.lockedOutputs?.['main'];
+     
+     const currentBg = isLocked ? frozenState?.bg : (liveState.globalBackground || mainConfig?.defaultBackground);
+     const isVideo = currentBg?.type === 'video';
+
+     return (
+        <div className="h-12 bg-[#09090B] border-y border-white/5 flex items-center justify-between px-4 shrink-0 shadow-sm z-20 overflow-hidden relative">
+           {/* Clear Controls */}
+           <div className="flex items-center gap-2">
+              <button onClick={toggleClearText} className={`flex items-center gap-2 px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${liveState.clearText ? 'bg-orange-500/10 text-orange-500 border border-orange-500/30 shadow-[0_0_10px_rgba(249,115,22,0.1)] hover:bg-orange-500/20' : 'bg-white/5 text-neutral-400 hover:bg-white/10 hover:text-white border border-transparent'}`} title="Clear Text"><EyeOff size={14} /><span>Clear Text</span></button>
+              <button onClick={() => setGlobalBackground(null)} className="flex items-center gap-2 px-4 py-1.5 rounded-lg text-xs font-bold transition-all bg-white/5 text-neutral-400 hover:bg-white/10 hover:text-white border border-transparent" title="Clear Media"><MonitorOff size={14} /><span>Clear Media</span></button>
+              <button onClick={clearAll} className="flex items-center gap-2 px-4 py-1.5 rounded-lg text-xs font-bold transition-all hover:bg-red-500/20 text-red-500 border border-transparent hover:border-red-500/30 hover:shadow-[0_0_10px_rgba(239,68,68,0.15)]" title="Clear All"><X size={14} /><span>Clear All</span></button>
+           </div>
+           
+           {/* Video Controls */}
+           {isVideo ? (
+               <div className="flex items-center gap-2 bg-white/5 border border-white/10 rounded-lg p-1 px-2 text-neutral-300 shadow-inner">
+                  <button onClick={togglePlay} className="hover:text-white hover:bg-white/20 p-1 rounded transition-colors text-blue-400">{isVideoPlaying ? <Pause size={14} /> : <Play size={14} />}</button>
+                  <button onClick={toggleMute} className="hover:text-white hover:bg-white/20 p-1 rounded transition-colors ml-1 cursor-pointer">{isVideoMuted ? <VolumeX size={14} /> : <Volume2 size={14} />}</button>
+                  <div className="text-xs text-white font-mono w-12 text-right ml-1 tracking-wider">{formatTime(videoCurrentTime)}</div>
+                  <input type="range" min="0" step="0.1" max={videoDuration || 100} value={videoCurrentTime} onChange={handleSeek} className="w-48 h-1.5 bg-white/20 rounded-lg appearance-none cursor-pointer accent-blue-500 hover:accent-blue-400 mx-3" />
+               </div>
+           ) : (
+               <div className="flex items-center h-full px-4 border border-dashed border-white/10 rounded-lg text-neutral-700 font-bold uppercase tracking-widest text-[10px]">
+                  No Active Video
+               </div>
+           )}
+           
+           {/* Docking Controls */}
+           <div className="flex items-center gap-2">
+               <button onClick={() => setIsSidebarVisible(!isSidebarVisible)} className={`p-1.5 rounded-lg transition-colors border ${!isSidebarVisible ? 'bg-blue-500/20 text-blue-400 border-blue-500/30' : 'bg-white/5 text-neutral-400 border-transparent hover:bg-white/10 hover:text-white'}`} title="Toggle Sidebars">
+                   {isSidebarVisible ? <PanelLeftClose size={16} /> : <PanelLeft size={16} />}
+               </button>
+           </div>
+        </div>
+     );
+  };
+
   return (
-    <div className="flex flex-col h-screen bg-[#1e1e1e] text-neutral-200 overflow-hidden font-sans select-none">
+    <div className="flex flex-col h-screen bg-black text-neutral-200 overflow-hidden font-sans select-none">
       <SettingsModal isOpen={isSettingsModalOpen} onClose={() => setIsSettingsModalOpen(false)} settings={globalSettings} onSave={setGlobalSettings} />
 
       {/* TOP HEADER */}
-      <header className="h-14 bg-[#0a0a0a] border-b border-neutral-800 flex items-center justify-between px-4 shrink-0 shadow-sm z-30">
+      <header className="h-14 bg-[#09090B] border-b border-white/5 flex items-center justify-between px-4 shrink-0 shadow-sm z-30">
         <div className="flex items-center space-x-3 w-64">
-          <div className="bg-blue-600 p-1.5 rounded-lg shadow-inner"><Layers size={20} className="text-white" /></div>
+          <div className="bg-blue-600 p-1.5 rounded-lg shadow-inner flex items-center justify-center">
+             <Layers size={18} className="text-white" />
+          </div>
           <span className="font-bold text-white tracking-widest text-sm">FLOWSHOW</span>
         </div>
 
         {/* MASTER PRESENT TOGGLE */}
         <button
            onClick={togglePresenting}
-           className={`flex items-center gap-2 px-8 py-2 rounded-full text-sm font-bold transition-all shadow-lg ${
+           className={`flex items-center gap-2 px-6 py-1.5 rounded-full text-xs font-bold transition-all ${
               liveState.isPresenting
-              ? 'bg-red-600 hover:bg-red-500 text-white shadow-[0_0_20px_rgba(220,38,38,0.5)]'
-              : 'bg-[#252525] text-neutral-400 hover:text-white border border-neutral-700 hover:border-neutral-500'
+              ? 'bg-red-500/10 text-red-500 border border-red-500/20 shadow-[0_0_15px_rgba(239,68,68,0.15)] hover:bg-red-500/20'
+              : 'bg-white/5 text-neutral-400 hover:text-white border border-white/10 hover:border-white/20'
            }`}
         >
-           <MonitorPlay size={16} />
+           <MonitorPlay size={14} />
            {liveState.isPresenting ? 'LIVE (PRESENTING)' : 'OFFLINE'}
         </button>
 
         <div className="w-64 flex justify-end"></div>
       </header>
+      
+      {/* MONITOR BRIDGE (A/B View & Stacks) */}
+      {renderMonitorBridge()}
+
+      {/* ACTION BAR */}
+      {renderActionBar()}
 
       {/* 3-COLUMN WORKSPACE */}
       <div className="flex flex-1 overflow-hidden">
         
         {/* PRIMARY SIDEBAR (NAVIGATION) */}
-        <div className="w-16 bg-[#0a0a0a] border-r border-neutral-800 flex flex-col items-center py-4 gap-6 shrink-0 z-20">
-          <div className="flex flex-col gap-2 w-full px-2">
-            <button onClick={() => setActiveTab('songs')} className={`w-full aspect-square flex justify-center items-center rounded-xl transition-all ${activeTab === 'songs' ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20' : 'text-neutral-500 hover:bg-[#252525] hover:text-white'}`} title="Songs"><Music size={20} /></button>
-            <button onClick={() => setActiveTab('bibles')} className={`w-full aspect-square flex justify-center items-center rounded-xl transition-all ${activeTab === 'bibles' ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20' : 'text-neutral-500 hover:bg-[#252525] hover:text-white'}`} title="Bibles"><BookOpen size={20} /></button>
-            <button onClick={() => setActiveTab('media')} className={`w-full aspect-square flex justify-center items-center rounded-xl transition-all ${activeTab === 'media' ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20' : 'text-neutral-500 hover:bg-[#252525] hover:text-white'}`} title="Media"><ImageIcon size={20} /></button>
-            <div className="w-8 h-px bg-neutral-800 mx-auto my-1"></div>
-            <button onClick={() => setActiveTab('audio')} className={`w-full aspect-square flex justify-center items-center rounded-xl transition-all ${activeTab === 'audio' ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20' : 'text-neutral-500 hover:bg-[#252525] hover:text-white'}`} title="Live Transcriber"><Mic size={20} /></button>
+        {isSidebarVisible && (
+          <div className="w-16 bg-[#09090B] border-r border-white/5 flex flex-col items-center py-4 gap-4 shrink-0 z-20">
+            <div className="flex flex-col gap-2 w-full px-2">
+              <button onClick={() => setActiveTab('songs')} className={`w-full aspect-square flex justify-center items-center rounded-xl transition-all ${activeTab === 'songs' ? 'bg-white/10 text-white shadow-sm' : 'text-neutral-500 hover:bg-white/5 hover:text-white'}`} title="Songs"><Music size={20} strokeWidth={activeTab === 'songs' ? 2.5 : 2} /></button>
+              <button onClick={() => setActiveTab('bibles')} className={`w-full aspect-square flex justify-center items-center rounded-xl transition-all ${activeTab === 'bibles' ? 'bg-white/10 text-white shadow-sm' : 'text-neutral-500 hover:bg-white/5 hover:text-white'}`} title="Bibles"><BookOpen size={20} strokeWidth={activeTab === 'bibles' ? 2.5 : 2} /></button>
+              <button onClick={() => setActiveTab('media')} className={`w-full aspect-square flex justify-center items-center rounded-xl transition-all ${activeTab === 'media' ? 'bg-white/10 text-white shadow-sm' : 'text-neutral-500 hover:bg-white/5 hover:text-white'}`} title="Media"><ImageIcon size={20} strokeWidth={activeTab === 'media' ? 2.5 : 2} /></button>
+              <div className="w-8 h-px bg-white/5 mx-auto my-2"></div>
+              <button onClick={() => setActiveTab('audio')} className={`w-full aspect-square flex justify-center items-center rounded-xl transition-all ${activeTab === 'audio' ? 'bg-white/10 text-white shadow-sm' : 'text-neutral-500 hover:bg-white/5 hover:text-white'}`} title="Live Transcriber"><Mic size={20} strokeWidth={activeTab === 'audio' ? 2.5 : 2} /></button>
+            </div>
+            <div className="mt-auto w-full px-2">
+              <button onClick={() => setIsSettingsModalOpen(true)} className="w-full aspect-square flex justify-center items-center rounded-xl text-neutral-500 hover:bg-white/5 hover:text-white transition-all" title="Settings"><Settings size={20} /></button>
+            </div>
           </div>
-          <div className="mt-auto w-full px-2">
-            <button onClick={() => setIsSettingsModalOpen(true)} className="w-full aspect-square flex justify-center items-center rounded-xl text-neutral-500 hover:bg-[#252525] hover:text-white transition-all" title="Settings"><Settings size={20} /></button>
-          </div>
-        </div>
+        )}
 
         {/* SECONDARY SIDEBAR (LISTS) */}
-        {(activeTab !== 'media' && activeTab !== 'audio') && (
-           <div className="w-64 bg-[#1a1a1a] border-r border-neutral-800 shrink-0 flex flex-col z-10">
+        {(isSidebarVisible && activeTab !== 'media' && activeTab !== 'audio') && (
+           <div className="w-64 bg-[#121214] border-r border-white/5 shrink-0 flex flex-col z-10">
               {renderSidebarList()}
            </div>
         )}
 
         {/* CENTER WORKSPACE */}
-        <div className="flex-1 flex flex-col min-w-0 bg-[#141414] relative">
-           
-           {/* ACTIVE SCREENS PREVIEW GRID (TOP) - ALWAYS PREVIEW & FULL COLOR */}
-           <div className="h-44 lg:h-56 bg-[#141414] border-b border-neutral-800 p-4 shadow-sm z-10 shrink-0 flex flex-col">
-              <div className="flex items-center justify-between mb-3 shrink-0">
-                 <span className="text-xs font-bold uppercase tracking-widest text-neutral-400">Preview Screens (Always Shows Selection)</span>
-              </div>
-
-              <div className="flex-1 flex gap-4 overflow-x-auto items-center justify-center custom-scrollbar">
-                 {liveState.settings?.outputs.filter(o => o.enabled).map(out => {
-                    let activeBg = out.defaultBackground;
-                    if (out.id === 'main' && liveState.globalBackground) {
-                       activeBg = liveState.globalBackground;
-                    }
-
-                    return (
-                       <div key={out.id} className="h-full flex flex-col justify-center">
-                          <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-500 mb-1.5 px-1">{out.name} Preview</span>
-                          <div className="h-full max-h-[100px] lg:max-h-[140px] aspect-video rounded-md overflow-hidden border border-neutral-700 bg-black relative shadow-lg">
-                             <FixedStage className="w-full h-full pointer-events-none">
-                                {activeBg?.type === 'color' && <div className="absolute inset-0 w-full h-full" style={{ backgroundColor: activeBg.color || '#000' }}></div>}
-                                {activeBg?.url && activeBg.type === 'video' ? (
-                                   <video src={activeBg.url} className="absolute inset-0 w-full h-full object-cover opacity-60" autoPlay loop muted playsInline />
-                                ) : activeBg?.url ? (
-                                   <img src={activeBg.url} className="absolute inset-0 w-full h-full object-cover opacity-60" alt="bg" />
-                                ) : null}
-                                
-                                {/* PREVIEW ALWAYS SHOWS PREVIEW SLIDE IN FULL COLOR */}
-                                {previewSlide && (
-                                   <div className="absolute inset-0 z-10 flex">
-                                      <SmartTextLayout text={previewSlide.text} source={previewSlide.source} type={previewSlide.type} styleOverrides={applyGlobalStyles(previewSlide, out)} />
-                                   </div>
-                                )}
-
-                                {!activeBg && !previewSlide && (
-                                   <div className="absolute inset-0 flex items-center justify-center bg-[#0a0a0a]"><span className="text-neutral-700 font-bold tracking-widest uppercase text-xl">Black</span></div>
-                                )}
-                             </FixedStage>
-                          </div>
-                       </div>
-                    );
-                 })}
-              </div>
-           </div>
-           
-           <div className="flex-1 overflow-hidden relative">
+        <div className="flex-1 flex flex-col min-w-0 bg-[#09090B] relative">
+           <div className="flex-1 overflow-hidden relative bg-[#09090B]">
               {renderCenterWorkspace()}
            </div>
-        </div>
-
-        {/* RIGHT ACTION PANEL (PROGRAM MONITOR) */}
-        <div className="w-80 lg:w-[400px] bg-[#1a1a1a] border-l border-neutral-800 shrink-0 flex flex-col z-20 shadow-[-10px_0_20px_rgba(0,0,0,0.2)]">
-           {renderRightPanel()}
         </div>
 
       </div>
 
       {/* CONTEXT MENUS */}
       {contextMenu && (
-        <div className="fixed z-50 bg-[#252525] border border-neutral-700 rounded shadow-lg overflow-hidden py-1 w-48" style={{ top: contextMenu.y, left: contextMenu.x }} onClick={(e) => e.stopPropagation()}>
+        <div className="fixed z-50 bg-[#18181B] border border-white/10 rounded-lg shadow-2xl overflow-hidden py-1.5 w-48 backdrop-blur-xl" style={{ top: contextMenu.y, left: contextMenu.x }} onClick={(e) => e.stopPropagation()}>
           {contextMenu.type === 'slide' ? (
              <>
-               <button className="w-full text-left px-4 py-2 hover:bg-[#333] text-neutral-300 hover:text-white text-sm transition-colors flex items-center gap-2" onClick={() => { setIsEditingSong(true); setEditingSlideIndex(contextMenu.id as number); setEditingSlideText(songsList[activeItemIndex].slides[contextMenu.id as number].text); setContextMenu(null); }}><Edit2 size={14}/> Edit</button>
-               <button className="w-full text-left px-4 py-2 hover:bg-[#333] text-neutral-300 hover:text-white text-sm transition-colors flex items-center gap-2" onClick={() => { handleDuplicateSlide(contextMenu.id as number); setContextMenu(null); }}><Copy size={14}/> Duplicate</button>
-               <button className="w-full text-left px-4 py-2 hover:bg-[#333] text-neutral-300 hover:text-white text-sm transition-colors flex items-center gap-2" onClick={() => { handleSplitSlide(contextMenu.id as number); setContextMenu(null); }}><Split size={14}/> Split</button>
-               <button className="w-full text-left px-4 py-2 hover:bg-red-500/20 text-red-500 text-sm transition-colors flex items-center gap-2" onClick={() => { handleDeleteSlide(contextMenu.id as number); setContextMenu(null); }}><Trash size={14}/> Delete</button>
+               <button className="w-full text-left px-4 py-2 hover:bg-white/5 text-neutral-300 hover:text-white text-sm transition-colors flex items-center gap-2" onClick={() => { setIsEditingSong(true); setEditingSlideIndex(contextMenu.id as number); setEditingSlideText(songsList[activeItemIndex].slides[contextMenu.id as number].text); setContextMenu(null); }}><Edit2 size={14}/> Edit</button>
+               <button className="w-full text-left px-4 py-2 hover:bg-white/5 text-neutral-300 hover:text-white text-sm transition-colors flex items-center gap-2" onClick={() => { handleDuplicateSlide(contextMenu.id as number); setContextMenu(null); }}><Copy size={14}/> Duplicate</button>
+               <button className="w-full text-left px-4 py-2 hover:bg-white/5 text-neutral-300 hover:text-white text-sm transition-colors flex items-center gap-2" onClick={() => { handleSplitSlide(contextMenu.id as number); setContextMenu(null); }}><Split size={14}/> Split</button>
+               <div className="h-px w-full bg-white/5 my-1" />
+               <button className="w-full text-left px-4 py-2 hover:bg-red-500/10 text-red-400 text-sm transition-colors flex items-center gap-2" onClick={() => { handleDeleteSlide(contextMenu.id as number); setContextMenu(null); }}><Trash size={14}/> Delete</button>
              </>
           ) : (
             <>
-               <button className="w-full text-left px-4 py-2 hover:bg-[#333] text-neutral-300 hover:text-white text-sm transition-colors flex items-center gap-2" onClick={() => {
+               <button className="w-full text-left px-4 py-2 hover:bg-white/5 text-neutral-300 hover:text-white text-sm transition-colors flex items-center gap-2" onClick={() => {
                    if (contextMenu.type === 'song') {
                       const song = songsList.find(s => s.id === contextMenu.id);
                       if (song) { const newName = prompt("Rename Song:", song.title); if (newName && newName.trim()) setSongsList(prev => prev.map(s => s.id === contextMenu.id ? { ...s, title: newName.trim() } : s)); }
@@ -1258,7 +1652,8 @@ function ControlPanel() {
                    }
                    setContextMenu(null);
                  }}><Edit2 size={14}/> Rename {contextMenu.type === 'song' ? 'Song' : 'Bible'}</button>
-               <button className="w-full text-left px-4 py-2 hover:bg-red-500/20 text-red-500 text-sm transition-colors flex items-center gap-2" onClick={() => {
+               <div className="h-px w-full bg-white/5 my-1" />
+               <button className="w-full text-left px-4 py-2 hover:bg-red-500/10 text-red-400 text-sm transition-colors flex items-center gap-2" onClick={() => {
                    if (contextMenu.type === 'song') deleteSong(contextMenu.id); else if (contextMenu.type === 'bible') handleDeleteBible(contextMenu.id as string);
                    setContextMenu(null);
                  }}><Trash size={14}/> Delete {contextMenu.type === 'song' ? 'Song' : 'Bible'}</button>

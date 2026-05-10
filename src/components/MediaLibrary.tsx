@@ -249,26 +249,34 @@ export function MediaLibrary({ onSelectBackground }: { onSelectBackground: (url:
       }
    };
 
-   const canUseFileAccessApi = 'showDirectoryPicker' in window;
+   let isIframe = false;
+   try {
+     isIframe = window.self !== window.top;
+   } catch (e) {
+     isIframe = true;
+   }
+   // AI Studio Preview might run in a same-origin iframe internally but lack file system API permissions due to missing Feature-Policy.
+   const isAIStudioPreview = window.location.hostname.includes('webcontainer') || window.location.hostname.includes('preview');
+   const canUseFileAccessApi = 'showDirectoryPicker' in window && !isIframe && !isAIStudioPreview;
 
    return (
-      <div className="flex h-full bg-[#1e1e1e] border border-neutral-800 rounded-lg overflow-hidden min-h-[500px]">
+      <div className="flex h-full bg-[#030303] border border-white/5 rounded-xl overflow-hidden min-h-0 shadow-lg relative">
          {/* Sidebar */}
-         <div className="w-48 md:w-56 border-r border-neutral-800 bg-[#141414] flex flex-col shrink-0 h-full min-h-0">
-             <div className="p-3 border-b border-neutral-800 bg-[#1a1a1a]">
+         <div className="w-48 md:w-56 border-r border-white/5 bg-[#09090B] flex flex-col shrink-0 h-full min-h-0">
+             <div className="p-4 border-b border-white/5 bg-[#09090B]">
                 <h3 className="text-sm font-semibold text-white flex items-center gap-2">
                    <ImageIcon size={16} className="text-blue-500" />
                    Media Library
                 </h3>
              </div>
              
-             <div className="flex-1 overflow-y-auto p-2 space-y-4 custom-scrollbar">
+             <div className="flex-1 overflow-y-auto p-3 space-y-4 custom-scrollbar">
                 <div>
-                   <div className="text-[10px] font-bold text-neutral-500 uppercase tracking-wider mb-2 px-2">Built-in</div>
+                   <div className="text-[10px] font-bold text-neutral-500 uppercase tracking-widest mb-2 px-2">Built-in</div>
                    <button 
                        onClick={() => selectSource('demo')}
-                       className={`w-full text-left px-3 py-2 rounded-md text-sm transition-colors flex items-center gap-2
-                           ${activeSourceId === 'demo' ? 'bg-blue-600/20 text-blue-400 border border-blue-500/30' : 'text-neutral-300 hover:bg-[#252525] hover:text-white border border-transparent'}
+                       className={`w-full text-left px-3 py-2.5 rounded-lg text-sm transition-all flex items-center gap-2
+                           ${activeSourceId === 'demo' ? 'bg-blue-600/20 text-blue-400 border border-blue-500/30' : 'text-neutral-300 hover:bg-white/5 hover:text-white border border-transparent'}
                        `}
                    >
                        <ImageIcon size={16} /> 
@@ -277,23 +285,23 @@ export function MediaLibrary({ onSelectBackground }: { onSelectBackground: (url:
                 </div>
                 
                 <div>
-                   <div className="text-[10px] font-bold text-neutral-500 uppercase tracking-wider mb-2 px-2 flex justify-between items-center">
+                   <div className="text-[10px] font-bold text-neutral-500 uppercase tracking-widest mb-2 px-2 flex justify-between items-center">
                        <span>Local Folders</span>
                    </div>
                    
                    {topLevelFolders.map(f => (
-                       <div key={f.name} className={`group flex items-center justify-between px-3 py-2 rounded-md text-sm border transition-colors cursor-pointer mb-1
-                           ${activeSourceId === f.name ? 'bg-blue-600/20 text-blue-400 border-blue-500/30' : 'text-neutral-300 hover:bg-[#252525] hover:text-white border-transparent'}
+                       <div key={f.name} className={`group flex items-center justify-between px-3 py-2.5 rounded-lg text-sm border transition-all cursor-pointer mb-1
+                           ${activeSourceId === f.name ? 'bg-blue-600/20 text-blue-400 border-blue-500/30' : 'text-neutral-300 hover:bg-white/5 hover:text-white border-transparent'}
                        `}>
                            <div className="flex items-center gap-2 overflow-hidden flex-1" onClick={() => selectSource(f.name)}>
                                {unauthorizedFolders.includes(f) ? (
-                                   <div className="w-2 h-2 rounded-full bg-orange-500 shrink-0" title="Needs Permission" />
-                               ) : <Folder size={16} className="shrink-0" />}
+                                   <div className="w-2 h-2 rounded-full bg-orange-500 shrink-0 shadow-[0_0_8px_rgba(249,115,22,0.6)]" title="Needs Permission" />
+                               ) : <Folder size={16} className="shrink-0 text-blue-400" />}
                                <span className="truncate">{f.name}</span>
                            </div>
                            
                            {unauthorizedFolders.includes(f) ? (
-                               <button onClick={() => requestFolderPermission(f)} className="text-[10px] bg-orange-500/20 text-orange-400 px-1.5 py-0.5 rounded border border-orange-500/30 hover:bg-orange-500/30 shrink-0 ml-2">Grant</button>
+                               <button onClick={() => requestFolderPermission(f)} className="text-[10px] font-bold bg-orange-500/20 text-orange-400 px-2 py-1 rounded border border-orange-500/30 hover:bg-orange-500/30 shrink-0 ml-2 uppercase tracking-wide">Grant</button>
                            ) : (
                                <button onClick={() => removeFolder(f.name)} className="text-neutral-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity p-1 shrink-0"><Trash size={14} /></button>
                            )}
@@ -301,11 +309,11 @@ export function MediaLibrary({ onSelectBackground }: { onSelectBackground: (url:
                    ))}
                    
                    {fallbackSources.map(f => (
-                       <div key={f.name} className={`group flex items-center justify-between px-3 py-2 rounded-md text-sm border transition-colors cursor-pointer mb-1
-                           ${activeSourceId === f.name ? 'bg-blue-600/20 text-blue-400 border-blue-500/30' : 'text-neutral-300 hover:bg-[#252525] hover:text-white border-transparent'}
+                       <div key={f.name} className={`group flex items-center justify-between px-3 py-2.5 rounded-lg text-sm border transition-all cursor-pointer mb-1
+                           ${activeSourceId === f.name ? 'bg-blue-600/20 text-blue-400 border-blue-500/30' : 'text-neutral-300 hover:bg-white/5 hover:text-white border-transparent'}
                        `}>
                            <div className="flex items-center gap-2 overflow-hidden flex-1" onClick={() => selectSource(f.name)}>
-                               <Folder size={16} className="shrink-0" />
+                               <Folder size={16} className="shrink-0 text-blue-400" />
                                <span className="truncate">{f.name}</span>
                            </div>
                            <button onClick={() => removeFallbackFolder(f.name)} className="text-neutral-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity p-1 shrink-0"><Trash size={14} /></button>
@@ -314,24 +322,24 @@ export function MediaLibrary({ onSelectBackground }: { onSelectBackground: (url:
                 </div>
              </div>
              
-             <div className="p-3 border-t border-neutral-800 bg-[#1a1a1a]">
+             <div className="p-4 border-t border-white/5 bg-[#09090B] shrink-0 mt-auto relative z-20 shadow-[0_-5px_15px_rgba(0,0,0,0.5)]">
                   {canUseFileAccessApi ? (
                     <button 
                         onClick={handleAddFolder}
-                        className="flex items-center justify-center w-full gap-2 px-4 py-2 bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 rounded-lg text-sm text-white transition-colors"
+                        className="flex items-center justify-center w-full gap-2 px-4 py-2.5 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-sm text-white font-medium transition-all shadow-sm"
                     >
                         <FolderPlus size={16} />
-                        Add Folder
+                        Add Native Folder
                     </button>
                   ) : (
-                    <label className="flex items-center justify-center w-full gap-2 px-4 py-2 bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 rounded-lg text-sm text-white transition-colors cursor-pointer">
+                    <label className="flex items-center justify-center w-full gap-2 px-4 py-2.5 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border border-blue-500/30 rounded-lg text-sm font-medium transition-all cursor-pointer shadow-sm relative overflow-hidden">
                         <FolderPlus size={16} />
-                        Add Folder
+                        Add Local Folder
                         <input 
                             type="file" 
-                            {...({ webkitdirectory: "", directory: "" } as any)}
+                            {...({ webkitdirectory: "true", directory: "true" } as any)}
                             multiple 
-                            className="hidden" 
+                            className="absolute inset-0 opacity-0 cursor-pointer w-full h-full" 
                             onChange={handleFallbackFolderSelect}
                         />
                     </label>
@@ -340,14 +348,14 @@ export function MediaLibrary({ onSelectBackground }: { onSelectBackground: (url:
          </div>
 
          {/* Main View Area */}
-         <div className="flex-1 flex flex-col min-w-0 bg-[#0a0a0a]">
+         <div className="flex-1 flex flex-col min-w-0 bg-[#030303]">
             {/* Breadcrumb Path */}
-            <div className="h-12 border-b border-neutral-800 flex items-center px-4 bg-[#141414] shrink-0 overflow-x-auto custom-scrollbar">
+            <div className="h-14 border-b border-white/5 flex items-center px-6 bg-[#09090B] shrink-0 overflow-x-auto custom-scrollbar">
                 <div className="flex items-center gap-2 min-w-max">
                     {pathStack.length > 1 && (
                         <button 
                            onClick={goUp} 
-                           className="p-1 text-neutral-400 hover:text-white hover:bg-neutral-800 rounded transition-colors mr-1"
+                           className="p-1.5 text-neutral-400 hover:text-white hover:bg-white/5 rounded-md transition-all mr-2"
                            title="Go Up"
                         >
                            <ArrowUp size={16} />
@@ -355,7 +363,7 @@ export function MediaLibrary({ onSelectBackground }: { onSelectBackground: (url:
                     )}
                     {pathStack.map((p, i) => (
                         <React.Fragment key={i}>
-                            {i > 0 && <ChevronRight size={14} className="text-neutral-600" />}
+                            {i > 0 && <ChevronRight size={14} className="text-neutral-600 mx-1" />}
                             <span className={`text-sm ${i === pathStack.length - 1 ? 'text-white font-medium' : 'text-neutral-500'}`}>
                                 {p.name}
                             </span>
@@ -365,26 +373,30 @@ export function MediaLibrary({ onSelectBackground }: { onSelectBackground: (url:
             </div>
             
             {/* Folder Contents */}
-            <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
+            <div className="flex-1 overflow-y-auto p-6 md:p-8 custom-scrollbar">
                {isLoadingDir ? (
-                   <div className="flex items-center justify-center h-full text-neutral-500 animate-pulse text-sm">
+                   <div className="flex flex-col items-center justify-center h-full gap-4 text-neutral-500 animate-pulse text-sm">
+                       <Folder size={32} className="text-neutral-700 opacity-50" />
                        Reading directory...
                    </div>
                ) : currentDisplayItems.length === 0 ? (
-                   <div className="flex items-center justify-center h-full text-neutral-600 text-sm italic">
+                   <div className="flex flex-col items-center justify-center h-full text-neutral-600 text-sm italic gap-4">
+                       <div className="w-16 h-16 rounded-full bg-white/5 flex items-center justify-center border border-white/5">
+                           <Folder size={24} className="text-neutral-700" />
+                       </div>
                        Folder is empty
                    </div>
                ) : (
-                   <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4">
+                   <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-6">
                       {currentDisplayItems.map((item, idx) => (
                          item.kind === 'directory' ? (
                             <div 
                                key={`dir-${idx}`}
                                onClick={() => enterFolder(item)} 
-                               className="cursor-pointer bg-[#141414] hover:bg-[#1a1a1a] border border-neutral-800 hover:border-blue-500/50 rounded-xl p-4 flex flex-col items-center justify-center text-center aspect-video gap-3 transition-colors group shadow-sm"
+                               className="cursor-pointer bg-[#121214] hover:bg-[#18181A] border border-white/5 hover:border-blue-500/50 rounded-xl p-6 flex flex-col items-center justify-center text-center aspect-video gap-4 transition-all group shadow-[0_4px_12px_rgba(0,0,0,0.2)] hover:shadow-[0_8px_24px_rgba(0,0,0,0.4)]"
                             >
-                               <div className="bg-blue-500/10 p-3 rounded-full group-hover:scale-110 transition-transform">
-                                   <Folder size={28} className="text-blue-500" />
+                               <div className="bg-blue-500/10 p-4 rounded-full group-hover:scale-110 transition-transform">
+                                   <Folder size={32} className="text-blue-500 shadow-sm" />
                                </div>
                                <span className="text-sm font-medium text-neutral-300 group-hover:text-white truncate w-full px-2" title={item.name}>
                                    {item.name}
@@ -410,13 +422,13 @@ function MediaCard({ media, onSelect }: { media: MediaItem, onSelect: () => void
    return (
       <div 
          onClick={onSelect}
-         className="relative aspect-video rounded-xl overflow-hidden cursor-pointer group border border-neutral-800 hover:border-blue-500 hover:shadow-[0_0_15px_rgba(59,130,246,0.3)] bg-[#1a1a1a] transition-all"
+         className="relative aspect-video rounded-xl overflow-hidden cursor-pointer group border border-white/5 hover:border-blue-500 hover:shadow-[0_0_20px_rgba(59,130,246,0.3)] bg-[#121214] transition-all shadow-[0_4px_12px_rgba(0,0,0,0.2)]"
          title={media.name}
       >
          {media.type === 'video' ? (
             <video 
               src={media.url} 
-              className="absolute inset-0 w-full h-full object-cover" 
+              className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" 
               muted loop playsInline
               onMouseOver={e => (e.target as HTMLVideoElement).play()}
               onMouseOut={e => {
@@ -426,15 +438,15 @@ function MediaCard({ media, onSelect }: { media: MediaItem, onSelect: () => void
               }}
             />
          ) : (
-            <img src={media.url} alt={media.name} className="absolute inset-0 w-full h-full object-cover" />
+            <img src={media.url} alt={media.name} className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
          )}
          
-         <div className="absolute top-2 left-2 bg-black/60 p-1.5 rounded-lg text-white backdrop-blur-md pointer-events-none shadow-sm">
+         <div className="absolute top-2 left-2 bg-black/60 p-1.5 rounded-lg text-white backdrop-blur-md pointer-events-none shadow-sm z-10 border border-white/10">
             {media.type === 'video' ? <Video size={14} /> : <ImageIcon size={14} />}
          </div>
          
-         <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/90 to-transparent pt-8 pb-2 px-3 pointer-events-none">
-            <div className="text-xs text-neutral-200 truncate font-medium">
+         <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/90 via-black/50 to-transparent pt-12 pb-3 px-4 pointer-events-none translate-y-2 group-hover:translate-y-0 transition-transform duration-300">
+            <div className="text-xs text-neutral-200 truncate font-semibold drop-shadow-md">
                {media.name}
             </div>
          </div>

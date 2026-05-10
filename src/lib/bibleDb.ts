@@ -25,12 +25,9 @@ export type BibleVersion = {
 const memoryBibles: Record<string, BibleVersion> = {};
 
 export async function initDatabase() {
-  const deletedKjv = localStorage.getItem('deleted_bible_kjv');
-  if (deletedKjv) return;
-
   try {
-    const existingKjv = await get('bible_kjv');
-    if (!existingKjv) {
+    const existingKjv = await get('bible_kjv') as BibleVersion | undefined;
+    if (!existingKjv || existingKjv.books?.length < 66) {
       // First time loading the KJV
       const response = await fetch('/kjv-formatted.json');
       if (response.ok) {
