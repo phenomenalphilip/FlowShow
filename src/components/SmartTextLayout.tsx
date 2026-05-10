@@ -11,6 +11,8 @@ interface SmartTextLayoutProps {
     global?: React.CSSProperties & { '--font-scale'?: number };
     words?: { [wordIndex: number]: React.CSSProperties };
     layout?: { x: number; y: number; width: number; height: number };
+    sourceGlobal?: React.CSSProperties & { '--font-scale'?: number };
+    sourceLayout?: { x: number; y: number; width: number; height: number };
   };
   onWordClick?: (wordIndex: number, e: React.MouseEvent) => void;
   onWordMouseDown?: (wordIndex: number, e: React.MouseEvent) => void;
@@ -96,7 +98,9 @@ export function SmartTextLayout({ text, lines, source, type, className = '', sty
 
   const posClass = useAbsolute ? 'absolute' : 'relative w-full h-full';
 
-  return (
+  const shouldRenderSeparateSource = source && useAbsolute && styleOverrides?.sourceLayout;
+
+  const mainContent = (
     <div 
       ref={containerRef}
       className={`${posClass} flex flex-col justify-center overflow-hidden ${className.replace(/relative/g, '').replace(/w-full/g, '').replace(/h-full/g, '')}`}
@@ -164,11 +168,12 @@ export function SmartTextLayout({ text, lines, source, type, className = '', sty
              </div>
           ))}
         </div>
-        {source && (
+        {!shouldRenderSeparateSource && source && (
           <h2 
             className="mt-6 text-2xl font-heading font-bold text-amber-400 text-center tracking-wide"
             style={{
-               textShadow: '0 4px 8px rgba(0,0,0,0.8)'
+               textShadow: '0 4px 8px rgba(0,0,0,0.8)',
+               ...styleOverrides?.global // Default to global text overrides if no separate box is there
             }}
           >
              {source}
@@ -176,5 +181,23 @@ export function SmartTextLayout({ text, lines, source, type, className = '', sty
         )}
       </div>
     </div>
+  );
+
+  if (!shouldRenderSeparateSource) return mainContent;
+
+  return (
+    <>
+      {mainContent}
+      <SmartTextLayout 
+          text={source} 
+          type="lyrics" 
+          styleOverrides={{ 
+            global: styleOverrides.sourceGlobal || { color: '#fbbf24', fontWeight: 'bold' }, 
+            layout: styleOverrides.sourceLayout 
+          }} 
+          disableAbsoluteLayout={false}
+          className={className}
+      />
+    </>
   );
 }

@@ -38,6 +38,8 @@ export type SlideDefinition = {
     global?: React.CSSProperties & { '--font-scale'?: number };
     words?: { [wordIndex: number]: React.CSSProperties };
     layout?: { x: number; y: number; width: number; height: number };
+    sourceGlobal?: React.CSSProperties & { '--font-scale'?: number };
+    sourceLayout?: { x: number; y: number; width: number; height: number };
   };
 };
 
@@ -49,7 +51,7 @@ export interface OutputSettings {
   lyricsStyleEnabled: boolean;
   lyricsStyle: { global?: React.CSSProperties & { '--font-scale'?: number }; layout?: { x: number; y: number; width: number; height: number } } | React.CSSProperties;
   bibleStyleEnabled: boolean;
-  bibleStyle: { global?: React.CSSProperties & { '--font-scale'?: number }; layout?: { x: number; y: number; width: number; height: number } } | React.CSSProperties;
+  bibleStyle: { global?: React.CSSProperties & { '--font-scale'?: number }; layout?: { x: number; y: number; width: number; height: number }; sourceGlobal?: React.CSSProperties & { '--font-scale'?: number }; sourceLayout?: { x: number; y: number; width: number; height: number } } | React.CSSProperties;
   displayId?: string;
 }
 
@@ -67,7 +69,12 @@ const DEFAULT_SETTINGS: GlobalSettings = {
       lyricsStyleEnabled: false,
       lyricsStyle: { color: '#ffffff', textAlign: 'center', fontWeight: 'bold', fontStyle: 'normal' },
       bibleStyleEnabled: false,
-      bibleStyle: { color: '#ffffff', textAlign: 'left', fontWeight: 'normal', fontStyle: 'normal' }
+      bibleStyle: {
+        global: { color: '#ffffff', textAlign: 'left', fontWeight: 'normal', fontStyle: 'normal' },
+        layout: { x: 0.1, y: 0.1, width: 0.8, height: 0.6 },
+        sourceGlobal: { color: '#fbbf24', textAlign: 'left', fontWeight: 'bold', fontStyle: 'normal' },
+        sourceLayout: { x: 0.1, y: 0.8, width: 0.8, height: 0.1 }
+      }
     },
     {
       id: 'livestream',
@@ -77,7 +84,12 @@ const DEFAULT_SETTINGS: GlobalSettings = {
       lyricsStyleEnabled: true,
       lyricsStyle: { color: '#ffffff', textAlign: 'center', fontWeight: 'bold', fontStyle: 'normal', textShadow: '2px 2px 4px #000000' },
       bibleStyleEnabled: true,
-      bibleStyle: { color: '#ffffff', textAlign: 'left', fontWeight: 'normal', fontStyle: 'normal', textShadow: '2px 2px 4px #000000' }
+      bibleStyle: {
+        global: { color: '#ffffff', textAlign: 'left', fontWeight: 'normal', fontStyle: 'normal', textShadow: '2px 2px 4px #000000' },
+        layout: { x: 0.1, y: 0.1, width: 0.8, height: 0.6 },
+        sourceGlobal: { color: '#fbbf24', textAlign: 'left', fontWeight: 'bold', fontStyle: 'normal', textShadow: '2px 2px 4px #000000' },
+        sourceLayout: { x: 0.1, y: 0.8, width: 0.8, height: 0.1 }
+      }
     },
     {
       id: 'stage',
@@ -87,7 +99,12 @@ const DEFAULT_SETTINGS: GlobalSettings = {
       lyricsStyleEnabled: true,
       lyricsStyle: { color: '#ffffff', textAlign: 'center', fontWeight: 'bold', fontStyle: 'normal' },
       bibleStyleEnabled: true,
-      bibleStyle: { color: '#ffffff', textAlign: 'left', fontWeight: 'normal', fontStyle: 'normal' }
+      bibleStyle: {
+        global: { color: '#ffffff', textAlign: 'left', fontWeight: 'normal', fontStyle: 'normal' },
+        layout: { x: 0.1, y: 0.1, width: 0.8, height: 0.6 },
+        sourceGlobal: { color: '#fbbf24', textAlign: 'left', fontWeight: 'bold', fontStyle: 'normal' },
+        sourceLayout: { x: 0.1, y: 0.8, width: 0.8, height: 0.1 }
+      }
     }
   ]
 };
@@ -124,10 +141,13 @@ const applyGlobalStyles = (slide: SlideDefinition | null, outputConfig?: OutputS
      };
   }
   if (slide.type === 'scripture' && outputConfig.bibleStyleEnabled) {
+     const bibleStyle = outputConfig.bibleStyle as any;
      mergedStyle = {
        ...mergedStyle,
-       global: { ...mergedStyle.global, ...(outputConfig.bibleStyle as any)?.global || outputConfig.bibleStyle },
-       layout: (outputConfig.bibleStyle as any)?.layout || mergedStyle.layout,
+       global: { ...mergedStyle.global, ...bibleStyle?.global || bibleStyle },
+       layout: bibleStyle?.layout || mergedStyle.layout,
+       sourceGlobal: { ...mergedStyle.sourceGlobal, ...bibleStyle?.sourceGlobal },
+       sourceLayout: bibleStyle?.sourceLayout || mergedStyle.sourceLayout
      };
   }
   return mergedStyle;
@@ -380,7 +400,16 @@ function ControlPanel() {
         if (val) {
             const mergedOutputs = DEFAULT_SETTINGS.outputs.map(defOut => {
                 const savedOut = val.outputs?.find((o: any) => o.id === defOut.id);
-                return savedOut ? { ...defOut, ...savedOut, enabled: savedOut.enabled !== undefined ? savedOut.enabled : defOut.enabled } : defOut;
+                if (savedOut) {
+                    return { 
+                        ...defOut, 
+                        ...savedOut, 
+                        enabled: savedOut.enabled !== undefined ? savedOut.enabled : defOut.enabled,
+                        lyricsStyle: { ...(defOut.lyricsStyle as any), ...(savedOut.lyricsStyle as any) },
+                        bibleStyle: { ...(defOut.bibleStyle as any), ...(savedOut.bibleStyle as any) }
+                    };
+                }
+                return defOut;
             });
             setGlobalSettings({ ...DEFAULT_SETTINGS, ...val, outputs: mergedOutputs });
         }
@@ -1310,8 +1339,8 @@ function ControlPanel() {
            </div>
            
            {/* Slide Grid */}
-           <div className="flex-1 overflow-y-auto p-6 bg-[#09090B] custom-scrollbar">
-              <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6 content-start">
+           <div className="flex-1 overflow-y-auto p-3 bg-[#09090B] custom-scrollbar z-0">
+              <div className="grid grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 2xl:grid-cols-10 gap-3 content-start">
                  {activeSong.slides.map((slide, i) => {
                     const isLive = liveState.slide?.id === slide.id;
                     const isPreview = previewSlide?.id === slide.id;
@@ -1335,14 +1364,6 @@ function ControlPanel() {
                          
                          {/* Slide Number Badge */}
                          <div className="absolute top-3 left-3 text-[10px] font-bold text-neutral-500 bg-[#09090B]/80 px-2 py-1 rounded shadow-sm border border-white/10 backdrop-blur-md z-10">{i + 1}</div>
-                         
-                         {/* Hover Actions */}
-                         <div className="absolute bottom-3 right-3 opacity-0 group-hover:opacity-100 flex items-center bg-[#09090B]/90 rounded-lg border border-white/10 shadow-xl overflow-hidden transition-all backdrop-blur-md z-20">
-                           <button onClick={(e) => { e.stopPropagation(); setIsEditingSong(true); setEditingSlideIndex(i); setEditingSlideText(slide.text); }} className="p-2 hover:bg-white/10 text-neutral-300 hover:text-white transition-colors" title="Edit"><Edit2 size={12} /></button>
-                           <button onClick={(e) => { e.stopPropagation(); handleDuplicateSlide(i); }} className="p-2 hover:bg-white/10 text-neutral-300 hover:text-white transition-colors border-l border-white/5" title="Duplicate"><Copy size={12} /></button>
-                           <button onClick={(e) => { e.stopPropagation(); handleSplitSlide(i); }} className="p-2 hover:bg-white/10 text-neutral-300 hover:text-white transition-colors border-l border-white/5" title="Split"><Split size={12} /></button>
-                           <button onClick={(e) => { e.stopPropagation(); handleDeleteSlide(i); }} className="p-2 hover:bg-red-500/20 text-red-400 transition-colors border-l border-white/5" title="Delete"><Trash size={12} /></button>
-                         </div>
                        </div>
                     );
                  })}
@@ -1363,8 +1384,8 @@ function ControlPanel() {
      }
 
      return (
-       <div className="bg-[#030303] flex p-4 gap-6 shrink-0 z-20 h-64 lg:h-72 w-full justify-center shadow-2xl relative">
-          <div className="flex gap-6 w-full max-w-[2000px]">
+       <div className="bg-[#030303] flex p-2 gap-3 shrink-0 z-20 h-32 lg:h-40 w-full justify-center shadow-md relative border-b border-white/5">
+          <div className="flex gap-3 w-full max-w-[2000px]">
               {/* PREVIEW CONTAINER */}
               <div className="flex-1 flex flex-col min-w-0">
                  <div className="flex justify-between items-center px-1 mb-2 shrink-0">
@@ -1458,7 +1479,7 @@ function ControlPanel() {
               </div>
 
               {/* SIDE SCREENS (Stacked) */}
-              <div className="w-56 xl:w-64 2xl:w-72 flex flex-col gap-3 shrink-0 h-full overflow-y-auto custom-scrollbar pr-1">
+              <div className="w-48 xl:w-56 2xl:w-64 flex flex-col gap-2 shrink-0 h-full overflow-y-auto custom-scrollbar pr-1">
                  {otherOutputs.map(out => {
                     const isOutLocked = !!liveState.lockedOutputs?.[out.id];
                     const isOutCleared = !!liveState.clearedOutputs?.[out.id];
@@ -1615,7 +1636,7 @@ function ControlPanel() {
 
         {/* SECONDARY SIDEBAR (LISTS) */}
         {(isSidebarVisible && activeTab !== 'media' && activeTab !== 'audio') && (
-           <div className="w-64 bg-[#121214] border-r border-white/5 shrink-0 flex flex-col z-10">
+           <div className="w-48 xl:w-56 bg-[#121214] border-r border-white/5 shrink-0 flex flex-col z-10 transition-all">
               {renderSidebarList()}
            </div>
         )}

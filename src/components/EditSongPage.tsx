@@ -388,22 +388,42 @@ export function EditSongPage({ song, initialSlideIndex = 0, onSave, onClose }: E
           <div className="flex-1 overflow-y-auto p-6 space-y-8 custom-scrollbar">
              {/* Edit Text */}
              {selectedSlideIndices.length === 1 && activeSlide && (
-               <div className="space-y-3">
-                 <label className="text-[10px] font-bold text-neutral-500 uppercase tracking-widest flex items-center justify-between">
-                    <span>Slide Text</span>
-                    <span className="text-neutral-600 font-mono text-[9px]">RAW TEXT</span>
-                 </label>
-                 <textarea 
-                   className="w-full h-32 bg-white/5 border border-white/10 rounded-lg p-3 text-sm text-white outline-none focus:border-blue-500 transition-all font-medium custom-scrollbar resize-y leading-relaxed"
-                   value={activeSlide.text}
-                   onChange={(e) => {
-                       setSlides(prev => {
-                          const next = [...prev];
-                          next[activeSlideIndex] = { ...next[activeSlideIndex], text: e.target.value };
-                          return next;
-                       });
-                   }}
-                 />
+               <div className="space-y-4">
+                 <div className="space-y-2">
+                   <label className="text-[10px] font-bold text-neutral-500 uppercase tracking-widest flex items-center justify-between">
+                      <span>Reference / Source</span>
+                      <span className="text-neutral-600 font-mono text-[9px]">OPTIONAL</span>
+                   </label>
+                   <input 
+                     type="text"
+                     className="w-full bg-white/5 border border-white/10 rounded-lg p-2.5 text-sm text-white outline-none focus:border-blue-500 transition-all font-medium"
+                     value={activeSlide.source || ''}
+                     onChange={(e) => {
+                         setSlides(prev => {
+                            const next = [...prev];
+                            next[activeSlideIndex] = { ...next[activeSlideIndex], source: e.target.value };
+                            return next;
+                         });
+                     }}
+                   />
+                 </div>
+                 <div className="space-y-2">
+                   <label className="text-[10px] font-bold text-neutral-500 uppercase tracking-widest flex items-center justify-between">
+                      <span>Slide Text</span>
+                      <span className="text-neutral-600 font-mono text-[9px]">RAW TEXT</span>
+                   </label>
+                   <textarea 
+                     className="w-full h-32 bg-white/5 border border-white/10 rounded-lg p-3 text-sm text-white outline-none focus:border-blue-500 transition-all font-medium custom-scrollbar resize-y leading-relaxed"
+                     value={activeSlide.text}
+                     onChange={(e) => {
+                         setSlides(prev => {
+                            const next = [...prev];
+                            next[activeSlideIndex] = { ...next[activeSlideIndex], text: e.target.value };
+                            return next;
+                         });
+                     }}
+                   />
+                 </div>
                </div>
              )}
 
