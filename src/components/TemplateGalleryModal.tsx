@@ -16,6 +16,8 @@ import { TemplateEditor } from './TemplateEditor';
 export interface TemplateGalleryModalProps {
   isOpen: boolean;
   onClose: () => void;
+  /** 'modal' wraps in a full-screen overlay (default). 'inline' renders directly into its parent container. */
+  variant?: 'modal' | 'inline';
   mode?: 'manage' | 'select-for-slide' | 'select-for-output';
   targetSongTitle?: string;
   targetSlideIndex?: number;
@@ -33,6 +35,7 @@ export interface TemplateGalleryModalProps {
 export function TemplateGalleryModal({
   isOpen,
   onClose,
+  variant = 'modal',
   mode = 'manage',
   targetSongTitle,
   targetSlideIndex,
@@ -171,9 +174,8 @@ export function TemplateGalleryModal({
     onClose();
   };
 
-  return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/85 backdrop-blur-md p-4 lg:p-8 animate-in fade-in duration-200">
-      <div className="bg-[#09090b] border border-white/10 rounded-2xl w-full max-w-6xl h-[88vh] flex flex-col shadow-2xl overflow-hidden relative">
+  const inner = (
+      <div className={variant === 'inline' ? 'flex flex-col h-full w-full overflow-hidden relative bg-[#09090b]' : 'bg-[#09090b] border border-white/10 rounded-2xl w-full max-w-6xl h-[88vh] flex flex-col shadow-2xl overflow-hidden relative'}>
 
         {/* If in Edit Mode, render TemplateEditor */}
         {editingTemplate ? (
@@ -637,6 +639,157 @@ export function TemplateGalleryModal({
           </div>
         )}
 
+      </div>
+  );
+
+  if (variant === 'inline') return inner;
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/85 backdrop-blur-md p-4 lg:p-8 animate-in fade-in duration-200">
+      {inner}
+    </div>
+  );
+}
+
+// ─── Compact inline template grid (bottom panel Templates tab) ────────────────
+
+export interface InlineTemplateGridProps {
+  templates: PresentationTemplate[];
+  category: string;
+  onCategoryChange: (c: string) => void;
+  onLoadTemplates: () => void;
+  onEdit: (t: PresentationTemplate) => void;
+  onApplyToSong?: (t: PresentationTemplate, songId?: string, outputId?: string) => void;
+  activeSongId?: string;
+}
+
+const INLINE_CATEGORIES = [
+  { id: 'all', label: 'All' },
+  { id: 'worship', label: 'Worship' },
+  { id: 'high-energy', label: 'High Energy' },
+  { id: 'broadcast', label: 'Broadcast' },
+  { id: 'scripture', label: 'Scripture' },
+  { id: 'modern', label: 'Modern' },
+  { id: 'custom', label: 'Custom' },
+];
+
+export function InlineTemplateGrid({
+  templates,
+  category,
+  onCategoryChange,
+  onLoadTemplates,
+  onEdit,
+  onApplyToSong,
+  activeSongId,
+}: InlineTemplateGridProps) {
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const [previewKey, setPreviewKey] = useState(0);
+  const [editingTemplate, setEditingTemplate] = useState<PresentationTemplate | null>(null);
+
+  useEffect(() => { onLoadTemplates(); }, []);
+
+  const filtered = category === 'all'
+    ? templates
+    : category === 'custom'
+      ? templates.filter(t => t.isCustom || t.category === 'custom')
+      : templates.filter(t => t.category === category);
+
+  if (editingTemplate) {
+    return (
+      <div className="flex-1 min-h-0 bg-[#09090b] flex flex-col overflow-hidden">
+        <TemplateEditor
+          template={editingTemplate}
+          onSave={async (updated) => { onLoadTemplates(); setEditingTemplate(null); }}
+          onSaveAsCopy={async (copy) => { onLoadTemplates(); setEditingTemplate(null); }}
+          onDelete={async () => { onLoadTemplates(); setEditingTemplate(null); }}
+          onApplyToSlide={() => {}}
+          onApplyToSong={(t) => { onApplyToSong?.(t, activeSongId); setEditingTemplate(null); }}
+          onClose={() => setEditingTemplate(null)}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex-1 min-h-0 bg-[#0c0c11] flex flex-col overflow-hidden">
+      {/* Category strip */}
+      <div className="h-8 px-3 flex items-center gap-1 border-b border-[#1e1e2a] shrink-0 overflow-x-auto">
+        {INLINE_CATEGORIES.map(cat => (
+          <button
+            key={cat.id}
+            onClick={() => onCategoryChange(cat.id)}
+            className={`px-2.5 py-0.5 rounded text-[11px] font-semibold whitespace-nowrap transition-all ${
+              category === cat.id
+                ? 'bg-pink-600 text-white'
+                : 'text-neutral-400 hover:text-white hover:bg-white/5'
+            }`}
+          >
+            {cat.label}
+          </button>
+        ))}
+        <div className="ml-auto shrink-0 text-[10px] text-neutral-600">{filtered.length} templates</div>
+      </div>
+
+      {/* Grid */}
+      <div className="flex-1 overflow-y-auto p-2 custom-scrollbar">
+        <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))' }}>
+          {filtered.map(t => {
+            const isHovered = hoveredId === t.id;
+            return (
+              <div
+                key={t.id}
+                className="group flex flex-col rounded-lg overflow-hidden border border-white/8 hover:border-pink-500/60 transition-all duration-150 cursor-pointer bg-[#121218]"
+                onMouseEnter={() => { setHoveredId(t.id); setPreviewKey(k => k + 1); }}
+                onMouseLeave={() => setHoveredId(null)}
+                onClick={() => setEditingTemplate(t)}
+              >
+                {/* 16:9 preview */}
+                <div
+                  className="aspect-video w-full relative overflow-hidden"
+                  style={{ background: t.backgroundPreview || '#09090b' }}
+                >
+                  <div
+                    key={isHovered ? `h-${previewKey}-${t.id}` : `s-${t.id}`}
+                    className="w-full h-full pointer-events-none"
+                  >
+                    <SmartTextLayout
+                      text={"AMAZING GRACE\nHOW SWEET THE SOUND"}
+                      animation={t.animation}
+                      styleOverrides={{
+                        global: { ...t.styles.global, fontSize: '10px', lineHeight: 1.2 },
+                        lines: t.styles.lines,
+                        layout: t.styles.layout,
+                      }}
+                      className="w-full h-full"
+                    />
+                  </div>
+                </div>
+                {/* Name bar */}
+                <div className="px-2 py-1 flex items-center justify-between gap-1 bg-[#0e0e14]">
+                  <span className="text-[10px] font-semibold text-neutral-300 truncate leading-tight">{t.name}</span>
+                  {onApplyToSong && activeSongId && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); onApplyToSong(t, activeSongId); }}
+                      className="shrink-0 opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded bg-pink-600/80 hover:bg-pink-500 text-white"
+                      title="Apply to current song"
+                    >
+                      <Check size={9} />
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+
+          {/* New template button */}
+          <div
+            className="flex flex-col items-center justify-center aspect-video rounded-lg border border-dashed border-white/15 hover:border-pink-500/40 text-neutral-500 hover:text-pink-400 transition-all cursor-pointer bg-[#0e0e14] text-[10px] gap-1"
+            onClick={() => onEdit({} as PresentationTemplate)}
+          >
+            <Plus size={16} />
+            <span>New</span>
+          </div>
+        </div>
       </div>
     </div>
   );

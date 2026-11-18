@@ -29,8 +29,8 @@ import { SmartTextLayout } from './components/SmartTextLayout';
 import { FixedStage } from './components/FixedStage';
 import { BibleVersion, getBibleList, getBible, saveBible, deleteBible, initDatabase } from './lib/bibleDb';
 import { parseBibleXml } from './lib/xmlParser';
-import { AnimationConfig, PresentationTemplate } from './lib/templates';
-import { TemplateGalleryModal } from './components/TemplateGalleryModal';
+import { AnimationConfig, PresentationTemplate, STARTER_TEMPLATES, getStoredTemplates } from './lib/templates';
+import { TemplateGalleryModal, TemplateGalleryModalProps, InlineTemplateGrid } from './components/TemplateGalleryModal';
 
 export type SlideType = 'lyrics' | 'scripture' | 'blank' | 'media';
 
@@ -576,18 +576,19 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
     );
   };
 
+  // Tabs marked hidden are kept for later; set hidden: false to bring one back.
   const SETTINGS_NAV = [
-    { id: 'general', name: 'General', icon: Settings },
+    { id: 'general', name: 'General', icon: Settings, hidden: true },
     { id: 'outputs', name: 'Outputs', icon: MonitorPlay },
     { id: 'style', name: 'Styles', icon: Sparkles },
-    { id: 'audio', name: 'Audio', icon: Volume2 },
-    { id: 'connection', name: 'Connection', icon: Wifi },
-    { id: 'files', name: 'Files', icon: FileText },
-    { id: 'profiles', name: 'Profiles', icon: Layers },
-    { id: 'theme', name: 'Theme', icon: LayoutTemplate },
-    { id: 'smart', name: 'Smart', icon: Activity },
+    { id: 'audio', name: 'Audio', icon: Volume2, hidden: true },
+    { id: 'connection', name: 'Connection', icon: Wifi, hidden: true },
+    { id: 'files', name: 'Files', icon: FileText, hidden: true },
+    { id: 'profiles', name: 'Profiles', icon: Layers, hidden: true },
+    { id: 'theme', name: 'Theme', icon: LayoutTemplate, hidden: true },
+    { id: 'smart', name: 'Smart', icon: Activity, hidden: true },
     { id: 'help', name: 'Help', icon: BookOpen }
-  ];
+  ].filter(item => !item.hidden);
 
   return (
     <>
@@ -1041,6 +1042,42 @@ function ControlPanel() {
   const [rightInspectorTab, setRightInspectorTab] = useState<'groups' | 'metadata'>('groups');
   const [selectedProjectFolder, setSelectedProjectFolder] = useState<string>('11/18/26');
   const [slideViewMode, setSlideViewMode] = useState<'grid' | 'list'>('grid');
+
+  // Inline template grid
+  const [inlineTemplates, setInlineTemplates] = useState<PresentationTemplate[]>(STARTER_TEMPLATES);
+  const [inlineTemplateCategory, setInlineTemplateCategory] = useState<string>('all');
+
+  // Resizable bottom panel
+  const [bottomPanelHeight, setBottomPanelHeight] = useState(280);
+  const [bottomPanelCollapsed, setBottomPanelCollapsed] = useState(false);
+  const bottomDragRef = useRef<{ startY: number; startH: number } | null>(null);
+
+  const handleDividerMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startH = bottomPanelHeight;
+    bottomDragRef.current = { startY, startH };
+    let dragged = false;
+
+    const onMove = (ev: MouseEvent) => {
+      const delta = startY - ev.clientY; // drag up → bigger
+      if (Math.abs(delta) > 3) dragged = true;
+      const next = Math.max(120, Math.min(600, startH + delta));
+      setBottomPanelHeight(next);
+      if (bottomPanelCollapsed && delta > 20) setBottomPanelCollapsed(false);
+    };
+
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      // If barely moved, treat as a click → toggle collapse
+      if (!dragged) setBottomPanelCollapsed(c => !c);
+      bottomDragRef.current = null;
+    };
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
 
   const [activeItemIndex, setActiveItemIndex] = useState(0);
   const [serviceSetlist, setServiceSetlist] = useState<ServiceSetlist>(DEFAULT_SAMPLE_SETLIST);
@@ -3122,19 +3159,16 @@ function ControlPanel() {
     const songsCount = songsList.filter(s => s.category === 'Songs').length;
 
     return (
-      <div className="h-[38vh] min-h-[250px] max-h-[360px] bg-[#0c0c11] flex flex-col shrink-0 overflow-hidden select-none">
+      <div className="h-full bg-[#0c0c11] flex flex-col overflow-hidden select-none">
         {/* Horizontal Tab Strip across Top of Bottom Panel */}
         <div className="h-9 bg-[#101015] border-b border-[#262635] flex items-center justify-between px-3 shrink-0">
           <div className="flex items-center space-x-1 lg:space-x-3 overflow-x-auto">
             {[
               { id: 'shows', label: 'Shows', icon: FileText },
               { id: 'media', label: 'Media', icon: ImageIcon },
-              { id: 'audio', label: 'Audio', icon: Mic },
-              { id: 'overlays', label: 'Overlays', icon: Layers },
               { id: 'templates', label: 'Templates', icon: Sparkles },
               { id: 'scripture', label: 'Scripture', icon: BookOpen },
-              { id: 'calendar', label: 'Calendar', icon: Calendar },
-              { id: 'functions', label: 'Functions', icon: Puzzle },
+              // hidden until needed: audio, overlays, calendar, functions
             ].map(tab => {
               const Icon = tab.icon;
               const isActive = bottomTab === tab.id;
@@ -3373,20 +3407,15 @@ function ControlPanel() {
             {renderCenterWorkspace()}
           </div>
         ) : bottomTab === 'templates' ? (
-          <div className="flex-1 min-h-0 bg-[#0d0d12] p-4 overflow-y-auto">
-            <div className="flex justify-between items-center mb-3">
-              <span className="text-xs font-bold text-white uppercase tracking-wider">Motion & Layout Templates</span>
-              <button onClick={() => setIsTemplateGalleryOpen(true)} className="text-xs bg-pink-600 hover:bg-pink-500 text-white font-bold px-3 py-1 rounded-full">Open Full Gallery</button>
-            </div>
-            <div className="grid grid-cols-3 gap-3">
-              {['Cinematic Ambient', 'Bottom Lower Third', 'Large Scrolling Banner'].map(tName => (
-                <div key={tName} className="p-3 bg-white/5 border border-white/10 rounded-xl hover:border-pink-500/50 cursor-pointer">
-                  <div className="text-xs font-bold text-white mb-1">{tName}</div>
-                  <div className="text-[10px] text-neutral-400">Dynamic motion template for worship and presentations</div>
-                </div>
-              ))}
-            </div>
-          </div>
+          <InlineTemplateGrid
+            templates={inlineTemplates}
+            category={inlineTemplateCategory}
+            onCategoryChange={setInlineTemplateCategory}
+            onLoadTemplates={() => getStoredTemplates().then(setInlineTemplates)}
+            onEdit={(t) => { setIsTemplateGalleryOpen(true); }}
+            onApplyToSong={templateGalleryHandlers.onApplyToSong}
+            activeSongId={songsList[activeItemIndex]?.id}
+          />
         ) : (
           <div className="flex-1 min-h-0 flex items-center justify-center text-neutral-500 text-xs">
             {bottomTab.toUpperCase()} Module
@@ -3395,6 +3424,87 @@ function ControlPanel() {
       </div>
     );
   };
+
+  const templateGalleryHandlers = {
+    mode: "manage" as const,
+    availableSongs: songsList,
+    availableOutputs: globalSettings.outputs.filter(o => o.enabled),
+    onApplyToSong: (template, songId, outputId) => {
+      const targetSongId = songId || songsList[activeItemIndex]?.id;
+      if (!targetSongId) return;
+      setSongsList(prev => prev.map(song => {
+        if (song.id !== targetSongId) return song;
+        if (outputId) {
+          return {
+            ...song,
+            outputTemplates: { ...(song.outputTemplates || {}), [outputId]: template.id },
+            slides: song.slides.map(s => ({
+              ...s,
+              outputTemplates: { ...(s.outputTemplates || {}), [outputId]: template.id }
+            }))
+          };
+        }
+        return {
+          ...song,
+          templateId: template.id,
+          slides: song.slides.map(s => ({
+            ...s,
+            templateId: template.id,
+            animation: template.animation,
+            styleOverrides: {
+              ...(s.styleOverrides || {}),
+              global: { ...(s.styleOverrides?.global || {}), ...(template.styles.global || {}) },
+              lines: { ...(s.styleOverrides?.lines || {}), ...(template.styles.lines || {}) },
+              layout: template.styles.layout || s.styleOverrides?.layout
+            }
+          }))
+        };
+      }));
+    },
+    onApplyToSlide: (template, outputId) => {
+      const currentSong = songsList[activeItemIndex];
+      if (!currentSong) return;
+      const targetSlideId = previewSlide?.id || liveState.slide?.id || currentSong.slides[0]?.id;
+      const updatedSlides = currentSong.slides.map(s => {
+        if (s.id === targetSlideId) {
+          if (outputId) {
+            return {
+              ...s,
+              outputTemplates: { ...(s.outputTemplates || {}), [outputId]: template.id }
+            };
+          }
+          return {
+            ...s,
+            templateId: template.id,
+            animation: template.animation,
+            styleOverrides: {
+              ...(s.styleOverrides || {}),
+              global: { ...(s.styleOverrides?.global || {}), ...(template.styles.global || {}) },
+              lines: { ...(s.styleOverrides?.lines || {}), ...(template.styles.lines || {}) },
+              layout: template.styles.layout || s.styleOverrides?.layout
+            }
+          };
+        }
+        return s;
+      });
+      setSongsList(prev => prev.map((s, idx) => idx === activeItemIndex ? { ...s, slides: updatedSlides } : s));
+      if (previewSlide) {
+        const matched = updatedSlides.find(s => s.id === previewSlide.id);
+        if (matched) setPreviewSlide(matched);
+      }
+      if (liveState.slide) {
+        const matched = updatedSlides.find(s => s.id === liveState.slide.id);
+        if (matched) setLiveState(prev => ({ ...prev, slide: matched }));
+      }
+    },
+    onApplyToOutput: (template, outputId) => {
+      const targetId = outputId || 'main';
+      setGlobalSettings(prev => ({
+        ...prev,
+        outputs: prev.outputs.map(o => o.id === targetId ? { ...o, defaultTemplateId: template.id } : o)
+      }));
+    },
+  } satisfies Partial<TemplateGalleryModalProps>;
 
   return (
     <div className="flex flex-col h-screen bg-black text-neutral-200 overflow-hidden font-sans select-none">
@@ -3501,14 +3611,35 @@ function ControlPanel() {
       </header>
 
       {/* TOP SECTION: 3-COLUMN WORKSPACE (Projects | Slide Grid | Output Monitors) */}
-      <div className="flex-1 min-h-0 flex overflow-hidden border-b border-[#262635]">
+      <div className="flex-1 min-h-0 flex overflow-hidden">
         {renderProjectsSidebar()}
         {renderCenterSlideArea()}
         {renderRightOutputsPanel()}
       </div>
 
+      {/* DRAG HANDLE DIVIDER */}
+      <div
+        onMouseDown={handleDividerMouseDown}
+        className="group relative h-[5px] shrink-0 bg-[#1a1a24] hover:bg-pink-500/40 transition-colors duration-150 cursor-row-resize select-none z-10"
+        title={bottomPanelCollapsed ? 'Click to expand panel' : 'Drag to resize · Click to collapse'}
+      >
+        {/* centre grip dots */}
+        <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 flex justify-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
+          <span className="w-1 h-1 rounded-full bg-pink-400" />
+          <span className="w-1 h-1 rounded-full bg-pink-400" />
+          <span className="w-1 h-1 rounded-full bg-pink-400" />
+          <span className="w-1 h-1 rounded-full bg-pink-400" />
+          <span className="w-1 h-1 rounded-full bg-pink-400" />
+        </div>
+      </div>
+
       {/* BOTTOM SECTION: HORIZONTAL LIBRARY & BROWSER */}
-      {renderBottomBrowser()}
+      <div
+        style={{ height: bottomPanelCollapsed ? 0 : bottomPanelHeight }}
+        className="shrink-0 overflow-hidden transition-[height] duration-200 ease-in-out"
+      >
+        {renderBottomBrowser()}
+      </div>
 
       {/* CONTEXT MENUS */}
       {contextMenu && (
@@ -3548,84 +3679,7 @@ function ControlPanel() {
       <TemplateGalleryModal
         isOpen={isTemplateGalleryOpen}
         onClose={() => setIsTemplateGalleryOpen(false)}
-        mode="manage"
-        availableSongs={songsList}
-        availableOutputs={globalSettings.outputs.filter(o => o.enabled)}
-        onApplyToSong={(template, songId, outputId) => {
-          const targetSongId = songId || songsList[activeItemIndex]?.id;
-          if (!targetSongId) return;
-          setSongsList(prev => prev.map(song => {
-            if (song.id !== targetSongId) return song;
-            if (outputId) {
-              return {
-                ...song,
-                outputTemplates: { ...(song.outputTemplates || {}), [outputId]: template.id },
-                slides: song.slides.map(s => ({
-                  ...s,
-                  outputTemplates: { ...(s.outputTemplates || {}), [outputId]: template.id }
-                }))
-              };
-            }
-            return {
-              ...song,
-              templateId: template.id,
-              slides: song.slides.map(s => ({
-                ...s,
-                templateId: template.id,
-                animation: template.animation,
-                styleOverrides: {
-                  ...(s.styleOverrides || {}),
-                  global: { ...(s.styleOverrides?.global || {}), ...(template.styles.global || {}) },
-                  lines: { ...(s.styleOverrides?.lines || {}), ...(template.styles.lines || {}) },
-                  layout: template.styles.layout || s.styleOverrides?.layout
-                }
-              }))
-            };
-          }));
-        }}
-        onApplyToSlide={(template, outputId) => {
-          const currentSong = songsList[activeItemIndex];
-          if (!currentSong) return;
-          const targetSlideId = previewSlide?.id || liveState.slide?.id || currentSong.slides[0]?.id;
-          const updatedSlides = currentSong.slides.map(s => {
-            if (s.id === targetSlideId) {
-              if (outputId) {
-                return {
-                  ...s,
-                  outputTemplates: { ...(s.outputTemplates || {}), [outputId]: template.id }
-                };
-              }
-              return {
-                ...s,
-                templateId: template.id,
-                animation: template.animation,
-                styleOverrides: {
-                  ...(s.styleOverrides || {}),
-                  global: { ...(s.styleOverrides?.global || {}), ...(template.styles.global || {}) },
-                  lines: { ...(s.styleOverrides?.lines || {}), ...(template.styles.lines || {}) },
-                  layout: template.styles.layout || s.styleOverrides?.layout
-                }
-              };
-            }
-            return s;
-          });
-          setSongsList(prev => prev.map((s, idx) => idx === activeItemIndex ? { ...s, slides: updatedSlides } : s));
-          if (previewSlide) {
-            const matched = updatedSlides.find(s => s.id === previewSlide.id);
-            if (matched) setPreviewSlide(matched);
-          }
-          if (liveState.slide) {
-            const matched = updatedSlides.find(s => s.id === liveState.slide.id);
-            if (matched) setLiveState(prev => ({ ...prev, slide: matched }));
-          }
-        }}
-        onApplyToOutput={(template, outputId) => {
-          const targetId = outputId || 'main';
-          setGlobalSettings(prev => ({
-            ...prev,
-            outputs: prev.outputs.map(o => o.id === targetId ? { ...o, defaultTemplateId: template.id } : o)
-          }));
-        }}
+        {...templateGalleryHandlers}
       />
     </div>
   );
