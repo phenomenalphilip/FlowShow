@@ -1,5 +1,7 @@
 import React, { useMemo, useEffect, useRef, useState } from 'react';
+import { motion, AnimatePresence } from 'motion/react';
 import { tokenize, Token } from '../lib/TokenEngine';
+import { AnimationConfig } from '../lib/templates';
 
 interface SmartTextLayoutProps {
   text?: string;
@@ -10,19 +12,41 @@ interface SmartTextLayoutProps {
   styleOverrides?: {
     global?: React.CSSProperties & { '--font-scale'?: number };
     words?: { [wordIndex: number]: React.CSSProperties };
+    lines?: { [lineIndex: number]: React.CSSProperties };
     layout?: { x: number; y: number; width: number; height: number };
     sourceGlobal?: React.CSSProperties & { '--font-scale'?: number };
     sourceLayout?: { x: number; y: number; width: number; height: number };
   };
+  animation?: AnimationConfig;
   onWordClick?: (wordIndex: number, e: React.MouseEvent) => void;
   onWordMouseDown?: (wordIndex: number, e: React.MouseEvent) => void;
   onWordMouseEnter?: (wordIndex: number, e: React.MouseEvent) => void;
   onWordMouseUp?: (wordIndex: number, e: React.MouseEvent) => void;
+  onLineClick?: (lineIndex: number, e: React.MouseEvent) => void;
+  onLineMouseDown?: (lineIndex: number, e: React.MouseEvent) => void;
   selectedWordIndices?: number[];
+  selectedLineIndices?: number[];
   disableAbsoluteLayout?: boolean;
 }
 
-export function SmartTextLayout({ text, lines, source, type, className = '', styleOverrides, onWordClick, onWordMouseDown, onWordMouseEnter, onWordMouseUp, selectedWordIndices, disableAbsoluteLayout }: SmartTextLayoutProps) {
+export function SmartTextLayout({
+  text,
+  lines,
+  source,
+  type,
+  className = '',
+  styleOverrides,
+  animation,
+  onWordClick,
+  onWordMouseDown,
+  onWordMouseEnter,
+  onWordMouseUp,
+  onLineClick,
+  onLineMouseDown,
+  selectedWordIndices,
+  selectedLineIndices,
+  disableAbsoluteLayout
+}: SmartTextLayoutProps) {
   const renderedLines = useMemo(() => {
      if (lines) return lines.map(l => tokenize(l, undefined, styleOverrides?.words));
      if (text) return text.split('\n').map(l => tokenize(l, undefined, styleOverrides?.words));
@@ -37,13 +61,17 @@ export function SmartTextLayout({ text, lines, source, type, className = '', sty
   useEffect(() => {
     if (!containerRef.current || !textContainerRef.current) return;
     
+    // For vertical-scroll: allow text to remain large and flow without height compression
+    if (animation?.type === 'vertical-scroll') {
+      setScale(1);
+      return;
+    }
+
     const container = containerRef.current;
     const textElem = textContainerRef.current;
     
-    // Reset scale to correctly measure intrinsic size
     setScale(1);
     
-    // We need to wait for DOM to update with scale=1
     requestAnimationFrame(() => {
        if (!container || !textElem) return;
        const computed = window.getComputedStyle(container);
@@ -59,10 +87,7 @@ export function SmartTextLayout({ text, lines, source, type, className = '', sty
        const scaleWidth = contentWidth / maxTextWidth;
        const scaleHeight = contentHeight / maxTextHeight;
        
-       // Choose the smaller scale to ensure it fits both horizontally and vertically
        let newScale = Math.min(scaleWidth, scaleHeight);
-       
-       // Prevent scaling up infinitely (cap at maybe 1.5x of the base size)
        newScale = Math.min(newScale, 1.5);
        
        setScale(newScale);
@@ -97,8 +122,150 @@ export function SmartTextLayout({ text, lines, source, type, className = '', sty
   } : { alignItems };
 
   const posClass = useAbsolute ? 'absolute' : 'relative w-full h-full';
-
   const shouldRenderSeparateSource = source && useAbsolute && styleOverrides?.sourceLayout;
+
+  const isScroll = animation?.type === 'vertical-scroll';
+
+  // Animation variants generator for each line
+  const getLineMotion = (lineIdx: number) => {
+    if (isScroll) {
+      return {
+        initial: { opacity: 1 },
+        animate: { opacity: 1 },
+        transition: { duration: 0 }
+      };
+    }
+
+    if (!animation) {
+      return {
+        initial: { opacity: 0 },
+        animate: { opacity: 1 },
+        transition: { duration: 0.25 }
+      };
+    }
+
+    const duration = animation.duration || 0.5;
+    const delay = (animation.stagger ?? 0.06) * lineIdx;
+
+    switch (animation.type) {
+      case 'blur-in':
+        return {
+          initial: { opacity: 0, filter: 'blur(14px)', scale: 0.95 },
+          animate: { opacity: 1, filter: 'blur(0px)', scale: 1 },
+          transition: { duration, delay, ease: [0.16, 1, 0.3, 1] }
+        };
+
+      case 'kinetic-punch':
+        return {
+          initial: { opacity: 0, scale: 0.65, y: 25 },
+          animate: { opacity: 1, scale: 1, y: 0 },
+          transition: { type: 'spring', damping: 14, stiffness: 240, delay }
+        };
+
+      case 'mask-slide':
+        return {
+          initial: { opacity: 0, y: 35 },
+          animate: { opacity: 1, y: 0 },
+          transition: { duration, delay, ease: [0.16, 1, 0.3, 1] }
+        };
+
+      case 'golden-shimmer':
+        return {
+          initial: { opacity: 0, y: 15, filter: 'brightness(1.5)' },
+          animate: { opacity: 1, y: 0, filter: 'brightness(1)' },
+          transition: { duration, delay, ease: 'easeOut' }
+        };
+
+      case 'editorial-split':
+        return {
+          initial: { 
+            opacity: 0, 
+            y: lineIdx === 0 ? -18 : 30, 
+            scale: lineIdx === 0 ? 1 : 0.92 
+          },
+          animate: { opacity: 1, y: 0, scale: 1 },
+          transition: { type: 'spring', damping: 15, stiffness: 200, delay }
+        };
+
+      case 'neon-pulse':
+        return {
+          initial: { opacity: 0, scale: 0.92, filter: 'drop-shadow(0 0 0px #38bdf8)' },
+          animate: { opacity: 1, scale: 1, filter: 'drop-shadow(0 0 16px #38bdf8)' },
+          transition: { duration, delay, ease: 'easeOut' }
+        };
+
+      case 'acoustic-dissolve':
+        return {
+          initial: { opacity: 0, filter: 'blur(18px)', y: 8 },
+          animate: { opacity: 1, filter: 'blur(0px)', y: 0 },
+          transition: { duration, delay, ease: 'easeInOut' }
+        };
+
+      case 'opposing-drift':
+        return {
+          initial: { opacity: 0, x: lineIdx % 2 === 0 ? -45 : 45 },
+          animate: { opacity: 1, x: 0 },
+          transition: { duration, delay, ease: [0.16, 1, 0.3, 1] }
+        };
+
+      case 'lead-tracker':
+        return {
+          initial: { opacity: 0.35, scale: 0.98 },
+          animate: { opacity: 1, scale: 1 },
+          transition: { duration: 0.35, delay }
+        };
+
+      case 'rhythm-typewriter':
+        return {
+          initial: { opacity: 0, y: 8 },
+          animate: { opacity: 1, y: 0 },
+          transition: { duration: 0.22, delay }
+        };
+
+      default:
+        return {
+          initial: { opacity: 0 },
+          animate: { opacity: 1 },
+          transition: { duration: 0.25, delay }
+        };
+    }
+  };
+
+  // Continuous ambient loop (float drift or breathing glow)
+  const ambientMotion = animation?.ambientLoop === 'drift' ? {
+    y: [0, -5, 0],
+    transition: { repeat: Infinity, duration: 4.5, ease: 'easeInOut' as const }
+  } : animation?.ambientLoop === 'breathe' ? {
+    scale: [1, 1.015, 1],
+    opacity: [0.95, 1, 0.95],
+    transition: { repeat: Infinity, duration: 3.8, ease: 'easeInOut' as const }
+  } : undefined;
+
+  const startY = animation?.scrollStart ?? 100;
+  const endY = animation?.scrollEnd ?? -100;
+  const isLoop = animation?.scrollLoop !== false;
+  const scrollDuration = animation?.duration || 12;
+
+  const scrollAnimationProps = isScroll ? (
+    isLoop ? {
+      animate: { y: [`${startY}%`, `${endY}%`] },
+      transition: {
+        repeat: Infinity,
+        duration: scrollDuration,
+        ease: (animation?.easing === 'easeOut' || animation?.easing === 'easeInOut') ? animation.easing : 'linear',
+        repeatType: 'loop' as const
+      }
+    } : {
+      initial: { y: `${startY}%` },
+      animate: { y: `${endY}%` },
+      transition: {
+        duration: scrollDuration,
+        ease: (animation?.easing === 'easeOut' || animation?.easing === 'easeInOut') ? animation.easing : 'linear'
+      }
+    }
+  ) : {
+    animate: ambientMotion
+  };
 
   const mainContent = (
     <div 
@@ -114,10 +281,12 @@ export function SmartTextLayout({ text, lines, source, type, className = '', sty
           transformOrigin: origin
         }}
       >
-        <div 
+        <motion.div 
+          key={text || 'empty-slide'}
+          {...scrollAnimationProps}
           className={`font-display font-bold text-white uppercase ${align === 'justify' ? 'w-full block' : 'inline-block'} select-none`}
           style={{
-            textAlign: align as any, // overrides
+            textAlign: align as any,
             fontSize: styleOverrides?.global?.fontSize || (type === 'scripture' ? '90px' : '110px'),
             lineHeight: 1.3,
             letterSpacing: type === 'scripture' ? 'normal' : '0.02em',
@@ -125,59 +294,89 @@ export function SmartTextLayout({ text, lines, source, type, className = '', sty
             ...styleOverrides?.global
           }}
         >
-          {renderedLines.map((lineTokens, lineIdx) => (
-             <div key={`line-${lineIdx}`} className="min-h-[1em]">
-               {lineTokens.map((token: Token) => {
-                 const isClickable = (!!onWordClick || !!onWordMouseDown) && token.wordIndex !== undefined;
-                 const isSelected = isClickable && selectedWordIndices?.includes(token.wordIndex as number);
-                 
-                 return (
-                   <span 
-                      key={token.id} 
-                      onMouseDown={(e) => {
-                        if (isClickable && onWordMouseDown) {
-                          e.stopPropagation();
-                          onWordMouseDown(token.wordIndex as number, e);
-                        }
-                      }}
-                      onMouseEnter={(e) => {
-                        if (isClickable && onWordMouseEnter) {
-                          e.stopPropagation();
-                          onWordMouseEnter(token.wordIndex as number, e);
-                        }
-                      }}
-                      onMouseUp={(e) => {
-                        if (isClickable && onWordMouseUp) {
-                          e.stopPropagation();
-                          onWordMouseUp(token.wordIndex as number, e);
-                        }
-                      }}
-                      onClick={(e) => {
-                        if (isClickable) {
-                          e.stopPropagation();
-                          if (onWordClick) onWordClick(token.wordIndex as number, e);
-                        }
-                      }}
-                      className={`transition-colors duration-100 word-token ${isClickable ? 'cursor-pointer rounded hover:bg-white/10' : ''} ${isSelected ? 'bg-[#2563eb] text-white' : ''}`}
-                      style={token.computedStyles}
-                   >
-                     {token.value}
-                   </span>
-                 );
-               })}
-             </div>
-          ))}
-        </div>
+          {renderedLines.map((lineTokens, lineIdx) => {
+             const lineStyle = styleOverrides?.lines?.[lineIdx] || {};
+             const isLineSelected = selectedLineIndices?.includes(lineIdx);
+             const isLineClickable = !!onLineClick || !!onLineMouseDown;
+             const motionProps = getLineMotion(lineIdx);
+
+             return (
+               <motion.div 
+                 key={`line-${lineIdx}`} 
+                 initial={motionProps.initial}
+                 animate={motionProps.animate}
+                 transition={motionProps.transition}
+                 className={`min-h-[1em] ${isLineClickable ? 'cursor-pointer rounded' : ''} ${isLineSelected ? 'outline outline-2 outline-amber-400/70 outline-offset-2 bg-amber-400/10' : ''}`}
+                 style={lineStyle}
+                 onMouseDown={(e) => {
+                   if (isLineClickable && onLineMouseDown) {
+                     e.stopPropagation();
+                     onLineMouseDown(lineIdx, e);
+                   }
+                 }}
+                 onClick={(e) => {
+                   if (isLineClickable && onLineClick) {
+                     e.stopPropagation();
+                     onLineClick(lineIdx, e);
+                   }
+                 }}
+               >
+                {lineTokens.map((token: Token) => {
+                  const isClickable = (!!onWordClick || !!onWordMouseDown) && token.wordIndex !== undefined;
+                  const isSelected = isClickable && selectedWordIndices?.includes(token.wordIndex as number);
+                  
+                  return (
+                    <span 
+                       key={token.id} 
+                       onMouseDown={(e) => {
+                         if (isClickable && onWordMouseDown) {
+                           e.stopPropagation();
+                           onWordMouseDown(token.wordIndex as number, e);
+                         }
+                       }}
+                       onMouseEnter={(e) => {
+                         if (isClickable && onWordMouseEnter) {
+                           e.stopPropagation();
+                           onWordMouseEnter(token.wordIndex as number, e);
+                         }
+                       }}
+                       onMouseUp={(e) => {
+                         if (isClickable && onWordMouseUp) {
+                           e.stopPropagation();
+                           onWordMouseUp(token.wordIndex as number, e);
+                         }
+                       }}
+                       onClick={(e) => {
+                         if (isClickable) {
+                           e.stopPropagation();
+                           if (onWordClick) onWordClick(token.wordIndex as number, e);
+                         }
+                       }}
+                       className={`transition-colors duration-100 word-token ${isClickable ? 'cursor-pointer rounded hover:bg-white/10' : ''} ${isSelected ? 'bg-[#2563eb] text-white' : ''}`}
+                       style={token.computedStyles}
+                    >
+                      {token.value}
+                    </span>
+                  );
+                })}
+               </motion.div>
+             );
+          })}
+        </motion.div>
+
         {!shouldRenderSeparateSource && source && (
-          <h2 
+          <motion.h2 
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.5, delay: 0.2 }}
             className="mt-6 text-2xl font-heading font-bold text-amber-400 text-center tracking-wide"
             style={{
                textShadow: '0 4px 8px rgba(0,0,0,0.8)',
-               ...styleOverrides?.global // Default to global text overrides if no separate box is there
+               ...styleOverrides?.global
             }}
           >
              {source}
-          </h2>
+          </motion.h2>
         )}
       </div>
     </div>
@@ -191,6 +390,7 @@ export function SmartTextLayout({ text, lines, source, type, className = '', sty
       <SmartTextLayout 
           text={source} 
           type="lyrics" 
+          animation={animation}
           styleOverrides={{ 
             global: styleOverrides.sourceGlobal || { color: '#fbbf24', fontWeight: 'bold' }, 
             layout: styleOverrides.sourceLayout 

@@ -1,10 +1,13 @@
-import React, { useState } from 'react';
+﻿import React, { useState } from 'react';
 import useMeasure from 'react-use-measure';
 import { Rnd } from 'react-rnd';
 import { Bold, Italic, Underline as UnderlineIcon, Strikethrough, AlignLeft, AlignCenter, AlignRight, AlignJustify } from 'lucide-react';
 import { FixedStage } from './FixedStage';
 import { SmartTextLayout } from './SmartTextLayout';
 import { SlideDefinition } from '../App';
+import { Sparkles } from 'lucide-react';
+import { TemplateGalleryModal } from './TemplateGalleryModal';
+import { PresentationTemplate } from '../lib/templates';
 
 export interface OutputStyleConfig {
   global?: React.CSSProperties & { '--font-scale'?: number };
@@ -24,6 +27,7 @@ interface OutputStyleEditorProps {
 export function OutputStyleEditor({ initialStyle, type, outputName, onSave, onCancel }: OutputStyleEditorProps) {
   const [style, setStyle] = useState<OutputStyleConfig>(initialStyle);
   const [activeElement, setActiveElement] = useState<'text' | 'source'>('text');
+  const [isTemplateModalOpen, setIsTemplateModalOpen] = useState(false);
   
   const sampleText = type === 'lyrics' 
     ? "Amazing grace how sweet the sound\nThat saved a wretch like me\nI once was lost but now am found\nWas blind but now I see"
@@ -325,8 +329,31 @@ export function OutputStyleEditor({ initialStyle, type, outputName, onSave, onCa
                    Reset Layout Box
                 </button>
               </div>
+              </div>
            </div>
-       </div>
+
+       <TemplateGalleryModal
+          isOpen={isTemplateModalOpen}
+          onClose={() => setIsTemplateModalOpen(false)}
+          onApplyToSlide={(template) => {
+             setStyle(prev => ({
+                ...prev,
+                global: { ...(prev.global || {}), ...(template.styles.global || {}) },
+                layout: template.styles.layout || prev.layout,
+                sourceGlobal: template.styles.sourceGlobal || prev.sourceGlobal,
+                sourceLayout: template.styles.sourceLayout || prev.sourceLayout
+             }));
+          }}
+          onApplyToSong={(template) => {
+             setStyle(prev => ({
+                ...prev,
+                global: { ...(prev.global || {}), ...(template.styles.global || {}) },
+                layout: template.styles.layout || prev.layout,
+                sourceGlobal: template.styles.sourceGlobal || prev.sourceGlobal,
+                sourceLayout: template.styles.sourceLayout || prev.sourceLayout
+             }));
+          }}
+       />
     </div>
   );
 }
