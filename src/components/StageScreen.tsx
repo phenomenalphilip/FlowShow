@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { SmartTextLayout } from './SmartTextLayout';
+import type { TextPosition } from '../lib/templates';
 import type { SlideDefinition } from '../App';
 import type { StageItem, StageLayout, StageRect } from '../lib/stageLayouts';
 
@@ -49,7 +50,7 @@ function StageItemView({ item, slide, nextSlide, songTitle }: {
   const style = { ...STAGE_TEXT, ...item.style };
   switch (item.kind) {
     case 'current-slide':
-      return slide ? <SlideText rect={item.rect} slide={slide} style={style} /> : null;
+      return slide ? <SlideText rect={item.rect} slide={slide} style={style} position={item.verticalAlign} /> : null;
     case 'next-slide': {
       if (!slide) return null;
       const labelHeight = Math.min(NEXT_LABEL_HEIGHT, item.rect.height / 3);
@@ -63,7 +64,7 @@ function StageItemView({ item, slide, nextSlide, songTitle }: {
             {(item.text || 'Next') + newSection}
           </StageLabel>
           {nextSlide
-            ? <SlideText rect={textRect} slide={nextSlide} style={style} />
+            ? <SlideText rect={textRect} slide={nextSlide} style={style} position={item.verticalAlign} />
             : <StageLabel rect={textRect} style={{ ...style, fontSize: '40px', opacity: 0.35 }}>End</StageLabel>}
         </>
       );
@@ -84,12 +85,12 @@ function StageItemView({ item, slide, nextSlide, songTitle }: {
 }
 
 /** Slide words, shrunk (or grown a little) to fill their box */
-function SlideText({ rect, slide, style }: { rect: StageRect; slide: SlideDefinition; style: React.CSSProperties }) {
+function SlideText({ rect, slide, style, position }: { rect: StageRect; slide: SlideDefinition; style: React.CSSProperties; position?: TextPosition }) {
   return (
     <SmartTextLayout
       text={slide.text}
       type={slide.type === 'scripture' ? 'scripture' : 'lyrics'}
-      styleOverrides={{ global: style, layout: rect }}
+      styleOverrides={{ global: style, layout: rect, verticalAlign: position }}
       className="relative z-10 w-full h-full"
     />
   );

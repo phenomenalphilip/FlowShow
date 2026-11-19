@@ -15,7 +15,26 @@ export type AnimationType =
   | 'vertical-scroll'
   | 'word-stack'
   | 'flicker'
-  | 'bounce';
+  | 'bounce'
+  | 'scroll-in'
+  | 'ticker'
+  | 'karaoke';
+
+/** How words leave the screen when the next slide comes in */
+export type ExitType = 'none' | 'fade' | 'slide-up' | 'slide-down' | 'slide-left' | 'slide-right' | 'blur' | 'zoom';
+export const EXIT_OPTIONS: { type: ExitType; label: string }[] = [
+  { type: 'none', label: 'None (switch)' },
+  { type: 'fade', label: 'Fade out' },
+  { type: 'slide-up', label: 'Slide up' },
+  { type: 'slide-down', label: 'Slide down' },
+  { type: 'slide-left', label: 'Slide left' },
+  { type: 'slide-right', label: 'Slide right' },
+  { type: 'blur', label: 'Blur out' },
+  { type: 'zoom', label: 'Zoom out' },
+];
+
+/** Where text sits in its box when it doesn't fill it */
+export type TextPosition = 'top' | 'middle' | 'bottom';
 
 export interface AnimationConfig {
   type: AnimationType;
@@ -33,7 +52,17 @@ export interface AnimationConfig {
   scrollStartPos?: number;
   /** Screen position of the text's centre where scrolling stops, % of screen height (0 = top edge, 100 = bottom edge) */
   scrollEndPos?: number;
-  scrollLoop?: boolean; // whether to loop continuously
+  scrollLoop?: boolean; // whether to loop continuously (Vertical scroll and Ticker)
+  /** Scroll in: the screen edge the words come in from */
+  fromEdge?: 'top' | 'bottom' | 'left' | 'right';
+  /** Ticker: which way the line travels ('left' = from right to left) */
+  tickerDirection?: 'left' | 'right';
+  /** Ticker: speed in px per second on a 1920×1080 screen */
+  tickerSpeed?: number;
+  /** Karaoke: the colour each word fills with (stagger = seconds per word) */
+  karaokeColor?: string;
+  /** How the words leave when the next slide comes in */
+  exit?: { type: ExitType; duration?: number };
 }
 
 /** Used when a slide or text box picks a motion but nothing underneath it has one */
@@ -53,7 +82,7 @@ export function getScrollPositions(anim?: AnimationConfig): { start: number; end
 export interface PresentationTemplate {
   id: string;
   name: string;
-  category: 'worship' | 'high-energy' | 'broadcast' | 'scripture' | 'modern' | 'custom';
+  category: 'worship' | 'high-energy' | 'broadcast' | 'scripture' | 'declaration' | 'modern' | 'custom';
   tagline: string;
   description: string;
   styles: {
@@ -62,6 +91,10 @@ export interface PresentationTemplate {
     layout?: { x: number; y: number; width: number; height: number };
     sourceGlobal?: React.CSSProperties;
     sourceLayout?: { x: number; y: number; width: number; height: number };
+    /** Where the text sits in its box when it doesn't fill it (default: middle) */
+    verticalAlign?: TextPosition;
+    /** The same for the scripture reference's own box */
+    sourceVerticalAlign?: TextPosition;
   };
   animation: AnimationConfig;
   backgroundPreview?: string;
@@ -194,6 +227,96 @@ export const STARTER_TEMPLATES: PresentationTemplate[] = [
       ambientLoop: 'breathe'
     },
     backgroundPreview: 'radial-gradient(circle at center, #1c1917 0%, #0c0a09 100%)'
+  },
+  // ─── Scripture: the verse in normal letters, with the reference in a box of its own ───
+  {
+    id: 'scripture-classic',
+    name: 'Scripture Classic',
+    category: 'scripture',
+    tagline: 'Serif verse, gold reference below',
+    description: 'A calm serif verse in normal letters with the reference in gold underneath. Easy to read, even for long verses.',
+    badge: 'Scripture',
+    styles: {
+      global: {
+        fontFamily: 'Georgia, serif', fontWeight: '500', fontSize: '64px', color: '#ffffff', textTransform: 'none',
+        letterSpacing: 'normal', lineHeight: 1.35, textAlign: 'center', textShadow: '0 4px 12px rgba(0,0,0,0.8)'
+      },
+      layout: { x: 0.1, y: 0.12, width: 0.8, height: 0.62 },
+      sourceGlobal: {
+        fontFamily: 'Inter, sans-serif', fontWeight: '700', fontSize: '40px', color: '#fbbf24', textTransform: 'uppercase',
+        letterSpacing: '0.12em', textAlign: 'center', textShadow: '0 2px 8px rgba(0,0,0,0.8)'
+      },
+      sourceLayout: { x: 0.1, y: 0.78, width: 0.8, height: 0.07 }
+    },
+    animation: { type: 'blur-in', duration: 0.5, stagger: 0.04, easing: 'easeOut', ambientLoop: 'none' },
+    backgroundPreview: 'radial-gradient(ellipse at center, #1c1917 0%, #0c0a09 100%)'
+  },
+  {
+    id: 'scripture-lower-third',
+    name: 'Scripture Lower Third',
+    category: 'scripture',
+    tagline: 'Verse on a band at the bottom',
+    description: 'The verse on a dark band across the bottom of the screen with the reference above it, so the picture behind stays clear. Made for livestreams and camera shots.',
+    badge: 'Livestream',
+    styles: {
+      global: {
+        fontFamily: 'Inter, sans-serif', fontWeight: '600', fontSize: '46px', color: '#ffffff', textTransform: 'none',
+        letterSpacing: 'normal', lineHeight: 1.3, textAlign: 'left', textShadow: '0 2px 8px rgba(0,0,0,0.9)',
+        backgroundColor: 'rgba(0,0,0,0.65)', padding: '18px 28px', borderRadius: '12px', borderLeft: '6px solid #fbbf24'
+      },
+      layout: { x: 0.06, y: 0.72, width: 0.88, height: 0.22 },
+      sourceGlobal: {
+        fontFamily: 'Inter, sans-serif', fontWeight: '800', fontSize: '30px', color: '#fbbf24', textTransform: 'uppercase',
+        letterSpacing: '0.14em', textAlign: 'left', textShadow: '0 2px 6px rgba(0,0,0,0.9)'
+      },
+      sourceLayout: { x: 0.06, y: 0.645, width: 0.88, height: 0.06 }
+    },
+    animation: { type: 'mask-slide', duration: 0.45, stagger: 0.06, easing: 'easeOut', ambientLoop: 'none' },
+    backgroundPreview: 'linear-gradient(180deg, #334155 0%, #0f172a 100%)'
+  },
+  {
+    id: 'scripture-reference-top',
+    name: 'Scripture Reference Above',
+    category: 'scripture',
+    tagline: 'Reference first, then the verse',
+    description: 'The reference sits at the top in gold capitals and the verse follows in an elegant serif, so the congregation knows where to look before they read.',
+    badge: 'Scripture',
+    styles: {
+      global: {
+        fontFamily: 'Playfair Display, serif', fontWeight: '500', fontSize: '62px', color: '#f8fafc', textTransform: 'none',
+        letterSpacing: '0.01em', lineHeight: 1.35, textAlign: 'center', textShadow: '0 6px 18px rgba(0,0,0,0.85)'
+      },
+      layout: { x: 0.1, y: 0.24, width: 0.8, height: 0.62 },
+      sourceGlobal: {
+        fontFamily: 'Cinzel, Georgia, serif', fontWeight: '700', fontSize: '42px', color: '#fde68a', textTransform: 'uppercase',
+        letterSpacing: '0.18em', textAlign: 'center', textShadow: '0 2px 10px rgba(0,0,0,0.8)'
+      },
+      sourceLayout: { x: 0.1, y: 0.1, width: 0.8, height: 0.08 }
+    },
+    animation: { type: 'acoustic-dissolve', duration: 0.8, stagger: 0.05, easing: 'easeInOut', ambientLoop: 'none' },
+    backgroundPreview: 'radial-gradient(circle at 50% 40%, #291e0a 0%, #090703 100%)'
+  },
+  {
+    id: 'scripture-modern',
+    name: 'Scripture Modern',
+    category: 'scripture',
+    tagline: 'Clean sans, left aligned',
+    description: 'A clean, modern sans-serif verse aligned to the left with a soft blue reference underneath.',
+    badge: 'Scripture',
+    styles: {
+      global: {
+        fontFamily: 'Outfit, sans-serif', fontWeight: '500', fontSize: '60px', color: '#ffffff', textTransform: 'none',
+        letterSpacing: 'normal', lineHeight: 1.3, textAlign: 'left', textShadow: '0 4px 14px rgba(0,0,0,0.8)'
+      },
+      layout: { x: 0.1, y: 0.16, width: 0.8, height: 0.58 },
+      sourceGlobal: {
+        fontFamily: 'Outfit, sans-serif', fontWeight: '700', fontSize: '36px', color: '#93c5fd', textTransform: 'none',
+        letterSpacing: '0.04em', textAlign: 'left', textShadow: '0 2px 8px rgba(0,0,0,0.8)'
+      },
+      sourceLayout: { x: 0.1, y: 0.78, width: 0.8, height: 0.065 }
+    },
+    animation: { type: 'mask-slide', duration: 0.5, stagger: 0.05, easing: 'easeOut', ambientLoop: 'none' },
+    backgroundPreview: 'linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%)'
   },
   {
     id: 'lead-tracker',
@@ -429,6 +552,22 @@ export const STARTER_TEMPLATES: PresentationTemplate[] = [
     },
     backgroundPreview: 'radial-gradient(ellipse at center, #0f172a 0%, #020617 100%)'
   }
+];
+
+/** What scripture looks like on a screen until someone picks another scripture template for it */
+export const DEFAULT_SCRIPTURE_TEMPLATE_ID = 'scripture-classic';
+
+/** Sample verses for previews and for designing scripture when no verse is on the screens */
+export const SCRIPTURE_SAMPLES: { id: string; label: string; text: string; source: string }[] = [
+  { id: 'short', label: 'Psalm 23:1 (short)', text: 'The LORD is my shepherd; I shall not want.', source: 'Psalm 23:1' },
+  { id: 'typical', label: 'John 3:16', text: 'For God so loved the world, that he gave his only begotten Son, that whosoever believeth in him should not perish, but have everlasting life.', source: 'John 3:16' },
+  { id: 'long', label: 'Esther 8:9 (the longest verse)', text: "Then were the king's scribes called at that time in the third month, that is, the month Sivan, on the three and twentieth day thereof; and it was written according to all that Mordecai commanded unto the Jews, and to the lieutenants, and the deputies and rulers of the provinces which are from India unto Ethiopia, an hundred twenty and seven provinces, unto every province according to the writing thereof, and unto every people after their language, and to the Jews according to their writing, and according to their language.", source: 'Esther 8:9' },
+];
+
+/** Sample words for designing the Declarations template when no declaration is open */
+export const DECLARATION_SAMPLES: { id: string; label: string; text: string }[] = [
+  { id: 'short', label: 'A short declaration', text: 'I am the righteousness of God in Christ Jesus' },
+  { id: 'long', label: 'A long declaration', text: 'I am blessed and highly favoured\nThe Spirit of God lives in me\nNo weapon formed against me shall prosper\nI walk in divine health, wisdom and peace' },
 ];
 
 const CUSTOM_TEMPLATES_KEY = 'flowshow_custom_templates';

@@ -23,13 +23,19 @@ function formatTime(seconds: number) {
 import { MediaLibrary } from './components/MediaLibrary';
 import { AudioModule } from './components/AudioModule';
 import { AddSongModal } from './components/AddSongModal';
+import { ImportShowsModal } from './components/ImportShowsModal';
+import { loadInstalledFonts } from './lib/fontStore';
+import { ProfileRecord, loadProfiles, saveProfiles, buildProfileFile, readProfileFile, PROFILE_EXTENSION } from './lib/profiles';
+import { ProfilesPanel, ProfilesApi } from './components/ProfilesPanel';
 import { get, set } from 'idb-keyval';
 import { SmartTextLayout } from './components/SmartTextLayout';
 import { FixedStage } from './components/FixedStage';
 import { BibleVersion, getBibleList, getBible, saveBible, deleteBible, initDatabase } from './lib/bibleDb';
-import { parseBibleXml } from './lib/xmlParser';
-import { AnimationConfig, PresentationTemplate, STARTER_TEMPLATES, getStoredTemplates, subscribeTemplates, getCachedTemplates, FALLBACK_ANIMATION } from './lib/templates';
+import { parseBibleXml, BibleFileError, countVerses } from './lib/xmlParser';
+import { AnimationConfig, PresentationTemplate, STARTER_TEMPLATES, getStoredTemplates, subscribeTemplates, getCachedTemplates, FALLBACK_ANIMATION, TextPosition } from './lib/templates';
 import { LiveDesignWorkspace, OutputTemplateInfo } from './components/LiveDesignWorkspace';
+import { ScriptureDesignWorkspace } from './components/ScriptureDesignWorkspace';
+import type { DesignFor } from './components/DesignControls';
 import { detectGroups, groupColors } from './lib/slideGroups';
 import { GroupMenu } from './components/GroupMenu';
 import { TemplateGalleryModal, TemplateGalleryModalProps, InlineTemplateGrid } from './components/TemplateGalleryModal';
@@ -52,6 +58,8 @@ export type SlideDefinition = {
   designs?: { [outputId: string]: SlideDesign };
   /** Song section this slide belongs to, e.g. "Verse 1", "Chorus", "Bridge" */
   group?: string;
+  /** A slide of a Declaration show (not a song): screens use their style's Declarations template for it */
+  declaration?: boolean;
   animation?: AnimationConfig;
   styleOverrides?: {
     global?: React.CSSProperties & { '--font-scale'?: number };
@@ -60,6 +68,9 @@ export type SlideDefinition = {
     layout?: { x: number; y: number; width: number; height: number };
     sourceGlobal?: React.CSSProperties & { '--font-scale'?: number };
     sourceLayout?: { x: number; y: number; width: number; height: number };
+    /** Where the text sits in its box when it doesn't fill it (from the template) */
+    verticalAlign?: TextPosition;
+    sourceVerticalAlign?: TextPosition;
   };
 };
 
@@ -80,6 +91,8 @@ export interface PresentationStyle {
   lyricsStageLayoutId?: string;
   /** Stage styles: the stage layout for scripture slides */
   scriptureStageLayoutId?: string;
+  /** Stage styles: the stage layout for the slides of Declaration shows (missing = the lyrics layout) */
+  declarationStageLayoutId?: string;
   backgroundColor: string;
   backgroundMedia?: { url: string; type: 'image' | 'video'; fileName?: string } | null;
   transition: 'none' | 'fade' | 'slide' | 'zoom';
@@ -90,6 +103,8 @@ export interface PresentationStyle {
   lyricsTemplateId?: string;
   /** Template id used for scripture slides */
   scriptureTemplateId?: string;
+  /** Template id used for the slides of Declaration shows (missing = the lyrics template) */
+  declarationTemplateId?: string;
   /** Optional text-style overrides for lyrics */
   lyricsStyleOverride?: { global?: React.CSSProperties & { '--font-scale'?: number }; layout?: { x: number; y: number; width: number; height: number } };
   /** Optional text-style overrides for scripture */
@@ -133,6 +148,10 @@ export interface OutputSettings {
   /** Id of the PresentationStyle this output uses */
   styleId?: string;
   defaultTemplateId?: string;
+  /** The template scripture uses on this screen (a style's scripture template wins over it). Missing = the default scripture template. */
+  scriptureTemplateId?: string;
+  /** The template Declaration shows use on this screen (a style's template wins over it). Missing = the default template. */
+  declarationTemplateId?: string;
   defaultBackground: { 
     url?: string; 
     color?: string; 
@@ -273,24 +292,32 @@ const CHANNEL_NAME = 'flowshow_presence_channel';
 const UNDO_MERGE_MS = 500;
 const UNDO_LIMIT = 100;
 
-import { getTemplateById } from './lib/templates';
+import { getTemplateById, DEFAULT_SCRIPTURE_TEMPLATE_ID } from './lib/templates';
 
 type SongTemplateRefs = { id?: string; templateId?: string; outputTemplates?: { [outputId: string]: string } };
-export type TemplateSource = 'style' | 'slide-output' | 'slide' | 'song-output' | 'song' | 'output-default' | 'none';
+export type TemplateSource = 'style' | 'slide-output' | 'slide' | 'song-output' | 'song' | 'output-default' | 'screen-scripture' | 'screen-declaration' | 'none';
+
+/** The scripture template a screen uses of its own (when its style doesn't set one) */
+export const screenScriptureTemplateId = (outputConfig?: OutputSettings) =>
+  outputConfig?.scriptureTemplateId || DEFAULT_SCRIPTURE_TEMPLATE_ID;
 
 /**
  * Which template an output uses for a slide, and where that choice came from.
- * Priority: Style template -> Slide output override -> Slide general -> Song output override -> Song general -> Output default
+ * Priority: Style template -> Slide output override -> Slide general -> Song output override -> Song general -> Output default.
+ * Scripture ends with the screen's scripture template instead of its default (lyrics) template.
  */
 export const resolveTemplateSource = (
-  slide: Pick<SlideDefinition, 'type' | 'templateId' | 'outputTemplates'> | null | undefined,
+  slide: Pick<SlideDefinition, 'type' | 'templateId' | 'outputTemplates' | 'declaration'> | null | undefined,
   outputConfig?: OutputSettings,
   song?: SongTemplateRefs,
   presentationStyle?: PresentationStyle
 ): { templateId?: string; source: TemplateSource } => {
   const outputId = outputConfig?.id || 'main';
+  const scripture = slide?.type === 'scripture';
   const styleTemplateId = presentationStyle
-    ? (slide?.type === 'scripture' ? presentationStyle.scriptureTemplateId : presentationStyle.lyricsTemplateId)
+    ? (scripture ? presentationStyle.scriptureTemplateId
+      : slide?.declaration ? (presentationStyle.declarationTemplateId || presentationStyle.lyricsTemplateId)
+      : presentationStyle.lyricsTemplateId)
     : undefined;
 
   const chain: [string | undefined, TemplateSource][] = [
@@ -299,7 +326,9 @@ export const resolveTemplateSource = (
     [slide?.templateId, 'slide'],
     [song?.outputTemplates?.[outputId], 'song-output'],
     [song?.templateId, 'song'],
-    [outputConfig?.defaultTemplateId, 'output-default'],
+    scripture ? [screenScriptureTemplateId(outputConfig), 'screen-scripture']
+      : slide?.declaration && outputConfig?.declarationTemplateId ? [outputConfig.declarationTemplateId, 'screen-declaration']
+      : [outputConfig?.defaultTemplateId, 'output-default'],
   ];
   const hit = chain.find(([id]) => !!id);
   if (!hit || hit[0] === NO_TEMPLATE_ID) return { templateId: undefined, source: 'none' };
@@ -317,6 +346,8 @@ export interface CustomTextBox {
   hidden?: boolean;
   /** Newly added: not on the screen until its slide goes live */
   waiting?: boolean;
+  /** Where its words sit in the box (default: middle) */
+  verticalAlign?: TextPosition;
 }
 
 /** Whether a custom text box appears on the screens (the Design canvas also shows hidden and waiting boxes) */
@@ -331,6 +362,8 @@ export interface SlideDesign {
   customBoxes?: CustomTextBox[];
   /** Styles for single words of the lyrics, by word number across the slide */
   words?: { [wordIndex: number]: React.CSSProperties };
+  /** Where the lyrics sit in their box when they don't fill it */
+  verticalAlign?: TextPosition;
 }
 
 type ResolvedLook = { styleOverrides: SlideDefinition['styleOverrides']; animation?: AnimationConfig };
@@ -354,6 +387,7 @@ const applySlideDesign = (base: ResolvedLook, design?: SlideDesign): ResolvedLoo
       global: { ...(base.styleOverrides?.global || {}), ...(design.global || {}) },
       layout: design.layout || base.styleOverrides?.layout,
       words: mergeWordStyles(base.styleOverrides?.words, design.words),
+      verticalAlign: design.verticalAlign || base.styleOverrides?.verticalAlign,
     },
     animation: design.animation
       ? { ...(base.animation || FALLBACK_ANIMATION), ...design.animation } as AnimationConfig
@@ -361,14 +395,18 @@ const applySlideDesign = (base: ResolvedLook, design?: SlideDesign): ResolvedLoo
   };
 };
 
-/** The look of a slide on one output: its template, then the slide's own design for that output on top. */
+/**
+ * The look of a slide on one output: its template, then the slide's own design for that output on top.
+ * templateOverride: draw it in this template instead (Design mode's canvas, while a template is being changed).
+ */
 export const resolveSlideForOutput = (
   slide: SlideDefinition | null,
   outputConfig?: OutputSettings,
   song?: SongTemplateRefs,
-  presentationStyle?: PresentationStyle
+  presentationStyle?: PresentationStyle,
+  templateOverride?: PresentationTemplate
 ): ResolvedLook => {
-  const base = resolveBaseLook(slide, outputConfig, song, presentationStyle);
+  const base = resolveBaseLook(slide, outputConfig, song, presentationStyle, templateOverride);
   return slide ? applySlideDesign(base, slide.designs?.[outputConfig?.id || 'main']) : base;
 };
 
@@ -376,17 +414,18 @@ const resolveBaseLook = (
   slide: SlideDefinition | null,
   outputConfig?: OutputSettings,
   song?: SongTemplateRefs,
-  presentationStyle?: PresentationStyle
+  presentationStyle?: PresentationStyle,
+  templateOverride?: PresentationTemplate
 ): ResolvedLook => {
   if (!slide) return { styleOverrides: undefined, animation: undefined };
 
   const { templateId, source } = resolveTemplateSource(slide, outputConfig, song, presentationStyle);
   const styleTemplateId = source === 'style' ? templateId : undefined;
-  const template = templateId ? getTemplateById(templateId) : undefined;
+  const template = templateOverride ?? (templateId ? getTemplateById(templateId) : undefined);
 
   // Display style template is authoritative: ignore song/slide look (which is baked into
   // slide.styleOverrides/animation when a template is applied to a song). Word-level emphasis is kept.
-  if (styleTemplateId && template) {
+  if ((styleTemplateId || templateOverride) && template) {
     return {
       styleOverrides: {
         global: { ...(template.styles.global || {}) },
@@ -394,7 +433,9 @@ const resolveBaseLook = (
         words: slide.styleOverrides?.words,
         layout: template.styles.layout,
         sourceGlobal: { ...(template.styles.sourceGlobal || {}) },
-        sourceLayout: template.styles.sourceLayout
+        sourceLayout: template.styles.sourceLayout,
+        verticalAlign: template.styles.verticalAlign,
+        sourceVerticalAlign: template.styles.sourceVerticalAlign,
       },
       animation: template.animation
     };
@@ -420,7 +461,9 @@ const resolveBaseLook = (
       ...(template?.styles.sourceGlobal || {}),
       ...(slide.styleOverrides?.sourceGlobal || {})
     },
-    sourceLayout: slide.styleOverrides?.sourceLayout || template?.styles.sourceLayout
+    sourceLayout: slide.styleOverrides?.sourceLayout || template?.styles.sourceLayout,
+    verticalAlign: slide.styleOverrides?.verticalAlign || template?.styles.verticalAlign,
+    sourceVerticalAlign: slide.styleOverrides?.sourceVerticalAlign || template?.styles.sourceVerticalAlign,
   };
 
   // Legacy style overrides if explicitly toggled on
@@ -456,13 +499,13 @@ const linkSlideToTemplate = (s: SlideDefinition, templateId: string): SlideDefin
 
 /** A design with nothing in it is dropped, so the slide shows its template */
 const hasDesignContent = (d: SlideDesign | undefined): d is SlideDesign => !!d && (
-  !!d.layout || !!d.hideLyrics || (d.customBoxes?.length ?? 0) > 0 ||
+  !!d.layout || !!d.hideLyrics || !!d.verticalAlign || (d.customBoxes?.length ?? 0) > 0 ||
   Object.keys(d.global || {}).length > 0 || Object.keys(d.animation || {}).length > 0 ||
   Object.keys(d.words || {}).length > 0
 );
 
 /** A slide design without the parts a template sets (font, size, colours, position, motion); word styles and text boxes stay */
-const withoutOwnLook = (d: SlideDesign): SlideDesign => ({ ...d, global: undefined, layout: undefined, animation: undefined });
+const withoutOwnLook = (d: SlideDesign): SlideDesign => ({ ...d, global: undefined, layout: undefined, animation: undefined, verticalAlign: undefined });
 
 /** The slide with its waiting text boxes put on the screens (the same slide object when none are waiting) */
 const releaseWaitingBoxes = (slide: SlideDefinition): SlideDefinition => {
@@ -522,11 +565,39 @@ const applyGlobalStyles = (
   return resolveSlideForOutput(slide, outputConfig, undefined, presStyle).styleOverrides;
 };
 
+/** Saved settings with FlowShow's defaults filled in (new default outputs and styles added) */
+const normaliseSettings = (val: any): GlobalSettings => {
+
+  // Merge default outputs with saved settings
+  const mergedOutputs = DEFAULT_SETTINGS.outputs.map(defOut => {
+      const savedOut = val.outputs?.find((o: any) => o.id === defOut.id);
+      if (savedOut) {
+          return { 
+              ...defOut, 
+              ...savedOut, 
+              outputType: savedOut.outputType || defOut.outputType || 'hdmi',
+              enabled: savedOut.enabled !== undefined ? savedOut.enabled : defOut.enabled,
+              lyricsStyle: { ...(defOut.lyricsStyle as any), ...(savedOut.lyricsStyle as any) },
+              bibleStyle: { ...(defOut.bibleStyle as any), ...(savedOut.bibleStyle as any) }
+          };
+      }
+      return defOut;
+  });
+  // Also include any dynamically added outputs (ndi, extra hdmi) not in defaults
+  const extraOutputs = (val.outputs || []).filter((o: any) => !DEFAULT_SETTINGS.outputs.find(d => d.id === o.id));
+  const allOutputs = [...mergedOutputs, ...extraOutputs.map((o: any) => ({ ...o, outputType: o.outputType || 'hdmi' }))];
+  // Merge saved styles with defaults (add any new default styles not already in saved)
+  const savedStyles: PresentationStyle[] = val.styles || [];
+  const mergedStyles = DEFAULT_STYLES.map(def => savedStyles.find(s => s.id === def.id) || def);
+  const extraStyles = savedStyles.filter(s => !DEFAULT_STYLES.find(d => d.id === s.id));
+  return { ...DEFAULT_SETTINGS, ...val, outputs: allOutputs, styles: [...mergedStyles, ...extraStyles] };
+};
+
 // We import the new component for settings
 import { OutputStyleEditor, OutputStyleConfig } from './components/OutputStyleEditor';
 import { StylesManager } from './components/StylesManager';
 
-function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogglePresenting, onToggleLockOutput }: any) {
+function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogglePresenting, onToggleLockOutput, profilesApi, profileId }: any) {
   const [activeTab, setActiveTab] = useState('outputs');
   const [activeOutputId, setActiveOutputId] = useState(settings.outputs[0]?.id || 'main');
   const [local, setLocal] = useState<GlobalSettings>(settings);
@@ -543,14 +614,19 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
 
   // While open, only pull in styles (saved instantly) so other unsaved edits survive.
   const wasOpenRef = useRef(false);
+  const shownProfileRef = useRef(profileId);
   useEffect(() => {
-    if (isOpen && wasOpenRef.current) {
+    // Another profile: everything changes
+    if (shownProfileRef.current !== profileId) {
+      shownProfileRef.current = profileId;
+      setLocal(settings);
+    } else if (isOpen && wasOpenRef.current) {
       setLocal(prev => ({ ...prev, styles: settings.styles }));
     } else {
       setLocal(settings);
     }
     wasOpenRef.current = isOpen;
-  }, [settings, isOpen]);
+  }, [settings, isOpen, profileId]);
 
   // Styles save immediately (not gated on "Save Settings").
   const commitStyleChange = (fn: (prev: GlobalSettings) => GlobalSettings) => {
@@ -898,7 +974,7 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
     { id: 'audio', name: 'Audio', icon: Volume2, hidden: true },
     { id: 'connection', name: 'Connection', icon: Wifi, hidden: true },
     { id: 'files', name: 'Files', icon: FileText, hidden: true },
-    { id: 'profiles', name: 'Profiles', icon: Layers, hidden: true },
+    { id: 'profiles', name: 'Profiles', icon: Layers },
     { id: 'theme', name: 'Theme', icon: LayoutTemplate, hidden: true },
     { id: 'smart', name: 'Smart', icon: Activity, hidden: true },
     { id: 'help', name: 'Help', icon: BookOpen }
@@ -1026,6 +1102,16 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
                         </div>
                      </div>
                   </div>
+               )}
+               {activeTab === 'profiles' && profilesApi && (
+                  <ProfilesPanel
+                    {...(profilesApi as ProfilesApi)}
+                    // The setup being edited here (with unsaved changes) is what the current profile keeps
+                    onSwitch={(id: string) => profilesApi.onSwitch(id, local)}
+                    onCreate={(name: string, copy: boolean) => profilesApi.onCreate(name, copy, local)}
+                    onExport={(id: string) => profilesApi.onExport(id, local)}
+                    onDuplicate={(id: string) => profilesApi.onDuplicate(id, local)}
+                  />
                )}
                {activeTab === 'help' && (
                   <div>
@@ -1314,7 +1400,8 @@ export interface GroupLook {
 export interface PresentationItem {
   id: string;
   title: string;
-  category?: 'Presentations' | 'Songs';
+  /** A show is a Song or a Declaration (older shows can also be Presentations) */
+  category?: 'Presentations' | 'Songs' | 'Declarations';
   createdAt?: string;
   modifiedAt?: string;
   usedAt?: string;
@@ -1370,20 +1457,86 @@ function ControlPanel() {
   const [groupMenu, setGroupMenu] = useState<{ x: number; y: number; songId: string; group: string } | null>(null);
   // Stage output shown in the Stage tab (null = the first one)
   const [stageOutputId, setStageOutputId] = useState<string | null>(null);
-  // Open Design mode on a slide, or (null) on whatever slide is on air
+  // ─── Profiles: one screen setup per venue ───
+  const [profiles, setProfiles] = useState<ProfileRecord[]>([]);
+  const [activeProfileId, setActiveProfileId] = useState('main');
+  const profilesLoadedRef = useRef(false);
+  useEffect(() => { loadProfiles().then(({ profiles, activeId }) => { setProfiles(profiles); setActiveProfileId(activeId); profilesLoadedRef.current = true; }); }, []);
+  useEffect(() => { if (profilesLoadedRef.current) void saveProfiles(profiles, activeProfileId); }, [profiles, activeProfileId]);
+  const downloadFile = (blob: Blob, name: string) => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name.replace(/[\\/:*?"<>|]/g, '');
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  };
+  const now = () => new Date().toISOString();
+  // `current`: the setup as it is now (with unsaved Settings changes); the active profile keeps it
+  const switchProfile = (id: string, current: GlobalSettings) => {
+    const target = profiles.find(p => p.id === id);
+    if (!target || id === activeProfileId) return;
+    setProfiles(prev => prev.map(p => p.id === activeProfileId ? { ...p, settings: current, updatedAt: now() } : p));
+    setActiveProfileId(id);
+    setGlobalSettings(normaliseSettings(target.settings || DEFAULT_SETTINGS));
+    setUndoToast({ text: `Profile "${target.name}" in use`, at: Date.now(), kind: 'info', noUndo: true });
+  };
+  const profilesApi = {
+    profiles,
+    activeId: activeProfileId,
+    onSwitch: switchProfile,
+    onCreate: (name: string, copyCurrent: boolean, current: GlobalSettings) => {
+      const id = `profile-${Date.now().toString(36)}`;
+      const record: ProfileRecord = { id, name, settings: copyCurrent ? current : DEFAULT_SETTINGS, createdAt: now(), updatedAt: now() };
+      setProfiles(prev => [...prev.map(p => p.id === activeProfileId ? { ...p, settings: current, updatedAt: now() } : p), record]);
+      setActiveProfileId(id);
+      setGlobalSettings(normaliseSettings(record.settings));
+    },
+    onRename: (id: string, name: string) => setProfiles(prev => prev.map(p => p.id === id ? { ...p, name, updatedAt: now() } : p)),
+    onDuplicate: (id: string, current: GlobalSettings) => {
+      const source = profiles.find(p => p.id === id);
+      if (!source) return;
+      setProfiles(prev => [...prev, { id: `profile-${Date.now().toString(36)}`, name: `${source.name} (copy)`, settings: id === activeProfileId ? current : source.settings, createdAt: now(), updatedAt: now() }]);
+    },
+    onDelete: (id: string) => { if (id !== activeProfileId) setProfiles(prev => prev.filter(p => p.id !== id)); },
+    onExport: (id: string, current: GlobalSettings) => {
+      const p = profiles.find(x => x.id === id);
+      if (!p) return;
+      downloadFile(buildProfileFile(p.name, id === activeProfileId ? current : (p.settings || DEFAULT_SETTINGS)), `${p.name}${PROFILE_EXTENSION}`);
+    },
+    onImport: async (file: File) => {
+      try {
+        const { name, settings, templatesAdded } = await readProfileFile(file);
+        const unique = profiles.some(p => p.name === name) ? `${name} (imported)` : name;
+        setProfiles(prev => [...prev, { id: `profile-${Date.now().toString(36)}`, name: unique, settings, createdAt: now(), updatedAt: now() }]);
+        return `Imported "${unique}"${templatesAdded ? ` with ${templatesAdded} template${templatesAdded === 1 ? '' : 's'}` : ''}. Click "Switch to" to use it.`;
+      } catch (err) {
+        return err instanceof Error ? err.message : String(err);
+      }
+    },
+  };
+
+  // The song importer (Shows tab → Import)
+  const [isImportOpen, setIsImportOpen] = useState(false);
+  // Design mode designs the song slides, or how scripture looks on the screen
+  const [designFor, setDesignFor] = useState<DesignFor>('lyrics');
+  // Open Design mode on a slide, or (null) on whatever is on air: a Bible verse on air opens the scripture design
   const openDesign = (slideId: string | null = null) => {
     setDesignSlideId(slideId);
+    const live = liveState.slide;
+    setDesignFor(slideId ? 'lyrics'
+      : live?.type === 'scripture' && !songsList.some(song => song.slides.some(s => s.id === live.id)) ? 'scripture'
+      : live?.declaration ? 'declaration' : 'lyrics');
     setAppMode('design');
   };
   const [activeTab, setActiveTab] = useState<'shows' | 'songs' | 'setlist' | 'bibles' | 'media' | 'audio'>('songs');
   const [bottomTab, setBottomTab] = useState<'shows' | 'media' | 'audio' | 'overlays' | 'templates' | 'scripture' | 'calendar' | 'functions'>('shows');
-  const [selectedCategory, setSelectedCategory] = useState<'all' | 'Presentations' | 'Songs'>('all');
+  const [selectedCategory, setSelectedCategory] = useState<'all' | 'Presentations' | 'Songs' | 'Declarations'>('all');
   const [rightInspectorTab, setRightInspectorTab] = useState<'groups' | 'metadata'>('groups');
   const [selectedProjectFolder, setSelectedProjectFolder] = useState<string>('11/18/26');
 
   // Inline template grid
   const [inlineTemplates, setInlineTemplates] = useState<PresentationTemplate[]>(STARTER_TEMPLATES);
-  useEffect(() => { getStoredTemplates().then(setInlineTemplates); }, []);
+  useEffect(() => { getStoredTemplates().then(setInlineTemplates); void loadInstalledFonts(); }, []);
   // Live template edits (this window or others) re-render previews and outputs immediately
   useEffect(() => subscribeTemplates(() => setInlineTemplates([...getCachedTemplates()])), []);
   const [inlineTemplateCategory, setInlineTemplateCategory] = useState<string>('all');
@@ -1512,29 +1665,7 @@ function ControlPanel() {
     get('globalSettings').then((val: any) => {
         settingsLoadedRef.current = true;
         if (val) {
-            // Merge default outputs with saved settings
-            const mergedOutputs = DEFAULT_SETTINGS.outputs.map(defOut => {
-                const savedOut = val.outputs?.find((o: any) => o.id === defOut.id);
-                if (savedOut) {
-                    return { 
-                        ...defOut, 
-                        ...savedOut, 
-                        outputType: savedOut.outputType || defOut.outputType || 'hdmi',
-                        enabled: savedOut.enabled !== undefined ? savedOut.enabled : defOut.enabled,
-                        lyricsStyle: { ...(defOut.lyricsStyle as any), ...(savedOut.lyricsStyle as any) },
-                        bibleStyle: { ...(defOut.bibleStyle as any), ...(savedOut.bibleStyle as any) }
-                    };
-                }
-                return defOut;
-            });
-            // Also include any dynamically added outputs (ndi, extra hdmi) not in defaults
-            const extraOutputs = (val.outputs || []).filter((o: any) => !DEFAULT_SETTINGS.outputs.find(d => d.id === o.id));
-            const allOutputs = [...mergedOutputs, ...extraOutputs.map((o: any) => ({ ...o, outputType: o.outputType || 'hdmi' }))];
-            // Merge saved styles with defaults (add any new default styles not already in saved)
-            const savedStyles: PresentationStyle[] = val.styles || [];
-            const mergedStyles = DEFAULT_STYLES.map(def => savedStyles.find(s => s.id === def.id) || def);
-            const extraStyles = savedStyles.filter(s => !DEFAULT_STYLES.find(d => d.id === s.id));
-            setGlobalSettings({ ...DEFAULT_SETTINGS, ...val, outputs: allOutputs, styles: [...mergedStyles, ...extraStyles] });
+            setGlobalSettings(normaliseSettings(val));
         } else {
             setGlobalSettings(prev => ({ ...prev }));
         }
@@ -1576,8 +1707,9 @@ function ControlPanel() {
   const recordedSongsRef = useRef(songsList);
   const lastSongChangeAtRef = useRef(0);
   const skipNextUndoRecordRef = useRef(false);
-  // Short message at the bottom of the screen (undo/redo, or 'info' for other changes Ctrl+Z can undo)
-  const [undoToast, setUndoToast] = useState<{ text: string; at: number; kind?: 'info' } | null>(null);
+  // Short message at the bottom of the screen: undo/redo, 'info' for other changes (Ctrl+Z can undo them unless
+  // noUndo), or 'error' when something couldn't be done
+  const [undoToast, setUndoToast] = useState<{ text: string; at: number; kind?: 'info' | 'error'; noUndo?: boolean } | null>(null);
 
   useEffect(() => {
     const before = recordedSongsRef.current;
@@ -1596,7 +1728,7 @@ function ControlPanel() {
 
   useEffect(() => {
     if (!undoToast) return;
-    const t = setTimeout(() => setUndoToast(null), undoToast.kind === 'info' ? 3200 : 1400);
+    const t = setTimeout(() => setUndoToast(null), undoToast.kind === 'error' ? 9000 : undoToast.kind === 'info' ? 3200 : 1400);
     return () => clearTimeout(t);
   }, [undoToast]);
 
@@ -1628,7 +1760,8 @@ function ControlPanel() {
   };
   const undoActionsRef = useRef({ undo: undoSongChange, redo: redoSongChange, allowed: () => true });
   // The Stage tab undoes its own layout edits
-  undoActionsRef.current = { undo: undoSongChange, redo: redoSongChange, allowed: () => appMode !== 'stage' };
+  // The Stage designer and the scripture design undo their own changes
+  undoActionsRef.current = { undo: undoSongChange, redo: redoSongChange, allowed: () => appMode !== 'stage' && !(appMode === 'design' && designFor !== 'lyrics') };
 
   useEffect(() => {
     const NON_TEXT_INPUTS = new Set(['range', 'checkbox', 'radio', 'color', 'button', 'submit', 'reset', 'file']);
@@ -1670,6 +1803,8 @@ function ControlPanel() {
   const [showBibleHistory, setShowBibleHistory] = useState(false);
   
   const [isUploading, setIsUploading] = useState(false);
+  // Bumped to load the open Bible again (after importing a new copy of it)
+  const [bibleReload, setBibleReload] = useState(0);
   const [activeBibleBookIndex, setActiveBibleBookIndex] = useState<number | null>(null);
   const [activeBibleChapterIndex, setActiveBibleChapterIndex] = useState<number | null>(null);
   const [activeBibleVerseIndex, setActiveBibleVerseIndex] = useState<number | null>(null);
@@ -1994,46 +2129,64 @@ function ControlPanel() {
   }, [activeTab, activeItemIndex, serviceSetlist, activeSetlistItemId, activeBibleData, activeBibleBookIndex, activeBibleChapterIndex, activeBibleVerseIndex, liveState, previewSlide, songsList, isShowingThreeColumns]);
 
 
+  // The Bibles, opening the one that was open last time
   useEffect(() => {
-    initDatabase().then(() => { getBibleList().then(list => { setBibleList(list); if (list.length > 0) setActiveBibleId(list[0].id); }); })
-    .catch(err => { getBibleList().then(list => { setBibleList(list); if (list.length > 0) setActiveBibleId(list[0].id); }); });
+    const showList = () => getBibleList().then(list => {
+      setBibleList(list);
+      let remembered: string | null = null;
+      try { remembered = localStorage.getItem('activeBibleId'); } catch {}
+      setActiveBibleId(list.find(b => b.id === remembered)?.id ?? list[0]?.id ?? null);
+    });
+    initDatabase().catch(err => console.warn('Bible storage', err)).finally(showList);
   }, []);
 
-  // Sync translation changes without automatically pushing Live
   useEffect(() => {
-    if (activeBibleId) { 
-        getBible(activeBibleId).then(data => { 
-            if (data) { 
-                setActiveBibleData(data); 
-                
-                const bIdx = bIndexRef.current !== null ? Math.min(bIndexRef.current, data.books.length - 1) : 0;
-                const cIdx = cIndexRef.current !== null ? Math.min(cIndexRef.current, data.books[bIdx].chapters.length - 1) : 0;
-                const vIdx = vIndexRef.current !== null ? Math.min(vIndexRef.current, data.books[bIdx].chapters[cIdx].verses.length - 1) : 0;
-
-                if (bIndexRef.current === null) {
-                    setActiveBibleBookIndex(0);
-                    setActiveBibleChapterIndex(0);
-                    setActiveBibleVerseIndex(0);
-                } else {
-                    setActiveBibleBookIndex(bIdx);
-                    setActiveBibleChapterIndex(cIdx);
-                    setActiveBibleVerseIndex(vIdx);
-
-                    const v = data.books[bIdx].chapters[cIdx].verses[vIdx];
-                    const slide: SlideDefinition = { id: `b-${data.books[bIdx].name}-${data.books[bIdx].chapters[cIdx].c}-${v.v}`, text: v.lines.join('\n'), source: `${data.books[bIdx].name} ${data.books[bIdx].chapters[cIdx].c}:${v.v}`, type: 'scripture' };
-                    
-                    setPreviewSlide(slide); 
-                }
-            }
-        }); 
-    }
-    else { 
-        setActiveBibleData(null); 
-        setActiveBibleBookIndex(null); 
-        setActiveBibleChapterIndex(null); 
-        setActiveBibleVerseIndex(null);
-    }
+    try { if (activeBibleId) localStorage.setItem('activeBibleId', activeBibleId); } catch {}
   }, [activeBibleId]);
+
+  // Load the chosen Bible. Switching Bibles stays at the same place (the same book, chapter and verse) and shows
+  // it in preview without sending it live.
+  useEffect(() => {
+    if (!activeBibleId) {
+      setActiveBibleData(null);
+      setActiveBibleBookIndex(null);
+      setActiveBibleChapterIndex(null);
+      setActiveBibleVerseIndex(null);
+      return;
+    }
+    const shownBefore = activeBibleData; // the Bible open until now (or an older copy of this one)
+    let cancelled = false;
+    getBible(activeBibleId).then(data => {
+      if (cancelled || !data) return;
+      setActiveBibleData(data);
+      const hadPlace = bIndexRef.current !== null;
+      const oldBook = hadPlace ? shownBefore?.books[bIndexRef.current!] : undefined;
+      const oldChapter = oldBook && cIndexRef.current !== null ? oldBook.chapters[cIndexRef.current] : undefined;
+      const oldVerse = oldChapter && vIndexRef.current !== null ? oldChapter.verses[vIndexRef.current] : undefined;
+      const findOr = (found: number, fallback: number | null, count: number) =>
+        found >= 0 ? found : Math.max(0, Math.min(fallback ?? 0, count - 1));
+
+      const books = data.books;
+      if (!books.length) { setActiveBibleBookIndex(null); setActiveBibleChapterIndex(null); setActiveBibleVerseIndex(null); return; }
+      const bIdx = findOr(oldBook ? books.findIndex(b => b.name === oldBook.name) : -1, bIndexRef.current, books.length);
+      const chapters = books[bIdx].chapters;
+      const cIdx = chapters.length ? findOr(oldChapter ? chapters.findIndex(c => c.c === oldChapter.c) : -1, cIndexRef.current, chapters.length) : null;
+      const verses = cIdx !== null ? chapters[cIdx].verses : [];
+      let vFound = oldVerse ? verses.findIndex(v => v.v === oldVerse.v) : -1;
+      // A verse this Bible folds into the one before it (GNT has Genesis 1:7 in 1:6): open that one
+      if (vFound < 0 && oldVerse) for (let i = 0; i < verses.length && verses[i].v < oldVerse.v; i++) vFound = i;
+      const vIdx = verses.length ? findOr(vFound, vIndexRef.current, verses.length) : null;
+      setActiveBibleBookIndex(bIdx);
+      setActiveBibleChapterIndex(cIdx);
+      setActiveBibleVerseIndex(vIdx);
+
+      if (hadPlace && cIdx !== null && vIdx !== null) {
+        const b = books[bIdx], c = chapters[cIdx], v = verses[vIdx];
+        setPreviewSlide({ id: `b-${b.name}-${c.c}-${v.v}`, text: v.lines.join('\n'), source: `${b.name} ${c.c}:${v.v}`, type: 'scripture' });
+      }
+    });
+    return () => { cancelled = true; };
+  }, [activeBibleId, bibleReload]);
 
   // What stage screens show besides the live slide: what comes next (as the arrow keys would go) and the song title
   const stageInfo = useMemo<StageInfo>(() => {
@@ -2269,7 +2422,9 @@ function ControlPanel() {
                         if (vNum < 1) vNum = 1;
                         finalVal += vSep + vNum;
 
-                        const vIdx = chapter.verses.findIndex(v => v.v === vNum);
+                        let vIdx = chapter.verses.findIndex(v => v.v === vNum);
+                        // A verse some Bibles fold into the one before it (GNT has Genesis 1:7 in 1:6)
+                        if (vIdx === -1) for (let i = 0; i < chapter.verses.length && chapter.verses[i].v < vNum; i++) vIdx = i;
                         if (vIdx !== -1) {
                             setActiveBibleVerseIndex(vIdx);
                         }
@@ -2333,7 +2488,7 @@ function ControlPanel() {
          const chapter = book.chapters.find(c => c.c === chapterSearch);
          if (chapter) {
            const verse = chapter.verses.find(v => v.v === verseSearch);
-           if (verse) foundText = verse.text;
+           if (verse) foundText = verse.lines.join('\n');
            else foundText = `[Verse ${verseSearch} not found]`;
          } else foundText = `[Chapter ${chapterSearch} not found]`;
        } else foundText = `[Book ${bookSearch} not found]`;
@@ -2343,18 +2498,30 @@ function ControlPanel() {
      goLive(slide);
   };
 
+  // Import a Bible from an XML file and open it. Importing a file with the same name again replaces that Bible.
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+    const input = e.target;
+    const file = input.files?.[0];
     if (!file) return;
+    setIsUploading(true);
     try {
-      setIsUploading(true);
-      const newBible = await parseBibleXml(file);
-      await saveBible(newBible);
-      const list = await getBibleList();
-      setBibleList(list);
-      setActiveBibleId(newBible.id);
-    } catch (err) { alert("Failed to parse Bible XML. " + err); } 
-    finally { setIsUploading(false); if (e.target) e.target.value = ''; }
+      const bible = await parseBibleXml(file);
+      const replacing = bibleList.some(b => b.id === bible.id);
+      await saveBible(bible);
+      setBibleList(await getBibleList());
+      if (bible.id === activeBibleId) setBibleReload(n => n + 1); else setActiveBibleId(bible.id);
+      setShowBibleHistory(false);
+      setBibleSearchQuery('');
+      setBibleKeywordQuery('');
+      setUndoToast({ text: `${replacing ? 'Updated' : 'Imported'} “${bible.name}”: ${bible.books.length} books, ${countVerses(bible).toLocaleString()} verses`, at: Date.now(), kind: 'info', noUndo: true });
+    } catch (err) {
+      console.warn('Bible import failed', err);
+      const text = err instanceof BibleFileError ? err.message : `Couldn't import “${file.name}”: ${err instanceof Error ? err.message : String(err)}`;
+      setUndoToast({ text, at: Date.now(), kind: 'error' });
+    } finally {
+      setIsUploading(false);
+      input.value = '';
+    }
   };
 
   const handleContextMenu = (e: React.MouseEvent, type: 'song'|'bible'|'slide', id: string|number) => {
@@ -2626,6 +2793,10 @@ function ControlPanel() {
 
     if (activeTab === 'bibles') {
       const isSearchingKeyword = bibleKeywordQuery.trim().length > 0;
+      // A compact card per verse so many fit at once: red when live, blue in preview, dashed for the one that's next
+      const verseCard = (isLive: boolean, isPreview: boolean, isNext = false) =>
+        `px-3 py-1.5 rounded-lg cursor-pointer border transition-all flex items-baseline gap-3 ${isLive ? 'bg-red-600/10 border-red-500/50 text-white' : isPreview ? 'bg-blue-600/10 border-blue-500/50 text-white' : isNext ? 'border-dashed border-white/30 bg-[#0a0a0a]' : 'bg-[#030303] border-white/5 hover:border-white/20 text-neutral-300'}`;
+      const verseLabel = (lit: boolean) => `text-[11px] font-bold shrink-0 text-right tabular-nums ${lit ? 'text-white/80' : 'text-neutral-500'}`;
 
       return (
         <div className="flex flex-col h-full bg-[#09090B]">
@@ -2661,28 +2832,60 @@ function ControlPanel() {
               >
                  <Clock size={16} /> History
               </button>
-              <span className="text-sm font-medium text-neutral-400 ml-auto">{activeBibleData?.name || 'No Bible Selected'}</span>
+              {/* Which Bible (right-click it to rename or delete), and importing another */}
+              <div className="ml-auto flex items-center gap-2">
+                 {bibleList.length > 0 && (
+                    <select
+                      value={activeBibleId || ''}
+                      onChange={(e) => setActiveBibleId(e.target.value)}
+                      onContextMenu={(e) => { if (activeBibleId) handleContextMenu(e, 'bible', activeBibleId); }}
+                      className="bg-white/5 border border-white/10 rounded-lg text-sm px-3 py-2 text-white outline-none focus:border-white/20 cursor-pointer max-w-[220px]"
+                      title="Which Bible to show · right-click to rename or delete it"
+                    >
+                      {bibleList.map(b => <option key={b.id} value={b.id} className="bg-[#121214]">{b.name}</option>)}
+                    </select>
+                 )}
+                 <label
+                   className={`px-4 py-2 rounded-lg flex items-center gap-2 text-sm font-medium transition-all whitespace-nowrap ${isUploading ? 'bg-white/5 text-neutral-500 cursor-wait' : 'bg-white/5 text-neutral-300 hover:text-white hover:bg-white/10 cursor-pointer'}`}
+                   title="Add a Bible from an XML file (Zefania, OpenSong, Beblia, OSIS or USFX)"
+                 >
+                    {isUploading ? <Activity size={16} className="animate-spin" /> : <Upload size={16} />}
+                    {isUploading ? 'Importing…' : 'Import Bible'}
+                    <input type="file" accept=".xml,.xmm" className="hidden" onChange={handleFileUpload} disabled={isUploading} />
+                 </label>
+              </div>
            </div>
 
-           {showBibleHistory ? (
-              <div className="p-6 overflow-y-auto custom-scrollbar flex-1 bg-[#09090B]">
-                 <h2 className="text-lg font-bold text-white mb-6 flex items-center gap-2"><Clock size={20}/> Session History</h2>
+           {bibleList.length === 0 ? (
+              <div className="flex-1 flex flex-col items-center justify-center gap-3 text-center px-6 bg-[#09090B]">
+                 <BookOpen size={36} className="text-neutral-600" />
+                 <h3 className="text-base font-bold text-white">No Bible yet</h3>
+                 <p className="text-sm text-neutral-400 max-w-md leading-relaxed">Import a Bible XML file (Zefania, OpenSong, Beblia, OSIS or USFX) to search and show scripture.</p>
+                 <label className={`mt-1 px-4 py-2 rounded-lg flex items-center gap-2 text-sm font-semibold text-white transition-colors ${isUploading ? 'bg-pink-600/50 cursor-wait' : 'bg-pink-600 hover:bg-pink-500 cursor-pointer'}`}>
+                    {isUploading ? <Activity size={15} className="animate-spin" /> : <Upload size={15} />}
+                    {isUploading ? 'Importing…' : 'Import Bible'}
+                    <input type="file" accept=".xml,.xmm" className="hidden" onChange={handleFileUpload} disabled={isUploading} />
+                 </label>
+              </div>
+           ) : showBibleHistory ? (
+              <div className="px-4 py-3 overflow-y-auto custom-scrollbar flex-1 bg-[#09090B]">
+                 <h2 className="text-sm font-bold text-white mb-2 flex items-center gap-2"><Clock size={14}/> Session History</h2>
                  {bibleHistory.length === 0 ? (
                     <div className="text-neutral-500 text-sm">No verses viewed in this session yet.</div>
                  ) : (
-                    <div className="flex flex-col gap-3 max-w-4xl mx-auto">
+                    <div className="flex flex-col gap-1 max-w-5xl mx-auto">
                        {bibleHistory.map((slide, idx) => {
                          const isLive = liveState.slide?.id === slide.id;
                          const isPreview = previewSlide?.id === slide.id;
                          return (
-                           <div 
-                              key={`${slide.id}-${idx}`} 
+                           <div
+                              key={`${slide.id}-${idx}`}
                               onClick={() => handleJumpToVerse(slide, false)}
                               onDoubleClick={() => handleJumpToVerse(slide, true)}
-                              className={`p-5 rounded-xl cursor-pointer border transition-all flex gap-5 ${isLive ? 'bg-red-600/10 border-red-500/50 text-white shadow-lg' : isPreview ? 'bg-blue-600/10 border-blue-500/50 text-white' : 'bg-[#030303] border-white/5 hover:border-white/20 text-neutral-300 shadow-sm'}`}
+                              className={verseCard(isLive, isPreview)}
                            >
-                              <span className={`text-xs font-bold mt-1.5 shrink-0 w-24 text-right ${isLive || isPreview ? 'text-white/80' : 'text-neutral-500'}`}>{slide.source}</span>
-                              <p className="text-[15px] whitespace-pre-wrap leading-relaxed">{slide.text}</p>
+                              <span className={`${verseLabel(isLive || isPreview)} w-24`}>{slide.source}</span>
+                              <p className="text-sm whitespace-pre-wrap leading-snug">{slide.text}</p>
                            </div>
                          );
                        })}
@@ -2690,23 +2893,23 @@ function ControlPanel() {
                  )}
               </div>
            ) : isSearchingKeyword ? (
-              <div className="p-6 overflow-y-auto custom-scrollbar flex-1 bg-[#09090B]">
+              <div className="px-4 py-3 overflow-y-auto custom-scrollbar flex-1 bg-[#09090B]">
                  {bibleKeywordResults.length === 0 ? (
                     <div className="text-center text-neutral-500 text-sm mt-10">No keyword matches found.</div>
                  ) : (
-                    <div className="flex flex-col gap-3 max-w-4xl mx-auto">
+                    <div className="flex flex-col gap-1 max-w-5xl mx-auto">
                        {bibleKeywordResults.map((slide) => {
                          const isLive = liveState.slide?.id === slide.id;
                          const isPreview = previewSlide?.id === slide.id;
                          return (
-                           <div 
-                              key={slide.id} 
+                           <div
+                              key={slide.id}
                               onClick={() => handleJumpToVerse(slide, false)}
                               onDoubleClick={() => handleJumpToVerse(slide, true)}
-                              className={`p-5 rounded-xl cursor-pointer border transition-all flex gap-5 ${isLive ? 'bg-red-600/10 border-red-500/50 text-white shadow-lg' : isPreview ? 'bg-blue-600/10 border-blue-500/50 text-white' : 'bg-[#030303] border-white/5 hover:border-white/20 text-neutral-300 shadow-sm'}`}
+                              className={verseCard(isLive, isPreview)}
                            >
-                              <span className={`text-xs font-bold mt-1.5 shrink-0 w-24 text-right ${isLive || isPreview ? 'text-white/80' : 'text-neutral-500'}`}>{slide.source}</span>
-                              <p className="text-[15px] whitespace-pre-wrap leading-relaxed">{slide.text}</p>
+                              <span className={`${verseLabel(isLive || isPreview)} w-24`}>{slide.source}</span>
+                              <p className="text-sm whitespace-pre-wrap leading-snug">{slide.text}</p>
                            </div>
                          );
                        })}
@@ -2717,16 +2920,16 @@ function ControlPanel() {
               <div className="flex flex-1 min-h-0 overflow-hidden bg-[#09090B]">
                  <div className="w-48 border-r border-white/5 overflow-y-auto custom-scrollbar bg-[#121214] shrink-0" ref={bookListRef}>
                     {activeBibleData?.books.map((book, idx) => (
-                       <button key={book.name} onClick={() => { setActiveBibleBookIndex(idx); setActiveBibleChapterIndex(0); setActiveBibleVerseIndex(0); setBibleSearchQuery(''); }} className={`w-full text-left px-5 py-3 text-sm border-b border-white/5 transition-colors truncate ${activeBibleBookIndex === idx ? 'bg-blue-600/10 text-blue-400 font-semibold border-l-2 border-l-blue-500' : 'text-neutral-400 hover:bg-white/5 hover:text-white border-l-2 border-l-transparent'}`}>{book.name}</button>
+                       <button key={`${idx}-${book.name}`} onClick={() => { setActiveBibleBookIndex(idx); setActiveBibleChapterIndex(0); setActiveBibleVerseIndex(0); setBibleSearchQuery(''); }} className={`w-full text-left px-5 py-3 text-sm border-b border-white/5 transition-colors truncate ${activeBibleBookIndex === idx ? 'bg-blue-600/10 text-blue-400 font-semibold border-l-2 border-l-blue-500' : 'text-neutral-400 hover:bg-white/5 hover:text-white border-l-2 border-l-transparent'}`}>{book.name}</button>
                     ))}
                  </div>
                  <div className="w-20 border-r border-white/5 overflow-y-auto custom-scrollbar bg-[#121214] shrink-0" ref={chapterListRef}>
                     {activeBibleBookIndex !== null && activeBibleData?.books[activeBibleBookIndex]?.chapters.map((chapter, idx) => (
-                       <button key={chapter.c} onClick={() => { setActiveBibleChapterIndex(idx); setActiveBibleVerseIndex(0); setBibleSearchQuery(''); }} className={`w-full text-center px-2 py-3 text-sm border-b border-white/5 transition-colors ${activeBibleChapterIndex === idx ? 'bg-blue-600/10 text-blue-400 font-semibold shadow-inner' : 'text-neutral-400 hover:bg-white/5 hover:text-white'}`}>{chapter.c}</button>
+                       <button key={`${idx}-${chapter.c}`} onClick={() => { setActiveBibleChapterIndex(idx); setActiveBibleVerseIndex(0); setBibleSearchQuery(''); }} className={`w-full text-center px-2 py-3 text-sm border-b border-white/5 transition-colors ${activeBibleChapterIndex === idx ? 'bg-blue-600/10 text-blue-400 font-semibold shadow-inner' : 'text-neutral-400 hover:bg-white/5 hover:text-white'}`}>{chapter.c}</button>
                     ))}
                  </div>
-                 <div className="flex-1 overflow-y-auto custom-scrollbar p-8 bg-[#09090B]">
-                    <div className="flex flex-col gap-3 max-w-4xl mx-auto" ref={verseListRef}>
+                 <div className="flex-1 overflow-y-auto custom-scrollbar px-4 py-3 bg-[#09090B]">
+                    <div className="flex flex-col gap-1 max-w-5xl mx-auto" ref={verseListRef}>
                       {activeBibleBookIndex !== null && activeBibleChapterIndex !== null && activeBibleData?.books[activeBibleBookIndex]?.chapters[activeBibleChapterIndex]?.verses.map((verse, vIdx) => {
                          const slide: SlideDefinition = { id: `b-${activeBibleData.books[activeBibleBookIndex].name}-${activeBibleData.books[activeBibleBookIndex].chapters[activeBibleChapterIndex].c}-${verse.v}`, text: verse.lines.join('\n'), source: `${activeBibleData.books[activeBibleBookIndex].name} ${activeBibleData.books[activeBibleBookIndex].chapters[activeBibleChapterIndex].c}:${verse.v}`, type: 'scripture' };
                          const isLive = liveState.slide?.id === slide.id;
@@ -2734,14 +2937,14 @@ function ControlPanel() {
                          const isNextLogical = activeBibleVerseIndex !== null && vIdx === activeBibleVerseIndex + 1;
                          
                          return (
-                            <div 
-                               key={verse.v} 
+                            <div
+                               key={`${vIdx}-${verse.v}`}
                                onClick={() => handleVerseClick(slide, vIdx)}
                                onDoubleClick={() => handleVerseDoubleClick(slide, vIdx)}
-                               className={`p-5 rounded-xl cursor-pointer border transition-all flex gap-5 ${isLive ? 'bg-red-600/10 border-red-500/50 text-white shadow-lg' : isPreview ? 'bg-blue-600/10 border-blue-500/50 text-white' : isNextLogical ? 'border-dashed border-white/30 bg-[#0a0a0a]' : 'bg-[#030303] border-white/5 hover:border-white/20 text-neutral-300 shadow-sm'}`}
+                               className={verseCard(isLive, isPreview, isNextLogical)}
                             >
-                               <span className={`text-xs font-bold mt-1.5 shrink-0 w-8 text-right ${isLive || isPreview ? 'text-white/80' : 'text-neutral-500'}`}>{verse.v}</span>
-                               <p className="text-[15px] whitespace-pre-wrap leading-relaxed">{verse.lines.join('\n')}</p>
+                               <span className={`${verseLabel(isLive || isPreview)} w-6`}>{verse.v}</span>
+                               <p className="text-sm whitespace-pre-wrap leading-snug">{verse.lines.join('\n')}</p>
                             </div>
                          );
                       })}
@@ -3339,16 +3542,7 @@ function ControlPanel() {
             Project template
           </button>
           <button 
-            onClick={() => {
-              const fileInput = document.createElement('input');
-              fileInput.type = 'file';
-              fileInput.accept = '.json,.xml,.txt';
-              fileInput.onchange = (e: any) => {
-                const file = e.target?.files?.[0];
-                if (file) alert(`Selected file: ${file.name}`);
-              };
-              fileInput.click();
-            }}
+            onClick={() => setIsImportOpen(true)}
             className="w-full py-1.5 px-3 bg-[#181822] hover:bg-[#222230] text-neutral-300 text-xs rounded-full flex items-center gap-2 border border-white/5 transition-colors font-medium"
           >
             <Upload size={13} className="text-neutral-400" />
@@ -3533,12 +3727,45 @@ function ControlPanel() {
     }
     return liveState.slide?.id === id ? liveState.slide : null;
   };
-  // Design mode works on the slide picked in its strip, otherwise it follows what's on air
+  // Design mode works on the slide picked in its strip, otherwise it follows what's on air.
+  // A Bible verse on air isn't a song slide: it is designed under "For scripture", so the lyrics side keeps the open song.
   const getDesignSlide = (outputId: string): SlideDefinition | null => {
     const picked = findSlideById(designSlideId);
     if (picked) return picked;
     const onAir = getOnAirSlide(outputId);
-    return findSlideById(onAir?.id) || onAir;
+    const found = findSlideById(onAir?.id) || onAir;
+    if (found?.type === 'scripture' && !songsList.some(song => song.slides.some(s => s.id === found.id))) {
+      return songsList[activeItemIndex]?.slides?.[0] ?? null;
+    }
+    return found;
+  };
+
+  // --- SCRIPTURE LOOK: each screen's scripture template, or its style's when the style sets one ---
+  const scriptureSlotFor = (out: OutputSettings) => {
+    const style = getStyleForOutput(out, globalSettings);
+    return style?.scriptureTemplateId
+      ? { style, templateId: style.scriptureTemplateId }
+      : { style: undefined, templateId: screenScriptureTemplateId(out) };
+  };
+  // Declarations: the style's template when the style sets one (it would win anyway), otherwise the screen's own
+  const declarationSlotFor = (out: OutputSettings) => {
+    const style = getStyleForOutput(out, globalSettings);
+    if (style?.declarationTemplateId || style?.lyricsTemplateId) {
+      return { style, templateId: style.declarationTemplateId || style.lyricsTemplateId! };
+    }
+    return { style: undefined, templateId: out.declarationTemplateId || out.defaultTemplateId || 'cinematic-ambient' };
+  };
+  const setDeclarationTemplateFor = (out: OutputSettings, templateId: string) => {
+    const { style } = declarationSlotFor(out);
+    setGlobalSettings(prev => style
+      ? { ...prev, styles: prev.styles.map(st => st.id === style.id ? { ...st, declarationTemplateId: templateId } : st) }
+      : { ...prev, outputs: prev.outputs.map(o => o.id === out.id ? { ...o, declarationTemplateId: templateId } : o) });
+  };
+  const setScriptureTemplateFor = (out: OutputSettings, templateId: string) => {
+    const { style } = scriptureSlotFor(out);
+    setGlobalSettings(prev => style
+      ? { ...prev, styles: prev.styles.map(st => st.id === style.id ? { ...st, scriptureTemplateId: templateId } : st) }
+      : { ...prev, outputs: prev.outputs.map(o => o.id === out.id ? { ...o, scriptureTemplateId: templateId } : o) });
   };
 
   const getOutputTemplateInfo = (outputId: string, slide: SlideDefinition | null): OutputTemplateInfo => {
@@ -3563,7 +3790,7 @@ function ControlPanel() {
     const out = globalSettings.outputs.find(o => o.id === outputId);
 
     if (info.source === 'style' && out?.styleId) {
-      const key = slide?.type === 'scripture' ? 'scriptureTemplateId' : 'lyricsTemplateId';
+      const key = slide?.type === 'scripture' ? 'scriptureTemplateId' : slide?.declaration ? 'declarationTemplateId' : 'lyricsTemplateId';
       setGlobalSettings(prev => ({ ...prev, styles: prev.styles.map(st => st.id === out.styleId ? { ...st, [key]: templateId } : st) }));
       return;
     }
@@ -3645,6 +3872,7 @@ function ControlPanel() {
         type: neighbour?.type === 'scripture' ? 'scripture' : 'lyrics',
         templateId: neighbour?.templateId,
         outputTemplates: neighbour?.outputTemplates,
+        declaration: neighbour?.declaration,
       };
       const slides = [...song.slides];
       slides.splice(Math.max(0, Math.min(index, slides.length)), 0, slide);
@@ -3762,12 +3990,55 @@ function ControlPanel() {
     }
     const out = outputs.find(o => o.id === designOutputId) || outputs[0];
     const locked = !!liveState.lockedOutputs?.[out.id];
-    const slide = getDesignSlide(out.id);
     const onAirId = locked ? liveState.frozenStates?.[out.id]?.slide?.id : liveState.slide?.id;
     const style = getStyleForOutput(out, globalSettings);
-    const resolved = resolveSlideForOutput(slide, out, undefined, style);
     const rawBg = locked ? liveState.frozenStates?.[out.id]?.bg : (liveState.globalBackground || out.defaultBackground);
     const background = resolveOutputBackground(rawBg, out, globalSettings);
+    const status = {
+      presenting: !!liveState.isPresenting,
+      textCleared: !!(liveState.clearedOutputs?.[out.id] || liveState.clearText),
+      locked,
+    };
+
+    // For scripture / declarations: the screen's template for them, designed with one on air (or a sample)
+    if (designFor === 'scripture' || designFor === 'declaration') {
+      const declaration = designFor === 'declaration';
+      const slot = declaration ? declarationSlotFor(out) : scriptureSlotFor(out);
+      const template = getTemplateById(slot.templateId) || getTemplateById(declaration ? 'cinematic-ambient' : DEFAULT_SCRIPTURE_TEMPLATE_ID)!;
+      const onAir = getOnAirSlide(out.id);
+      const openShow = songsList[activeItemIndex];
+      const verse = declaration
+        ? (onAir?.declaration ? onAir : previewSlide?.declaration ? previewSlide
+          : (openShow?.category === 'Declarations' ? openShow.slides[0] : songsList.find(sg => sg.category === 'Declarations')?.slides[0]) || null)
+        : (onAir?.type === 'scripture' ? onAir : previewSlide?.type === 'scripture' ? previewSlide : null);
+      return (
+        <ScriptureDesignWorkspace
+          kind={designFor}
+          outputs={outputs}
+          selectedOutputId={out.id}
+          onSelectOutput={setDesignOutputId}
+          onDesignFor={setDesignFor}
+          templates={inlineTemplates}
+          template={template}
+          scope={slot.style
+            ? { kind: 'style', styleName: slot.style.name, screens: outputs.filter(o => o.styleId === slot.style!.id).map(o => o.name) }
+            : { kind: 'screen' }}
+          onUseTemplate={(templateId) => declaration ? setDeclarationTemplateFor(out, templateId) : setScriptureTemplateFor(out, templateId)}
+          textHidden={style?.activeLayers.slide === false}
+          styleName={style?.name}
+          status={status}
+          verse={verse}
+          verseOnAir={!!verse && verse.id === onAirId}
+          renderOutput={(s, t) => (
+            <AudienceOutputContent output={out} settings={globalSettings} slide={s} background={background} muted templateOverride={t} />
+          )}
+          onGoLive={(s) => goLive(s)}
+        />
+      );
+    }
+
+    const slide = getDesignSlide(out.id);
+    const resolved = resolveSlideForOutput(slide, out, undefined, style);
     const song = getSongForSlide(slide);
     const setDesignOn = (ids: string[], design: SlideDesign | undefined) =>
       updateSlidesById(new Set(ids), s => withDesign(s, out.id, design));
@@ -3777,6 +4048,7 @@ function ControlPanel() {
         outputs={outputs}
         selectedOutputId={out.id}
         onSelectOutput={setDesignOutputId}
+        onDesignFor={setDesignFor}
         templates={inlineTemplates}
         templateInfo={getOutputTemplateInfo(out.id, slide)}
         onAssignTemplate={(templateId) => handleAssignLiveTemplate(out.id, templateId, slide)}
@@ -3786,17 +4058,14 @@ function ControlPanel() {
           animation: resolved.animation,
           words: resolved.styleOverrides?.words,
           lines: resolved.styleOverrides?.lines,
+          verticalAlign: resolved.styleOverrides?.verticalAlign,
         }}
         design={slide?.designs?.[out.id]}
         onChangeDesign={(fn) => { if (slide) updateSlidesById(new Set([slide.id]), s => withDesign(s, out.id, fn(s.designs?.[out.id] || {}))); }}
         onCopyDesign={(toIds) => { if (slide) setDesignOn(toIds, slide.designs?.[out.id]); }}
         onResetDesign={(ids) => setDesignOn(ids, undefined)}
         textHidden={style?.activeLayers.slide === false}
-        status={{
-          presenting: !!liveState.isPresenting,
-          textCleared: !!(liveState.clearedOutputs?.[out.id] || liveState.clearText),
-          locked,
-        }}
+        status={status}
         slideIsOnAir={!!slide && slide.id === onAirId}
         followingLive={!findSlideById(designSlideId)}
         renderOutput={(scrollPreviewPos, draftDesign, highlightWordIndex) => (
@@ -3925,13 +4194,15 @@ function ControlPanel() {
         y={groupMenu.y}
         group={groupMenu.group}
         slideCount={song.slides.filter(s => s.group === groupMenu.group).length}
-        templates={inlineTemplates}
+        // Tags are song sections, so scripture templates (ready-made or your own) aren't offered
+        templates={inlineTemplates.filter(t => t.category !== 'scripture')}
         templateId={song.groupLooks?.[groupMenu.group]?.templateId}
         currentSlideLabel={currentIndex >= 0 ? `slide ${currentIndex + 1}` : undefined}
         onSetTemplate={(templateId) => {
           handleSetGroupTemplate(song.id, groupMenu.group, templateId);
           // A screen whose style sets a template keeps showing that one
-          const key = song.slides.find(s => s.group === groupMenu.group)?.type === 'scripture' ? 'scriptureTemplateId' : 'lyricsTemplateId';
+          const first = song.slides.find(s => s.group === groupMenu.group);
+          const key = first?.type === 'scripture' ? 'scriptureTemplateId' : first?.declaration ? 'declarationTemplateId' : 'lyricsTemplateId';
           const screens = globalSettings.outputs.filter(o => o.enabled && !isStageOutput(o));
           const styled = screens.filter(o => getStyleForOutput(o, globalSettings)?.[key]);
           const note = styled.length === 0 ? ''
@@ -4004,6 +4275,15 @@ function ControlPanel() {
           <span className="font-mono text-neutral-500 text-[11px]">{currentSlideNum}/{totalSlides}</span>
         </div>
 
+        {appMode === 'design' && designFor !== 'lyrics' ? (
+          // Designing a template (scripture or declarations): no groups here, so the panel says what is being designed
+          <div className="flex-1 p-3 space-y-1.5 text-[11px] leading-relaxed" data-scripture-panel>
+            <div className="text-[10px] uppercase font-bold text-neutral-500">{designFor === 'scripture' ? 'Scripture' : 'Declarations'}</div>
+            <p className="text-neutral-400">{designFor === 'scripture'
+              ? 'Scripture has no groups. Here you design how every Bible verse and its reference look on the screen.'
+              : 'Here you design the Declarations template: how the slides of every Declaration show look on the screen.'}</p>
+          </div>
+        ) : (<>
         {/* Inspector Tabs (Groups | Metadata) */}
         <div className="h-9 px-3 border-b border-[#262635] flex items-center gap-4 shrink-0 bg-[#101015]">
           <button
@@ -4050,6 +4330,7 @@ function ControlPanel() {
             </div>
           )}
         </div>
+        </>)}
       </div>
     );
   };
@@ -4057,8 +4338,7 @@ function ControlPanel() {
   // --- BOTTOM HORIZONTAL LIBRARY & BROWSER ---
   const renderBottomBrowser = () => {
     const filteredSongs = songsList.filter(song => {
-      if (selectedCategory === 'Presentations' && song.category !== 'Presentations') return false;
-      if (selectedCategory === 'Songs' && song.category !== 'Songs') return false;
+      if (selectedCategory !== 'all' && song.category !== selectedCategory) return false;
       if (!songSearchQuery.trim()) return true;
       const q = songSearchQuery.toLowerCase();
       return song.title.toLowerCase().includes(q) || song.slides.some(s => s.text.toLowerCase().includes(q));
@@ -4067,6 +4347,7 @@ function ControlPanel() {
     const activeSong = songsList[activeItemIndex] || songsList[0];
     const presCount = songsList.filter(s => s.category === 'Presentations').length;
     const songsCount = songsList.filter(s => s.category === 'Songs').length;
+    const declarationsCount = songsList.filter(s => s.category === 'Declarations').length;
 
     return (
       <div className="h-full bg-[#0c0c11] flex flex-col overflow-hidden select-none">
@@ -4164,6 +4445,19 @@ function ControlPanel() {
                 <span className="text-[10px] font-mono text-neutral-500">{songsCount}</span>
               </button>
 
+              <button
+                onClick={() => setSelectedCategory('Declarations')}
+                className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                  selectedCategory === 'Declarations' ? 'bg-pink-500/15 text-pink-300 font-semibold' : 'text-neutral-400 hover:text-white hover:bg-white/5'
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <Mic size={13} />
+                  <span>Declarations</span>
+                </div>
+                <span className="text-[10px] font-mono text-neutral-500">{declarationsCount}</span>
+              </button>
+
               <button 
                 onClick={() => {
                   const cat = prompt('New Category Name:');
@@ -4230,16 +4524,8 @@ function ControlPanel() {
               {/* Bottom Actions Bar */}
               <div className="h-10 px-4 border-t border-[#262635] flex items-center justify-between shrink-0 bg-[#101015]">
                 <button 
-                  onClick={() => {
-                    const fileInput = document.createElement('input');
-                    fileInput.type = 'file';
-                    fileInput.accept = '.json,.xml,.txt';
-                    fileInput.onchange = (e: any) => {
-                      const file = e.target?.files?.[0];
-                      if (file) alert(`Importing: ${file.name}`);
-                    };
-                    fileInput.click();
-                  }}
+                  onClick={() => setIsImportOpen(true)}
+                  title="Import songs from FreeShow, ProPresenter, Word or text files"
                   className="py-1.5 px-3 bg-[#181822] hover:bg-[#222230] text-neutral-300 text-xs rounded-full flex items-center gap-1.5 border border-white/5 transition-colors font-medium"
                 >
                   <Upload size={13} className="text-neutral-400" />
@@ -4400,12 +4686,14 @@ function ControlPanel() {
     <div className="flex flex-col h-screen bg-black text-neutral-200 overflow-hidden font-sans select-none">
       {renderGroupMenu()}
       {undoToast && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[200] px-4 py-2 rounded-full bg-neutral-900/95 border border-white/10 shadow-2xl pointer-events-none flex items-center gap-2 text-sm text-white">
-          {undoToast.kind === 'info'
-            ? <Check size={14} className="text-emerald-400" />
-            : <RotateCcw size={14} className={undoToast.text === 'Redone' ? '-scale-x-100' : ''} />}
-          {undoToast.text}
-          <span className="text-[11px] text-neutral-500">Ctrl+Z undo · Ctrl+Y redo</span>
+        <div role="status" className={`fixed bottom-6 left-1/2 -translate-x-1/2 z-[200] px-4 py-2 bg-neutral-900/95 border shadow-2xl pointer-events-none flex items-center gap-2 text-sm text-white max-w-[min(640px,calc(100vw-32px))] w-max ${undoToast.kind === 'error' ? 'rounded-xl border-red-500/40' : 'rounded-full border-white/10'}`}>
+          {undoToast.kind === 'error'
+            ? <Info size={14} className="text-red-400 shrink-0" />
+            : undoToast.kind === 'info'
+            ? <Check size={14} className="text-emerald-400 shrink-0" />
+            : <RotateCcw size={14} className={`shrink-0 ${undoToast.text === 'Redone' ? '-scale-x-100' : ''}`} />}
+          <span className="min-w-0">{undoToast.text}</span>
+          {undoToast.kind !== 'error' && !undoToast.noUndo && <span className="text-[11px] text-neutral-500 shrink-0">Ctrl+Z undo · Ctrl+Y redo</span>}
         </div>
       )}
       <SettingsModal
@@ -4413,6 +4701,8 @@ function ControlPanel() {
         onClose={() => setIsSettingsModalOpen(false)} 
         settings={globalSettings} 
         onSave={setGlobalSettings}
+        profilesApi={profilesApi}
+        profileId={activeProfileId}
         isPresenting={liveState.isPresenting}
         onTogglePresenting={togglePresenting}
         onToggleLockOutput={toggleLockOutput}
@@ -4572,7 +4862,41 @@ function ControlPanel() {
         </div>
       )}
 
-      <AddSongModal isOpen={isAddSongModalOpen} onClose={() => setIsAddSongModalOpen(false)} onAddSong={(newSong) => { setSongsList(prev => [...prev, newSong]); setActiveTab('songs'); setActiveItemIndex(songsList.length); }} />
+      <ImportShowsModal
+        isOpen={isImportOpen}
+        onClose={() => setIsImportOpen(false)}
+        onImport={(shows, category) => {
+          const now = Date.now();
+          const declaration = category === 'Declarations';
+          const items = shows.map((s, i) => ({
+            id: `song-${now}-${i}`,
+            title: s.title,
+            category,
+            createdAt: new Date().toISOString(),
+            slides: s.slides.map((slide, k) => ({
+              id: `s-${now}-${i}-${k}`,
+              text: slide.text,
+              type: 'lyrics' as SlideType,
+              ...(slide.group ? { group: slide.group } : {}),
+              ...(declaration ? { declaration: true } : {}),
+            })),
+          }));
+          setSongsList(prev => [...prev, ...items]);
+          setUndoToast({ text: `Imported ${items.length} ${items.length === 1 ? 'show' : 'shows'}`, at: Date.now(), kind: 'info' });
+        }}
+      />
+      <AddSongModal
+        isOpen={isAddSongModalOpen}
+        onClose={() => setIsAddSongModalOpen(false)}
+        onAddSong={(newSong) => {
+          // A Declaration's slides are marked so screens use the Declarations template for them
+          const declaration = newSong.category === 'Declarations';
+          const show = { ...newSong, createdAt: new Date().toISOString(), slides: declaration ? newSong.slides.map(s => ({ ...s, declaration: true })) : newSong.slides };
+          setSongsList(prev => [...prev, show]);
+          setActiveTab('songs');
+          setActiveItemIndex(songsList.length);
+        }}
+      />
 
       <TemplateGalleryModal
         isOpen={isTemplateGalleryOpen}
@@ -4587,10 +4911,12 @@ function ControlPanel() {
  * What an audience output draws inside its FixedStage. The projector window and the Design canvas
  * both render through this, so the canvas is always exactly what the screen shows.
  */
-function AudienceOutputContent({ output, settings, slide, background, hideBackground = false, hideText = false, videoRef, muted = false, scrollPreviewPos, highlightWordIndex, designPreview = false }: {
+function AudienceOutputContent({ output, settings, slide, background, hideBackground = false, hideText = false, videoRef, muted = false, scrollPreviewPos, highlightWordIndex, designPreview = false, templateOverride }: {
   output: OutputSettings | undefined;
   settings: GlobalSettings | undefined;
   slide: SlideDefinition | null | undefined;
+  /** Design canvas only: draw the slide in this template (one being changed) instead of its own */
+  templateOverride?: PresentationTemplate;
   background: ReturnType<typeof resolveOutputBackground>;
   hideBackground?: boolean;
   hideText?: boolean;
@@ -4604,7 +4930,7 @@ function AudienceOutputContent({ output, settings, slide, background, hideBackgr
 }) {
   const style = getStyleForOutput(output, settings);
   const bg = hideBackground ? null : background;
-  const resolved = slide ? resolveSlideForOutput(slide, output, undefined, style) : null;
+  const resolved = slide ? resolveSlideForOutput(slide, output, undefined, style, templateOverride) : null;
   const design = slide?.designs?.[output?.id || 'main'];
   const showText = !hideText && !!slide && style?.activeLayers.slide !== false;
 
@@ -4650,7 +4976,7 @@ function AudienceOutputContent({ output, settings, slide, background, hideBackgr
             text={box.text}
             type="lyrics"
             animation={resolveCustomBoxAnimation(box)}
-            styleOverrides={{ global: box.style, layout: box.layout }}
+            styleOverrides={{ global: box.style, layout: box.layout, verticalAlign: box.verticalAlign }}
             className={`relative z-10 w-full h-full ${box.hidden ? 'opacity-30' : ''}`}
           />
         </div>
@@ -4679,6 +5005,8 @@ function ProjectorView() {
     getStoredTemplates().then(() => setTemplatesVersion(v => v + 1));
   }, [liveState.settings, liveState.slide]);
   useEffect(() => subscribeTemplates(() => setTemplatesVersion(v => v + 1)), []);
+  // Fonts installed from template packages are needed on the screens too
+  useEffect(() => { void loadInstalledFonts(); }, []);
 
   useEffect(() => {
     const channel = new BroadcastChannel(CHANNEL_NAME);

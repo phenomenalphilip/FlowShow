@@ -18,18 +18,9 @@ interface TemplateEditorProps {
   onClose: () => void;
 }
 
-export const FONT_OPTIONS = [
-  { label: 'Inter (Clean Sans)', value: 'Inter, sans-serif' },
-  { label: 'Montserrat (Modern Bold)', value: 'Montserrat, sans-serif' },
-  { label: 'Cinzel (Majestic Serif)', value: 'Cinzel, Georgia, serif' },
-  { label: 'Space Grotesk (Tech Geometric)', value: 'Space Grotesk, sans-serif' },
-  { label: 'Playfair Display (Elegant Serif)', value: 'Playfair Display, serif' },
-  { label: 'Bebas Neue (Heavy Condensed)', value: 'Bebas Neue, sans-serif' },
-  { label: 'Oswald (Strong Headline)', value: 'Oswald, sans-serif' },
-  { label: 'Outfit (Sleek Minimal)', value: 'Outfit, sans-serif' },
-  { label: 'Georgia (Classic Editorial)', value: 'Georgia, serif' },
-  { label: 'Plus Jakarta Sans (Crisp UI)', value: 'Plus Jakarta Sans, sans-serif' },
-];
+import { FONT_OPTIONS } from '../lib/fonts';
+import { FontSelect } from './DesignControls';
+export { FONT_OPTIONS };
 
 export const MOTION_PRESETS: { type: AnimationType; label: string; desc: string }[] = [
   { type: 'blur-in', label: 'Blur Bloom', desc: 'Soft depth-of-field focus reveal' },
@@ -46,7 +37,22 @@ export const MOTION_PRESETS: { type: AnimationType; label: string; desc: string 
   { type: 'word-stack', label: 'Word Stack', desc: 'Words stack vertically and pop in one by one' },
   { type: 'flicker', label: 'Flicker', desc: 'Words flicker on like a neon sign' },
   { type: 'bounce', label: 'Bounce', desc: 'Words bounce in (letters bounce for a single word)' },
+  { type: 'scroll-in', label: 'Scroll In', desc: 'The words glide in from an edge of the screen' },
+  { type: 'karaoke', label: 'Karaoke Fill', desc: 'Each word fills with colour, one after another, at your pace' },
+  { type: 'ticker', label: 'Ticker (Scroll Across)', desc: 'One line moving across, left or right, for announcements' },
 ];
+
+/** Sensible settings when a box switches to a motion, so it doesn't keep settings meant for another motion */
+export const MOTION_DEFAULTS: Partial<Record<AnimationType, Partial<AnimationConfig>>> = {
+  'word-stack': { duration: 0.35, stagger: 0.35 },
+  flicker: { duration: 0.9, stagger: 0.08, effectLoop: false },
+  bounce: { duration: 0.8, stagger: 0.12, effectLoop: false },
+  'vertical-scroll': { duration: 14, scrollStartPos: 150, scrollEndPos: -50, scrollLoop: true },
+  'scroll-in': { duration: 0.9, fromEdge: 'bottom' },
+  karaoke: { duration: 0.4, stagger: 0.5, karaokeColor: '#38bdf8' },
+  ticker: { tickerDirection: 'left', tickerSpeed: 260, scrollLoop: true },
+};
+export const GENERIC_MOTION_DEFAULTS: Partial<AnimationConfig> = { duration: 0.6, stagger: 0.06 };
 
 export const LAYOUT_PRESETS = [
   { label: 'Center Stage', layout: { x: 0.08, y: 0.15, width: 0.84, height: 0.7 } },
@@ -414,17 +420,12 @@ export function TemplateEditor({
                   <label className="text-[11px] font-bold uppercase tracking-wider text-neutral-400 block mb-2">
                     Font Family
                   </label>
-                  <select
-                    value={globalStyle.fontFamily || 'Inter, sans-serif'}
-                    onChange={(e) => updateGlobalStyle({ fontFamily: e.target.value })}
-                    className="w-full bg-[#141417] border border-white/10 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-blue-500 cursor-pointer"
-                  >
-                    {FONT_OPTIONS.map(f => (
-                      <option key={f.value} value={f.value} style={{ fontFamily: f.value }}>
-                        {f.label}
-                      </option>
-                    ))}
-                  </select>
+                  <FontSelect
+                    fill
+                    value={String(globalStyle.fontFamily || 'Inter, sans-serif')}
+                    onChange={(v) => updateGlobalStyle({ fontFamily: v })}
+                    className="flex-1 min-w-0 bg-[#141417] border border-white/10 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-blue-500 cursor-pointer"
+                  />
                 </div>
 
                 {/* Font Size & Weight */}

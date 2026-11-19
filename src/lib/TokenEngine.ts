@@ -17,13 +17,6 @@ export interface StyleRule {
 
 const DEFAULT_RULES: StyleRule[] = [
   {
-    match: /\b(Jesus|God|Lord|Christ|Holy Spirit|Yahweh|Spirit|Father|Savior)\b/i,
-    styles: { 
-      color: '#FFD700', 
-      textShadow: '0 0 20px rgba(255, 215, 0, 0.4), 0 4px 6px rgba(0,0,0,0.8)'
-    }
-  },
-  {
     match: /^\(.*\)$/,
     styles: { fontStyle: 'italic', opacity: 0.85, fontWeight: 400 }
   },

@@ -5,24 +5,22 @@ import {
 import { GROUP_PRESETS, groupColors } from '../lib/slideGroups';
 import { tokenize } from '../lib/TokenEngine';
 import type { CustomTextBox, OutputSettings, SlideDefinition, SlideDesign, TemplateSource } from '../App';
+import type { TextPosition } from '../lib/templates';
 import {
   PresentationTemplate, AnimationConfig, AnimationType, getScrollPositions, SCROLL_POS_MIN, SCROLL_POS_MAX, FALLBACK_ANIMATION, saveTemplate,
 } from '../lib/templates';
-import { FONT_OPTIONS, MOTION_PRESETS, LAYOUT_PRESETS, SHADOW_PRESETS, ScrollMarker } from './TemplateEditor';
+import { FONT_OPTIONS, MOTION_PRESETS, LAYOUT_PRESETS, SHADOW_PRESETS, ScrollMarker, MOTION_DEFAULTS, GENERIC_MOTION_DEFAULTS } from './TemplateEditor';
 import { FixedStage } from './FixedStage';
 import { DesignBox, InlineTextEditor, Rect, getPlacement, placeAcross, placeDown, resizeBox } from './DesignCanvas';
-import { Phase, WEIGHTS, selectCls, segBtn, smallBtn, GroupLabel, Divider, SizeStepper, NumField, ColorField, MiniSlider } from './DesignControls';
+import {
+  Phase, WEIGHTS, selectCls, segBtn, smallBtn, GroupLabel, Divider, SizeStepper, NumField, ColorField, MiniSlider,
+  DesignFor, DesignForSwitch, DesignStatus, StatusBadges, Notice, MotionOptions, ExitSelect, FontSelect, TextPositionSwitch,
+} from './DesignControls';
 
 export interface OutputTemplateInfo {
   templateId?: string;
   source: TemplateSource;
   styleName?: string;
-}
-
-export interface DesignStatus {
-  presenting: boolean;
-  textCleared: boolean;
-  locked: boolean;
 }
 
 /** How the slide looks on this screen right now: its template with this slide's own design on top */
@@ -33,12 +31,15 @@ export interface DesignLook {
   /** Styles of single words, by word number across the slide */
   words?: { [wordIndex: number]: React.CSSProperties };
   lines?: { [lineIndex: number]: React.CSSProperties };
+  verticalAlign?: TextPosition;
 }
 
 interface LiveDesignWorkspaceProps {
   outputs: OutputSettings[];
   selectedOutputId: string;
   onSelectOutput: (id: string) => void;
+  /** Switch Design mode to designing how scripture looks */
+  onDesignFor?: (v: DesignFor) => void;
   templates: PresentationTemplate[];
   templateInfo: OutputTemplateInfo;
   onAssignTemplate: (templateId: string) => void;
@@ -85,15 +86,6 @@ interface LiveDesignWorkspaceProps {
 /** The lyrics box, or a custom text box id */
 type Target = 'lyrics' | string;
 
-// Sensible timing when a box switches to a motion, so it doesn't inherit timing meant for another motion
-const MOTION_DEFAULTS: Partial<Record<AnimationType, Partial<AnimationConfig>>> = {
-  'word-stack': { duration: 0.35, stagger: 0.35 },
-  flicker: { duration: 0.9, stagger: 0.08, effectLoop: false },
-  bounce: { duration: 0.8, stagger: 0.12, effectLoop: false },
-  'vertical-scroll': { duration: 14, scrollStartPos: 150, scrollEndPos: -50, scrollLoop: true },
-};
-const GENERIC_MOTION_DEFAULTS: Partial<AnimationConfig> = { duration: 0.6, stagger: 0.06 };
-
 const NEW_BOX_LAYOUT: Rect = { x: 0.15, y: 0.4, width: 0.7, height: 0.2 };
 const NEW_BOX_STYLE: React.CSSProperties = {
   fontFamily: 'Inter, sans-serif', fontSize: '80px', fontWeight: '700', color: '#ffffff', textAlign: 'center', textTransform: 'none',
@@ -120,13 +112,15 @@ const sourceLabel = (info: OutputTemplateInfo) => {
     case 'song-output':
     case 'song': return 'set on this song';
     case 'output-default': return "this screen's default";
+    case 'screen-scripture': return "this screen's scripture template";
+    case 'screen-declaration': return "this screen's Declarations template";
     default: return 'plain text';
   }
 };
 
 
 export function LiveDesignWorkspace({
-  outputs, selectedOutputId, onSelectOutput, templates, templateInfo, onAssignTemplate,
+  outputs, selectedOutputId, onSelectOutput, onDesignFor, templates, templateInfo, onAssignTemplate,
   look, design, onChangeDesign, onCopyDesign, onResetDesign, onSendTextBoxesToAllScreens, canSplit, onSplitSlide, onInsertSlide, onDeleteSlide, onMoveSlides,
   onSetSlideGroup, onUseLookForGroup,
   textHidden, status, slideIsOnAir, followingLive,
@@ -554,6 +548,7 @@ export function LiveDesignWorkspace({
             </button>
           ))}
         </div>
+        {onDesignFor && <DesignForSwitch value="lyrics" onChange={onDesignFor} />}
 
         <div className="flex items-center gap-2 min-w-0">
           <span className="text-[10px] uppercase font-bold tracking-wider text-neutral-500">Template</span>
@@ -670,10 +665,7 @@ export function LiveDesignWorkspace({
           {/* Row 1: text */}
           <div className="flex flex-wrap items-center gap-2">
             <GroupLabel fixed>{wordActive ? 'Word' : 'Text'}</GroupLabel>
-            <select value={String(g.fontFamily || '')} onChange={(e) => setGlobal({ fontFamily: e.target.value })} className={`${selectCls} w-36`} title="Font">
-              {!FONT_OPTIONS.some(f => f.value === g.fontFamily) && <option value={String(g.fontFamily || '')}>{String(g.fontFamily || 'Default font')}</option>}
-              {FONT_OPTIONS.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
-            </select>
+            <FontSelect value={String(g.fontFamily || '')} onChange={(v) => setGlobal({ fontFamily: v })} />
             <SizeStepper value={parseNum(g.fontSize, 110)} onChange={(v) => setGlobal({ fontSize: `${v}px` })} />
             <select value={String(g.fontWeight || '700')} onChange={(e) => setGlobal({ fontWeight: e.target.value })} className={selectCls} title="Weight">
               {WEIGHTS.map(w => <option key={w} value={w}>Weight {w}</option>)}
@@ -707,6 +699,11 @@ export function LiveDesignWorkspace({
               <option value="" disabled>Presets…</option>
               {LAYOUT_PRESETS.map((p, i) => <option key={p.label} value={i}>{p.label}</option>)}
             </select>
+            <Divider />
+            <TextPositionSwitch
+              value={selectedBox ? selectedBox.verticalAlign : (draft?.verticalAlign ?? design?.verticalAlign ?? look.verticalAlign)}
+              onChange={(v) => editTarget(target, 'commit', d => ({ ...d, verticalAlign: v }), b => ({ ...b, verticalAlign: v }))}
+            />
           </div>
 
           {/* Row 3: motion */}
@@ -744,9 +741,17 @@ export function LiveDesignWorkspace({
                   {anim.type === 'bounce' ? 'Keep bouncing' : 'Keep flickering'}
                 </button>
               </>
+            ) : anim?.type === 'scroll-in' || anim?.type === 'ticker' || anim?.type === 'karaoke' ? (
+              <MotionOptions anim={anim} onChange={(patch, phase) => setAnim(patch, phase)} />
             ) : anim ? (
               <MiniSlider label="Duration" min={0.1} max={10} step={0.05} value={anim.duration || 0.6} format={(v) => `${v.toFixed(2)}s`} onChange={(v, phase) => setAnim({ duration: v }, phase)} />
             ) : null}
+            {anim && anim.type !== 'ticker' && (
+              <>
+                <Divider />
+                <ExitSelect anim={anim} onChange={(patch, phase) => setAnim(patch, phase)} />
+              </>
+            )}
           </div>
         </div>
       </fieldset>
@@ -1095,28 +1100,5 @@ function AddFirstSlideButton({ onClick }: { onClick: () => void }) {
       <span className="w-4 h-4 rounded-full bg-pink-600 text-white flex items-center justify-center"><Plus size={10} strokeWidth={3} /></span>
       Add a slide
     </button>
-  );
-}
-
-function StatusBadges({ status }: { status: DesignStatus }) {
-  const badges: { text: string; cls: string; title: string }[] = [];
-  if (!status.presenting) badges.push({ text: 'Screens off', cls: 'bg-neutral-700/60 text-neutral-300', title: 'Not presenting, so the screens are blank. Press Present (B) to show them.' });
-  if (status.locked) badges.push({ text: 'Locked', cls: 'bg-red-500/15 text-red-400', title: 'This screen is frozen on its current slide' });
-  if (status.textCleared) badges.push({ text: 'Text cleared', cls: 'bg-amber-500/15 text-amber-400', title: 'Text is cleared on this screen, so it is not showing right now' });
-  return (
-    <div className="flex items-center gap-1">
-      {badges.map(b => (
-        <span key={b.text} title={b.title} className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider whitespace-nowrap ${b.cls}`}>{b.text}</span>
-      ))}
-    </div>
-  );
-}
-
-function Notice({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="mx-3 mt-2 px-3 py-1.5 rounded-lg border text-xs flex items-center gap-2 shrink-0 bg-blue-500/10 border-blue-500/20 text-blue-200">
-      <Info size={13} className="shrink-0" />
-      <span>{children}</span>
-    </div>
   );
 }

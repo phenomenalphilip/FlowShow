@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Plus, Trash, Pencil, Check, X, Sparkles, MonitorPlay, Tv } from 'lucide-react';
 import { BUILT_IN_STYLE_IDS, PresentationStyle, ScreenKind, styleKind } from '../App';
 import { PresentationTemplate } from '../lib/templates';
-import { STAGE_LAYOUTS, STAGE_SAMPLES, StageLayout, stageLayoutFor } from '../lib/stageLayouts';
+import { STAGE_LAYOUTS, STAGE_SAMPLES, StageLayout, stageLayoutFor, STAGE_SLOT_FIELD, STAGE_SLOT_LABEL, stageSlotSlide } from '../lib/stageLayouts';
 import { InlineTemplateGrid } from './TemplateGalleryModal';
 import { FixedStage } from './FixedStage';
 import { StageScreen } from './StageScreen';
@@ -28,7 +28,7 @@ export function StylesManager({ styles, stageLayouts, templates, onAdd, onUpdate
   const [selectedId, setSelectedId] = useState<string>(styles[0]?.id || '');
   const [editingName, setEditingName] = useState(false);
   const [nameInput, setNameInput] = useState('');
-  const [pickingTemplateFor, setPickingTemplateFor] = useState<'lyrics' | 'scripture' | null>(null);
+  const [pickingTemplateFor, setPickingTemplateFor] = useState<'lyrics' | 'scripture' | 'declaration' | null>(null);
   const [templateCategory, setTemplateCategory] = useState('all');
   // "+" asks which kind of style to make
   const [choosingKind, setChoosingKind] = useState(false);
@@ -65,7 +65,7 @@ export function StylesManager({ styles, stageLayouts, templates, onAdd, onUpdate
             <X size={16} />
           </button>
           <span className="text-sm font-bold text-white">
-            Select {pickingTemplateFor === 'lyrics' ? 'Lyrics' : 'Scripture'} Template for "{selected?.name}"
+            Select {pickingTemplateFor === 'lyrics' ? 'Lyrics' : pickingTemplateFor === 'declaration' ? 'Declarations' : 'Scripture'} Template for "{selected?.name}"
           </span>
         </div>
         <div className="flex-1 min-h-0">
@@ -76,8 +76,8 @@ export function StylesManager({ styles, stageLayouts, templates, onAdd, onUpdate
             onLoadTemplates={() => onReloadTemplates?.()}
             onEdit={() => {}}
             onApplyToSong={(t) => {
-              update(pickingTemplateFor === 'lyrics'
-                ? { lyricsTemplateId: t.id }
+              update(pickingTemplateFor === 'lyrics' ? { lyricsTemplateId: t.id }
+                : pickingTemplateFor === 'declaration' ? { declarationTemplateId: t.id }
                 : { scriptureTemplateId: t.id });
               setPickingTemplateFor(null);
             }}
@@ -200,18 +200,18 @@ export function StylesManager({ styles, stageLayouts, templates, onAdd, onUpdate
             <>
               {/* Stage layouts, one for lyrics and one for scripture, with a preview of each */}
               <Section title="Stage layouts">
-                {(['lyrics', 'scripture'] as const).map(type => {
-                  const layout = stageLayoutFor(selected, { type }, stageLayouts);
-                  const field = type === 'lyrics' ? 'lyricsStageLayoutId' : 'scriptureStageLayoutId';
+                {(['lyrics', 'declaration', 'scripture'] as const).map(type => {
+                  const layout = stageLayoutFor(selected, stageSlotSlide(type), stageLayouts);
+                  const field = STAGE_SLOT_FIELD[type];
                   return (
                     <div key={type} className="px-4 py-3 flex items-start gap-4">
                       <div className="w-40 shrink-0 space-y-1.5">
-                        <span className="block text-xs text-neutral-400">{type === 'lyrics' ? 'Lyrics / Songs' : 'Scripture'}</span>
+                        <span className="block text-xs text-neutral-400">{STAGE_SLOT_LABEL[type].title}</span>
                         <select
                           value={layout.id}
                           onChange={e => update({ [field]: e.target.value })}
                           className="w-full bg-[#1e1e28] border border-white/10 rounded px-2 py-1 text-xs text-white outline-none cursor-pointer"
-                          title={`Stage layout for ${type === 'lyrics' ? 'song' : 'scripture'} slides`}
+                          title={`Stage layout for ${STAGE_SLOT_LABEL[type].noun} slides`}
                         >
                           <optgroup label="Ready-made">
                             {STAGE_LAYOUTS.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
@@ -320,7 +320,7 @@ export function StylesManager({ styles, stageLayouts, templates, onAdd, onUpdate
                   <div className="flex items-center gap-2">
                     <span className="text-xs text-neutral-300 truncate max-w-[120px]">{templateName(selected.lyricsTemplateId)}</span>
                     <button
-                      onClick={() => setPickingTemplateFor('lyrics')}
+                      onClick={() => { setTemplateCategory('all'); setPickingTemplateFor('lyrics'); }}
                       className="p-1 rounded bg-blue-600/20 hover:bg-blue-600/40 text-blue-400 hover:text-white transition-all"
                       title="Pick lyrics template"
                     >
@@ -333,11 +333,38 @@ export function StylesManager({ styles, stageLayouts, templates, onAdd, onUpdate
                     )}
                   </div>
                 </Row>
+                <Row label="Declarations">
+                  <div className="flex items-center gap-2">
+                    <span
+                      className="text-xs text-neutral-300 truncate max-w-[120px]"
+                      title={selected.declarationTemplateId ? 'The slides of Declaration shows use this template' : 'Declarations use the lyrics template until you pick one'}
+                    >
+                      {selected.declarationTemplateId ? templateName(selected.declarationTemplateId) : 'Same as lyrics'}
+                    </span>
+                    <button
+                      onClick={() => { setTemplateCategory('all'); setPickingTemplateFor('declaration'); }}
+                      className="p-1 rounded bg-blue-600/20 hover:bg-blue-600/40 text-blue-400 hover:text-white transition-all"
+                      title="Pick declarations template"
+                    >
+                      <Sparkles size={12} />
+                    </button>
+                    {selected.declarationTemplateId && (
+                      <button onClick={() => update({ declarationTemplateId: undefined })} className="p-1 hover:text-red-400 text-neutral-500 transition-colors">
+                        <X size={12} />
+                      </button>
+                    )}
+                  </div>
+                </Row>
                 <Row label="Scripture">
                   <div className="flex items-center gap-2">
-                    <span className="text-xs text-neutral-300 truncate max-w-[120px]">{templateName(selected.scriptureTemplateId)}</span>
+                    <span
+                      className="text-xs text-neutral-300 truncate max-w-[120px]"
+                      title={selected.scriptureTemplateId ? 'Every screen on this style shows scripture in this template' : "Each screen uses its own scripture template (set in Design mode → For scripture)"}
+                    >
+                      {selected.scriptureTemplateId ? templateName(selected.scriptureTemplateId) : "Each screen's own"}
+                    </span>
                     <button
-                      onClick={() => setPickingTemplateFor('scripture')}
+                      onClick={() => { setTemplateCategory('scripture'); setPickingTemplateFor('scripture'); }}
                       className="p-1 rounded bg-blue-600/20 hover:bg-blue-600/40 text-blue-400 hover:text-white transition-all"
                       title="Pick scripture template"
                     >

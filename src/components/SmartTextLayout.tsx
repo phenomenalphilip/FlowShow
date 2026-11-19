@@ -1,7 +1,12 @@
 import React, { useMemo, useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { tokenize, Token } from '../lib/TokenEngine';
-import { AnimationConfig, getScrollPositions } from '../lib/templates';
+import { AnimationConfig, TextPosition, getScrollPositions } from '../lib/templates';
+
+/** The canvas every screen is drawn on (FixedStage) */
+const CANVAS_W = 1920;
+const CANVAS_H = 1080;
+const DEFAULT_LAYOUT = { x: 0.05, y: 0.05, width: 0.9, height: 0.9 };
 
 /** A fixed "random" number in [0, 1) for each n, so effects look scattered but repeat the same way */
 const pseudoRandom = (n: number) => {
@@ -22,6 +27,10 @@ interface SmartTextLayoutProps {
     layout?: { x: number; y: number; width: number; height: number };
     sourceGlobal?: React.CSSProperties & { '--font-scale'?: number };
     sourceLayout?: { x: number; y: number; width: number; height: number };
+    /** Where the text sits in its box when it doesn't fill it (default: middle) */
+    verticalAlign?: TextPosition;
+    /** The same for the scripture reference's own box */
+    sourceVerticalAlign?: TextPosition;
   };
   animation?: AnimationConfig;
   onWordClick?: (wordIndex: number, e: React.MouseEvent) => void;
@@ -70,7 +79,10 @@ export function SmartTextLayout({
      });
   }, [text, lines, styleOverrides]);
 
-  const perWordEffect = animation?.type === 'flicker' || animation?.type === 'bounce';
+  const isKaraoke = animation?.type === 'karaoke';
+  const perWordEffect = animation?.type === 'flicker' || animation?.type === 'bounce' || isKaraoke;
+  const isScrollIn = animation?.type === 'scroll-in';
+  const isTicker = animation?.type === 'ticker';
   const totalWords = useMemo(
     () => renderedLines.reduce((n, line) => n + line.filter(t => (t.wordIndex ?? -1) >= 0).length, 0),
     [renderedLines]
@@ -106,9 +118,19 @@ export function SmartTextLayout({
   
   const containerRef = useRef<HTMLDivElement>(null);
   const textContainerRef = useRef<HTMLDivElement>(null);
+  // The words now shown. With an exit animation the next slide's words mount only after the old ones have left,
+  // so fitting and scrolling are measured again when this changes.
+  const [blockEl, setBlockEl] = useState<HTMLElement | null>(null);
   const [scale, setScale] = useState(1);
   // Value-based key: style objects are rebuilt every render, so compare by content to refit on live edits
   const fitStyleKey = JSON.stringify([styleOverrides?.global, styleOverrides?.lines, styleOverrides?.layout]);
+  // Ticker: the width of its line (canvas px), measured once it is drawn
+  const [tickerWidth, setTickerWidth] = useState<number | null>(null);
+  useEffect(() => {
+    if (animation?.type !== 'ticker' || !blockEl) return;
+    const w = blockEl.scrollWidth;
+    if (w && w !== tickerWidth) setTickerWidth(w);
+  }, [animation?.type, blockEl, text, fitStyleKey]);
   // Vertical-scroll geometry in unscaled canvas px: where the text centre sits at y=0, and the screen height
   const [scrollGeom, setScrollGeom] = useState<{ naturalCenter: number; screenH: number } | null>(null);
   const posToPx = (pos: number) => scrollGeom ? (pos / 100) * scrollGeom.screenH - scrollGeom.naturalCenter : null;
@@ -139,14 +161,14 @@ export function SmartTextLayout({
     };
 
     requestAnimationFrame(compute);
-  }, [animation?.type, text, lines, styleOverrides?.layout]);
+  }, [animation?.type, text, lines, styleOverrides?.layout, blockEl]);
 
   // Smart FitText behavior
   useEffect(() => {
     if (!containerRef.current || !textContainerRef.current) return;
 
-    // For vertical-scroll: allow text to remain large and flow without height compression
-    if (animation?.type === 'vertical-scroll') {
+    // For vertical-scroll and the ticker: allow text to remain large and flow without height compression
+    if (animation?.type === 'vertical-scroll' || animation?.type === 'ticker') {
       setScale(1);
       return;
     }
@@ -174,22 +196,26 @@ export function SmartTextLayout({
        
        setScale(newScale);
     });
-  }, [text, source, type, fitStyleKey, animation?.type]);
+  }, [text, source, type, fitStyleKey, animation?.type, blockEl]);
 
   const align = (styleOverrides?.global?.textAlign as string) || 'center';
-  
+  // Top / middle / bottom of the box (scrolling text always runs through the middle)
+  const vAlign: TextPosition = animation?.type === 'vertical-scroll' ? 'middle' : (styleOverrides?.verticalAlign || 'middle');
+  const vOrigin = vAlign === 'top' ? 'top' : vAlign === 'bottom' ? 'bottom' : 'center';
+  const justifyClass = vAlign === 'top' ? 'justify-start' : vAlign === 'bottom' ? 'justify-end' : 'justify-center';
+
   let alignItems = 'center';
-  let origin = 'center center';
-  
+  let origin = `${vOrigin} center`;
+
   if (align === 'left') {
      alignItems = 'flex-start';
-     origin = 'center left';
+     origin = `${vOrigin} left`;
   } else if (align === 'right') {
      alignItems = 'flex-end';
-     origin = 'center right';
+     origin = `${vOrigin} right`;
   } else if (align === 'justify') {
      alignItems = 'stretch';
-     origin = 'center center';
+     origin = `${vOrigin} center`;
   }
 
   const useAbsolute = !disableAbsoluteLayout;
@@ -210,8 +236,8 @@ export function SmartTextLayout({
 
   // Animation variants generator for each line
   const getLineMotion = (lineIdx: number) => {
-    // Scrolling moves the whole block; Flicker and Bounce animate each word or letter instead of lines
-    if (isScroll || perWordEffect) {
+    // Scrolling and Scroll In move the whole block; Flicker, Bounce and Karaoke animate each word or letter instead of lines
+    if (isScroll || isScrollIn || perWordEffect) {
       return {
         initial: { opacity: 1 },
         animate: { opacity: 1 },
@@ -399,10 +425,26 @@ export function SmartTextLayout({
     );
   };
 
-  // ─── Flicker / Bounce: each word animates on its own (each letter, when the slide is a single word) ───
-  const letterMode = perWordEffect && totalWords === 1;
-  const effectGap = animation?.stagger ?? (animation?.type === 'bounce' ? 0.12 : 0.08);
+  // ─── Flicker / Bounce / Karaoke: each word animates on its own (Flicker and Bounce: each letter, when the slide is a single word) ───
+  const letterMode = perWordEffect && !isKaraoke && totalWords === 1;
+  const effectGap = animation?.stagger ?? (animation?.type === 'bounce' ? 0.12 : isKaraoke ? 0.5 : 0.08);
   const effectDuration = animation?.duration || (animation?.type === 'bounce' ? 0.8 : 0.9);
+
+  // Karaoke: a coloured copy of the word is uncovered from left to right, one word after another at the chosen pace
+  const renderKaraokeWord = (token: Token, unit: number) => (
+    <span key={`k-${token.id}`} style={{ position: 'relative', display: 'inline-block' }}>
+      {renderToken(token, token.id)}
+      <motion.span
+        aria-hidden
+        style={{ ...token.computedStyles, position: 'absolute', left: 0, top: 0, whiteSpace: 'pre', pointerEvents: 'none', color: animation?.karaokeColor || '#38bdf8' }}
+        initial={{ clipPath: 'inset(0 100% 0 0)' }}
+        animate={{ clipPath: 'inset(0 0% 0 0)' }}
+        transition={{ delay: 0.3 + unit * effectGap, duration: Math.max(0.12, effectGap * 0.9), ease: 'linear' }}
+      >
+        {token.value}
+      </motion.span>
+    </span>
+  );
 
   const renderEffectUnit = (unit: number, count: number, key: string, child: React.ReactNode) => {
     // Flicker lights words in a scattered (but repeatable) order; Bounce goes in reading order
@@ -457,6 +499,11 @@ export function SmartTextLayout({
     let lastWord = 0;
     return lineTokens.map(token => {
       if (token.type === 'whitespace') return renderToken(token, token.id);
+      if (isKaraoke) {
+        // Punctuation fills along with the word before it
+        if ((token.wordIndex ?? -1) >= 0) lastWord = token.wordIndex as number;
+        return renderKaraokeWord(token, lastWord);
+      }
       if (letterMode) {
         if (token.type === 'word') {
           const letters = Array.from(token.value).map(ch => {
@@ -481,95 +528,185 @@ export function SmartTextLayout({
   const popDuration = animation?.duration ?? 0.35;
   const popOrigin = align === 'right' ? 'right center' : align === 'center' ? 'center center' : 'left center';
 
+  // ─── Exit: how the words leave when the next slide comes in ───
+  // A hidden window doesn't run animations, so there the next slide replaces the old one at once instead of waiting
+  const pageHidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
+  const exitType = pageHidden ? undefined : animation?.exit?.type;
+  const exitMotion = !exitType || exitType === 'none' ? undefined : {
+    ...(exitType === 'fade' ? { opacity: 0 }
+      : exitType === 'slide-up' ? { opacity: 0, y: -80 }
+      : exitType === 'slide-down' ? { opacity: 0, y: 80 }
+      : exitType === 'slide-left' ? { opacity: 0, x: -160 }
+      : exitType === 'slide-right' ? { opacity: 0, x: 160 }
+      : exitType === 'blur' ? { opacity: 0, filter: 'blur(16px)' }
+      : { opacity: 0, scale: 0.85 }),
+    transition: { duration: animation?.exit?.duration ?? 0.35, ease: 'easeIn' as const },
+  };
+
+  const box = styleOverrides?.layout ?? DEFAULT_LAYOUT;
+  const baseTextStyle: React.CSSProperties = {
+    textAlign: align as any,
+    fontSize: styleOverrides?.global?.fontSize || (type === 'scripture' ? '90px' : '110px'),
+    lineHeight: 1.3,
+    letterSpacing: type === 'scripture' ? 'normal' : '0.02em',
+    textShadow: '0 8px 16px rgba(0,0,0,0.8), 0 2px 4px rgba(0,0,0,0.5)',
+    ...styleOverrides?.global
+  };
+  const containerExtra = className.replace(/relative/g, '').replace(/w-full/g, '').replace(/h-full/g, '');
+
+  // ─── Ticker: one line travelling across its box, for announcements ───
+  if (isTicker) {
+    const boxW = box.width * CANVAS_W;
+    const boxH = box.height * CANVAS_H;
+    const setSize = parseFloat(String(styleOverrides?.global?.fontSize ?? ''));
+    // The template's size, kept inside the box's height (80px when the template doesn't set one)
+    const fontPx = Math.min(Number.isFinite(setSize) ? setSize : 80, boxH * 0.85);
+    const speed = Math.max(20, animation?.tickerSpeed || 260);
+    const leftward = (animation?.tickerDirection || 'left') === 'left';
+    const textW = tickerWidth ?? 0;
+    const from = leftward ? boxW : -textW;
+    const to = leftward ? -textW : boxW;
+    return (
+      <div
+        ref={containerRef}
+        className={`${posClass} flex flex-col justify-center overflow-hidden ${containerExtra}`}
+        style={{ ...layoutStyle, alignItems: 'flex-start' }}
+      >
+        <motion.div
+          key={`${text}|${leftward ? 'l' : 'r'}|${speed}|${tickerWidth ?? 'measuring'}`}
+          ref={setBlockEl}
+          className="font-display font-bold text-white uppercase whitespace-nowrap select-none inline-block"
+          style={{ ...baseTextStyle, textAlign: 'left', fontSize: `${fontPx}px`, opacity: tickerWidth === null ? 0 : 1 }}
+          initial={{ x: from }}
+          animate={{ x: to }}
+          transition={{ duration: (textW + boxW) / speed, ease: 'linear', repeat: animation?.scrollLoop === false ? 0 : Infinity, repeatType: 'loop' }}
+        >
+          {renderedLines.map((lineTokens, lineIdx) => (
+            <React.Fragment key={`t-${lineIdx}`}>
+              {lineIdx > 0 && <span style={{ padding: '0 0.8em', opacity: 0.6 }}>•</span>}
+              {lineTokens.map((token: Token) => renderToken(token, token.id))}
+            </React.Fragment>
+          ))}
+          {source && !shouldRenderSeparateSource && <span style={{ paddingLeft: '0.8em', opacity: 0.75 }}>· {source}</span>}
+        </motion.div>
+      </div>
+    );
+  }
+
+  const block = (
+    <motion.div
+      key={isScroll ? (parkedPx !== null ? `${text}|parked` : `${text}|${Math.round(yStart)}|${Math.round(yEnd)}`) : (text || 'empty-slide')}
+      ref={setBlockEl}
+      {...scrollAnimationProps}
+      exit={isScrollIn ? undefined : exitMotion}
+      className={`font-display font-bold text-white uppercase ${align === 'justify' ? 'w-full block' : 'inline-block'} select-none`}
+      style={baseTextStyle}
+    >
+      {isWordStack ? stackWords.map((w, i) => (
+        // Earlier words stay; later words wait their turn (they keep their space so nothing shifts)
+        <motion.div
+          key={w.id}
+          initial={{ opacity: 0, scale: 0.35, y: 18 }}
+          animate={{ opacity: 1, scale: 1, y: 0 }}
+          transition={{ duration: popDuration, delay: 0.08 + i * wordGap, ease: [0.34, 1.56, 0.64, 1] }}
+          className="block"
+          style={{ transformOrigin: popOrigin }}
+        >
+          {w.tokens.map((token, ti) => renderToken(token, `${w.id}-${ti}`))}
+        </motion.div>
+      )) : renderedLines.map((lineTokens, lineIdx) => {
+         const lineStyle = styleOverrides?.lines?.[lineIdx] || {};
+         const isLineSelected = selectedLineIndices?.includes(lineIdx);
+         const isLineClickable = !!onLineClick || !!onLineMouseDown;
+         const motionProps = getLineMotion(lineIdx);
+
+         return (
+           <motion.div
+             key={`line-${lineIdx}`}
+             initial={motionProps.initial}
+             animate={motionProps.animate}
+             transition={motionProps.transition}
+             className={`min-h-[1em] ${isLineClickable ? 'cursor-pointer rounded' : ''} ${isLineSelected ? 'outline outline-2 outline-amber-400/70 outline-offset-2 bg-amber-400/10' : ''}`}
+             style={lineStyle}
+             onMouseDown={(e) => {
+               if (isLineClickable && onLineMouseDown) {
+                 e.stopPropagation();
+                 onLineMouseDown(lineIdx, e);
+               }
+             }}
+             onClick={(e) => {
+               if (isLineClickable && onLineClick) {
+                 e.stopPropagation();
+                 onLineClick(lineIdx, e);
+               }
+             }}
+           >
+            {perWordEffect
+              ? renderEffectLine(lineTokens, letterCursor)
+              : lineTokens.map((token: Token) => renderToken(token, token.id))}
+           </motion.div>
+         );
+      })}
+    </motion.div>
+  );
+
+  const scaledText = (
+    <div
+      ref={textContainerRef}
+      className={`transition-transform duration-300 ease-out ${align === 'justify' ? 'w-full' : 'inline-block'} text-${align}`}
+      style={{
+        transform: `scale(${scale})`,
+        transformOrigin: origin
+      }}
+    >
+      {/* "wait": the old words leave (their exit animation) before the next slide's words come in */}
+      <AnimatePresence mode="wait">{block}</AnimatePresence>
+
+      {!shouldRenderSeparateSource && source && (
+        <motion.h2
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.5, delay: 0.2 }}
+          className="mt-6 text-2xl font-heading font-bold text-amber-400 text-center tracking-wide"
+          style={{
+             textShadow: '0 4px 8px rgba(0,0,0,0.8)',
+             ...styleOverrides?.global
+          }}
+        >
+           {source}
+        </motion.h2>
+      )}
+    </div>
+  );
+
+  // Scroll In: the box's words start just off the chosen edge of the screen and glide into place
+  const fromEdge = animation?.fromEdge || 'bottom';
+  const scrollInFrom = fromEdge === 'top' ? { x: 0, y: -(box.y + box.height) * CANVAS_H - 60 }
+    : fromEdge === 'bottom' ? { x: 0, y: (1 - box.y) * CANVAS_H + 60 }
+    : fromEdge === 'left' ? { x: -(box.x + box.width) * CANVAS_W - 60, y: 0 }
+    : { x: (1 - box.x) * CANVAS_W + 60, y: 0 };
+
   const mainContent = (
     <div
       ref={containerRef}
-      className={`${posClass} flex flex-col justify-center ${isScroll ? 'overflow-visible' : 'overflow-hidden'} ${className.replace(/relative/g, '').replace(/w-full/g, '').replace(/h-full/g, '')}`}
+      className={`${posClass} flex flex-col ${justifyClass} ${isScroll || isScrollIn ? 'overflow-visible' : 'overflow-hidden'} ${containerExtra}`}
       style={layoutStyle}
     >
-      <div 
-        ref={textContainerRef}
-        className={`transition-transform duration-300 ease-out ${align === 'justify' ? 'w-full' : 'inline-block'} text-${align}`}
-        style={{ 
-          transform: `scale(${scale})`,
-          transformOrigin: origin
-        }}
-      >
-        <motion.div 
-          key={isScroll ? (parkedPx !== null ? `${text}|parked` : `${text}|${Math.round(yStart)}|${Math.round(yEnd)}`) : (text || 'empty-slide')}
-          {...scrollAnimationProps}
-          className={`font-display font-bold text-white uppercase ${align === 'justify' ? 'w-full block' : 'inline-block'} select-none`}
-          style={{
-            textAlign: align as any,
-            fontSize: styleOverrides?.global?.fontSize || (type === 'scripture' ? '90px' : '110px'),
-            lineHeight: 1.3,
-            letterSpacing: type === 'scripture' ? 'normal' : '0.02em',
-            textShadow: '0 8px 16px rgba(0,0,0,0.8), 0 2px 4px rgba(0,0,0,0.5)',
-            ...styleOverrides?.global
-          }}
-        >
-          {isWordStack ? stackWords.map((w, i) => (
-            // Earlier words stay; later words wait their turn (they keep their space so nothing shifts)
-            <motion.div
-              key={w.id}
-              initial={{ opacity: 0, scale: 0.35, y: 18 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              transition={{ duration: popDuration, delay: 0.08 + i * wordGap, ease: [0.34, 1.56, 0.64, 1] }}
-              className="block"
-              style={{ transformOrigin: popOrigin }}
-            >
-              {w.tokens.map((token, ti) => renderToken(token, `${w.id}-${ti}`))}
-            </motion.div>
-          )) : renderedLines.map((lineTokens, lineIdx) => {
-             const lineStyle = styleOverrides?.lines?.[lineIdx] || {};
-             const isLineSelected = selectedLineIndices?.includes(lineIdx);
-             const isLineClickable = !!onLineClick || !!onLineMouseDown;
-             const motionProps = getLineMotion(lineIdx);
-
-             return (
-               <motion.div 
-                 key={`line-${lineIdx}`} 
-                 initial={motionProps.initial}
-                 animate={motionProps.animate}
-                 transition={motionProps.transition}
-                 className={`min-h-[1em] ${isLineClickable ? 'cursor-pointer rounded' : ''} ${isLineSelected ? 'outline outline-2 outline-amber-400/70 outline-offset-2 bg-amber-400/10' : ''}`}
-                 style={lineStyle}
-                 onMouseDown={(e) => {
-                   if (isLineClickable && onLineMouseDown) {
-                     e.stopPropagation();
-                     onLineMouseDown(lineIdx, e);
-                   }
-                 }}
-                 onClick={(e) => {
-                   if (isLineClickable && onLineClick) {
-                     e.stopPropagation();
-                     onLineClick(lineIdx, e);
-                   }
-                 }}
-               >
-                {perWordEffect
-                  ? renderEffectLine(lineTokens, letterCursor)
-                  : lineTokens.map((token: Token) => renderToken(token, token.id))}
-               </motion.div>
-             );
-          })}
-        </motion.div>
-
-        {!shouldRenderSeparateSource && source && (
-          <motion.h2 
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.5, delay: 0.2 }}
-            className="mt-6 text-2xl font-heading font-bold text-amber-400 text-center tracking-wide"
-            style={{
-               textShadow: '0 4px 8px rgba(0,0,0,0.8)',
-               ...styleOverrides?.global
-            }}
+      {isScrollIn ? (
+        <AnimatePresence mode="wait">
+          <motion.div
+            key={`in|${text}|${fromEdge}`}
+            initial={scrollInFrom}
+            animate={{ x: 0, y: 0 }}
+            exit={exitMotion}
+            transition={{ duration: animation?.duration || 0.9, ease: [0.16, 1, 0.3, 1] }}
+            className={align === 'justify' ? 'w-full' : ''}
+            style={{ display: 'flex', flexDirection: 'column', alignItems }}
           >
-             {source}
-          </motion.h2>
-        )}
-      </div>
+            {scaledText}
+          </motion.div>
+        </AnimatePresence>
+      ) : scaledText}
     </div>
   );
 
@@ -578,14 +715,15 @@ export function SmartTextLayout({
   return (
     <>
       {mainContent}
-      <SmartTextLayout 
-          text={source} 
-          type="lyrics" 
+      <SmartTextLayout
+          text={source}
+          type="lyrics"
           animation={animation}
-          styleOverrides={{ 
-            global: styleOverrides.sourceGlobal || { color: '#fbbf24', fontWeight: 'bold' }, 
-            layout: styleOverrides.sourceLayout 
-          }} 
+          styleOverrides={{
+            global: styleOverrides.sourceGlobal || { color: '#fbbf24', fontWeight: 'bold' },
+            layout: styleOverrides.sourceLayout,
+            verticalAlign: styleOverrides.sourceVerticalAlign
+          }}
           disableAbsoluteLayout={false}
           className={className}
       />

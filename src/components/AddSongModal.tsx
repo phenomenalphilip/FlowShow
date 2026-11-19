@@ -1,15 +1,21 @@
 import React, { useState } from 'react';
 import { X, Search, Activity } from 'lucide-react';
 import { SlideDefinition } from '../App';
+import { lyricsToSections } from '../lib/slideGroups';
+
+/** A show is a Song (the default) or a Declaration */
+export type ShowCategory = 'Songs' | 'Declarations';
 
 type AddSongModalProps = {
   isOpen: boolean;
   onClose: () => void;
-  onAddSong: (song: { id: string, title: string, slides: SlideDefinition[] }) => void;
+  onAddSong: (song: { id: string, title: string, slides: SlideDefinition[], category: ShowCategory }) => void;
 };
 
 export function AddSongModal({ isOpen, onClose, onAddSong }: AddSongModalProps) {
   const [title, setTitle] = useState('');
+  const [category, setCategory] = useState<ShowCategory>('Songs');
+  const isSong = category === 'Songs';
   const [method, setMethod] = useState<'quick' | 'web'>('quick');
   const [lyrics, setLyrics] = useState('');
   const [linesPerSlide, setLinesPerSlide] = useState(2);
@@ -38,44 +44,20 @@ export function AddSongModal({ isOpen, onClose, onAddSong }: AddSongModalProps) 
     }
   };
 
-  const processLyricsToSlides = (text: string) => {
-    // Normalize newlines to \n, remove carriage returns
-    const normalizedText = text.replace(/\r\n/g, '\n');
-    
-    // Split lyrics by empty lines to find stanzas
-    const stanzas = normalizedText.split(/\n\s*\n/).map(s => s.trim()).filter(s => s.length > 0);
-    
-    const slides: SlideDefinition[] = [];
-    let globalSlideIndex = 0;
-    
-    for (const stanza of stanzas) {
-      // Split stanza into lines
-      const rawLines = stanza.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-      
-      // Keep headers like [Chorus] out of the final slides if they are the only thing
-      // Better yet, just filter out lines that start with [ and end with ]
-      const lines = rawLines.filter(l => !(l.startsWith('[') && l.endsWith(']')));
-      
-      if (lines.length === 0) continue;
-      
-      for (let i = 0; i < lines.length; i += linesPerSlide) {
-        const chunk = lines.slice(i, i + linesPerSlide);
-        slides.push({
-          id: `slide-${Date.now()}-${globalSlideIndex++}`,
-          text: chunk.join('\n'),
-          type: 'lyrics'
-        });
-      }
-    }
-    
-    return slides;
-  };
+  // Stanzas become slides with groups (labels like [Chorus] are read, repeats found, CCLI lines left out)
+  const processLyricsToSlides = (text: string): SlideDefinition[] =>
+    lyricsToSections(text, linesPerSlide).map((s, i) => ({
+      id: `slide-${Date.now()}-${i}`,
+      text: s.text,
+      type: 'lyrics' as const,
+      ...(category === 'Songs' && s.group ? { group: s.group } : {}),
+    }));
 
   const handleSubmit = () => {
     if (!title.trim()) return;
     let textToProcess = '';
     
-    if (method === 'quick') {
+    if (method === 'quick' || !isSong) {
       textToProcess = lyrics;
     } else {
       if (!selectedResult || !selectedResult.plainLyrics) {
@@ -88,7 +70,8 @@ export function AddSongModal({ isOpen, onClose, onAddSong }: AddSongModalProps) 
     const newSong = {
       id: `song-${Date.now()}`,
       title: title.trim(),
-      slides: processLyricsToSlides(textToProcess)
+      slides: processLyricsToSlides(textToProcess),
+      category,
     };
     
     onAddSong(newSong);
@@ -97,6 +80,7 @@ export function AddSongModal({ isOpen, onClose, onAddSong }: AddSongModalProps) 
 
   const handleClose = () => {
     setTitle('');
+    setCategory('Songs');
     setLyrics('');
     setMethod('quick');
     setLinesPerSlide(2);
@@ -111,7 +95,7 @@ export function AddSongModal({ isOpen, onClose, onAddSong }: AddSongModalProps) 
       <div className="bg-[#09090B] border border-white/10 rounded-2xl shadow-2xl w-full max-w-lg flex flex-col overflow-hidden max-h-full">
         {/* Header */}
         <div className="flex items-center justify-between p-5 border-b border-white/5 bg-[#09090B]">
-          <h2 className="text-lg font-bold text-white tracking-tight">Add New Song</h2>
+          <h2 className="text-lg font-bold text-white tracking-tight">New Show</h2>
           <button onClick={handleClose} className="p-1.5 rounded-lg text-neutral-400 hover:text-white hover:bg-white/5 transition-colors">
             <X size={20} />
           </button>
@@ -119,20 +103,38 @@ export function AddSongModal({ isOpen, onClose, onAddSong }: AddSongModalProps) 
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
+          {/* Category: every show is a Song or a Declaration */}
+          <div>
+            <label className="block text-[10px] font-bold text-neutral-500 uppercase tracking-widest pl-1 mb-2">Category</label>
+            <div className="flex bg-[#030303] rounded-lg p-1.5 border border-white/5 shadow-inner" data-show-category>
+              {([['Songs', 'Song'], ['Declarations', 'Declaration']] as const).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => setCategory(value)}
+                  className={`flex-1 text-sm font-semibold py-2 rounded-md transition-all ${category === value ? 'bg-white/10 text-white shadow-sm' : 'text-neutral-500 hover:text-neutral-300 hover:bg-white/5'}`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <p className="text-[11px] text-neutral-500 mt-1.5 pl-1">{isSong ? 'Song slides use the lyrics template of the screens’ styles.' : 'Declaration slides use the Declarations template of the screens’ styles.'}</p>
+          </div>
+
           {/* Title */}
           <div>
-            <label className="block text-[10px] font-bold text-neutral-500 uppercase tracking-widest pl-1 mb-2">Song Title</label>
+            <label className="block text-[10px] font-bold text-neutral-500 uppercase tracking-widest pl-1 mb-2">{isSong ? 'Song Title' : 'Declaration Title'}</label>
             <input 
               type="text" 
               value={title}
               onChange={(e) => setTitle(e.target.value)}
-              placeholder="e.g. Amazing Grace"
+              placeholder={isSong ? 'e.g. Amazing Grace' : 'e.g. Our Confession of Faith'}
               className="w-full bg-white/5 border border-white/10 rounded-lg text-sm px-4 py-3 text-white focus:outline-none focus:border-blue-500 transition-all font-medium"
             />
           </div>
 
-          {/* Methods */}
-          <div>
+          {/* Methods (the lyrics web search is for songs) */}
+          {isSong && <div>
             <label className="block text-[10px] font-bold text-neutral-500 uppercase tracking-widest pl-1 mb-2">Input Method</label>
             <div className="flex bg-[#030303] rounded-lg p-1.5 border border-white/5 shadow-inner">
               <button 
@@ -148,7 +150,7 @@ export function AddSongModal({ isOpen, onClose, onAddSong }: AddSongModalProps) 
                 Web Search
               </button>
             </div>
-          </div>
+          </div>}
 
           {/* Lines per slide */}
           <div className="flex items-center space-x-4 bg-[#030303] rounded-xl p-4 border border-white/5">
@@ -169,13 +171,13 @@ export function AddSongModal({ isOpen, onClose, onAddSong }: AddSongModalProps) 
           </div>
 
           {/* Dynamic Content area */}
-          {method === 'quick' ? (
+          {method === 'quick' || !isSong ? (
             <div className="flex flex-col flex-1">
-              <label className="block text-[10px] font-bold text-neutral-500 uppercase tracking-widest pl-1 mb-2">Lyrics</label>
+              <label className="block text-[10px] font-bold text-neutral-500 uppercase tracking-widest pl-1 mb-2">{isSong ? 'Lyrics' : 'Words'}</label>
               <textarea 
                 value={lyrics}
                 onChange={(e) => setLyrics(e.target.value)}
-                placeholder="Paste lyrics here..."
+                placeholder={isSong ? 'Paste lyrics here...' : 'Type or paste the declaration. A blank line starts a new slide.'}
                 className="w-full h-48 bg-white/5 border border-white/10 rounded-lg text-sm px-4 py-3 text-white focus:outline-none focus:border-blue-500 transition-all resize-none leading-relaxed"
               />
             </div>
@@ -227,12 +229,12 @@ export function AddSongModal({ isOpen, onClose, onAddSong }: AddSongModalProps) 
             onClick={handleSubmit}
             disabled={
               !title.trim() || 
-              (method === 'quick' && !lyrics.trim()) || 
-              (method === 'web' && (!selectedResult || !selectedResult.plainLyrics))
+              ((method === 'quick' || !isSong) && !lyrics.trim()) || 
+              (isSong && method === 'web' && (!selectedResult || !selectedResult.plainLyrics))
             }
             className="px-8 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-sm font-bold transition-all shadow-lg shadow-blue-500/20 disabled:opacity-50 disabled:shadow-none disabled:cursor-not-allowed"
           >
-            Add Song
+            {isSong ? 'Add Song' : 'Add Declaration'}
           </button>
         </div>
       </div>

@@ -1,3 +1,4 @@
+import type { TextPosition } from './templates';
 import type React from 'react';
 import type { SlideDefinition } from '../App';
 
@@ -32,6 +33,8 @@ export interface StageItem {
   style?: React.CSSProperties;
   /** 'text': what it says. 'next-slide': the label above it */
   text?: string;
+  /** Where the words sit in the box when they don't fill it (default: middle) */
+  verticalAlign?: TextPosition;
 }
 
 export interface StageLayout {
@@ -75,6 +78,7 @@ export const STAGE_ITEM_KINDS: Record<StageItemKind, { label: string; hint: stri
 
 export const DEFAULT_LYRICS_STAGE_LAYOUT = 'stage-lyrics';
 export const DEFAULT_SCRIPTURE_STAGE_LAYOUT = 'stage-scripture';
+export const DEFAULT_DECLARATION_STAGE_LAYOUT = 'stage-declaration';
 
 const CLOCK: StageItem = {
   id: 'clock', kind: 'clock', rect: { x: 0.67, y: 0.03, width: 0.3, height: 0.07 },
@@ -92,6 +96,17 @@ export const STAGE_LAYOUTS: StageLayout[] = [
       CLOCK,
       { id: 'current', kind: 'current-slide', rect: { x: 0.03, y: 0.12, width: 0.94, height: 0.58 }, style: { fontSize: '120px', color: '#ffffff', textAlign: 'center' } },
       { id: 'next', kind: 'next-slide', text: 'Next', rect: { x: 0.03, y: 0.73, width: 0.94, height: 0.24 }, style: { fontSize: '64px', color: '#fde68a', textAlign: 'center' } },
+    ],
+  },
+  {
+    id: DEFAULT_DECLARATION_STAGE_LAYOUT,
+    name: 'Declaration: now and next',
+    description: 'The title and time on top, the current words of the declaration large, the next words below.',
+    items: [
+      { id: 'title', kind: 'song-title', rect: { x: 0.03, y: 0.03, width: 0.6, height: 0.07 }, style: { fontSize: '46px', fontWeight: 800, color: '#a5b4fc', textTransform: 'uppercase', letterSpacing: '0.08em' } },
+      CLOCK,
+      { id: 'current', kind: 'current-slide', rect: { x: 0.03, y: 0.12, width: 0.94, height: 0.6 }, style: { fontSize: '110px', fontWeight: 700, color: '#ffffff', textAlign: 'center' } },
+      { id: 'next', kind: 'next-slide', text: 'Next', rect: { x: 0.03, y: 0.75, width: 0.94, height: 0.22 }, style: { fontSize: '60px', color: '#c4b5fd', textAlign: 'center' } },
     ],
   },
   {
@@ -126,17 +141,39 @@ export const getStageLayout = (id: string | undefined, custom: StageLayout[] = [
 
 /** The layout a stage style uses for this slide; the ready-made ones when the style has none (or it was deleted) */
 export const stageLayoutFor = (
-  style: { lyricsStageLayoutId?: string; scriptureStageLayoutId?: string } | undefined,
-  slide: { type?: string } | null | undefined,
+  style: { lyricsStageLayoutId?: string; scriptureStageLayoutId?: string; declarationStageLayoutId?: string } | undefined,
+  slide: { type?: string; declaration?: boolean } | null | undefined,
   custom: StageLayout[] = [],
 ): StageLayout => {
   const scripture = slide?.type === 'scripture';
+  // Declarations have a layout of their own (never the lyrics one), so the two can be designed apart
+  if (slide?.declaration && !scripture) {
+    return getStageLayout(style?.declarationStageLayoutId, custom) || getStageLayout(DEFAULT_DECLARATION_STAGE_LAYOUT)!;
+  }
   return getStageLayout(scripture ? style?.scriptureStageLayoutId : style?.lyricsStageLayoutId, custom)
     || getStageLayout(scripture ? DEFAULT_SCRIPTURE_STAGE_LAYOUT : DEFAULT_LYRICS_STAGE_LAYOUT)!;
 };
 
+/** The three kinds of slides a stage style has a layout for */
+export type StageSlot = 'lyrics' | 'declaration' | 'scripture';
+export const STAGE_SLOT_FIELD: Record<StageSlot, 'lyricsStageLayoutId' | 'declarationStageLayoutId' | 'scriptureStageLayoutId'> = {
+  lyrics: 'lyricsStageLayoutId', declaration: 'declarationStageLayoutId', scripture: 'scriptureStageLayoutId',
+};
+/** A slide of this kind, for choosing its layout */
+export const stageSlotSlide = (slot: StageSlot) => slot === 'scripture' ? { type: 'scripture' } : { type: 'lyrics', declaration: slot === 'declaration' };
+export const STAGE_SLOT_LABEL: Record<StageSlot, { title: string; noun: string }> = {
+  lyrics: { title: 'Lyrics / Songs', noun: 'song' },
+  declaration: { title: 'Declarations', noun: 'declaration' },
+  scripture: { title: 'Scripture', noun: 'scripture' },
+};
+
 /** Sample slides for previews and for designing when nothing of that kind is live */
-export const STAGE_SAMPLES: Record<'lyrics' | 'scripture', { slide: SlideDefinition; next: SlideDefinition; songTitle?: string }> = {
+export const STAGE_SAMPLES: Record<'lyrics' | 'declaration' | 'scripture', { slide: SlideDefinition; next: SlideDefinition; songTitle?: string }> = {
+  declaration: {
+    slide: { id: 'sample-5', type: 'lyrics', declaration: true, text: 'I am the righteousness of God\nIn Christ Jesus' },
+    next: { id: 'sample-6', type: 'lyrics', declaration: true, text: 'No weapon formed against me\nShall prosper' },
+    songTitle: 'Our Confession',
+  },
   lyrics: {
     slide: { id: 'sample-1', type: 'lyrics', group: 'Verse 1', text: 'Amazing grace, how sweet the sound\nThat saved a wretch like me' },
     next: { id: 'sample-2', type: 'lyrics', group: 'Chorus', text: 'My chains are gone\nI\'ve been set free' },

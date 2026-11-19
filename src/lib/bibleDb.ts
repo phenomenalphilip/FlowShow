@@ -24,53 +24,39 @@ export type BibleVersion = {
 // Fallback in-memory storage for iframes/sandboxes that block IndexedDB
 const memoryBibles: Record<string, BibleVersion> = {};
 
-export async function initDatabase() {
+/** The KJV that ships with the app (public/kjv-formatted.json), or null if it can't be read in full. */
+async function loadBundledKjv(): Promise<BibleVersion | null> {
   try {
-    const existingKjv = await get('bible_kjv') as BibleVersion | undefined;
-    if (!existingKjv || existingKjv.books?.length < 66) {
-      // First time loading the KJV
-      const response = await fetch('/kjv-formatted.json');
-      if (response.ok) {
-        const kjvBibleRaw = await response.json();
-        const kjvBible = {
-          ...kjvBibleRaw,
-          books: kjvBibleRaw.books.map((b: any) => ({
-            ...b,
-            chapters: b.chapters.map((c: any) => ({
-              ...c,
-              verses: c.verses.map((v: any) => ({
-                ...v,
-                lines: v.text ? [v.text] : (v.lines || [])
-              }))
-            }))
-          }))
-        };
-        await saveBible(kjvBible);
-      }
-    }
+    const response = await fetch('/kjv-formatted.json');
+    if (!response.ok) return null;
+    const raw = await response.json();
+    if (!Array.isArray(raw?.books) || raw.books.length < 66) return null;
+    return {
+      ...raw,
+      books: raw.books.map((b: any) => ({
+        ...b,
+        chapters: b.chapters.map((c: any) => ({
+          ...c,
+          verses: c.verses.map((v: any) => ({ ...v, lines: v.text ? [v.text] : (v.lines || []) })),
+        })),
+      })),
+    };
   } catch (e) {
-    // IDB blocked, use memory
-    if (!memoryBibles['bible_kjv']) {
-      const response = await fetch('/kjv-formatted.json');
-      if (response.ok) {
-        const kjvBibleRaw = await response.json();
-        const kjvBible = {
-          ...kjvBibleRaw,
-          books: kjvBibleRaw.books.map((b: any) => ({
-            ...b,
-            chapters: b.chapters.map((c: any) => ({
-              ...c,
-              verses: c.verses.map((v: any) => ({
-                ...v,
-                lines: v.text ? [v.text] : (v.lines || [])
-              }))
-            }))
-          }))
-        };
-        memoryBibles['bible_kjv'] = kjvBible;
-      }
-    }
+    console.warn('The bundled KJV (public/kjv-formatted.json) could not be read', e);
+    return null;
   }
+}
+
+/** Adds the bundled KJV the first time (and not again once someone deletes it). Never throws. */
+export async function initDatabase() {
+  let deleted = false;
+  try { deleted = localStorage.getItem('deleted_bible_kjv') === 'true'; } catch {}
+  if (deleted) return;
+  let existing: BibleVersion | undefined;
+  try { existing = await get('bible_kjv'); } catch { existing = memoryBibles['bible_kjv']; }
+  if (existing && (existing.books?.length ?? 0) >= 66) return;
+  const kjv = await loadBundledKjv();
+  if (kjv) await saveBible(kjv);
 }
 
 export async function saveBible(bible: BibleVersion) {
@@ -128,12 +114,15 @@ export async function getAllBibleIds(): Promise<string[]> {
   }
 }
 
+const hasVerses = (b: BibleVersion) => !!b.books?.some(book => book.chapters?.some(c => c.verses?.length));
+
+/** The Bibles that hold verses (an import that found none, as older versions could save, is left out). */
 export async function getBibleList(): Promise<{id: string, name: string}[]> {
   const ids = await getAllBibleIds();
   const list = [];
   for (const id of ids) {
     const b = await getBible(id);
-    if (b) {
+    if (b && hasVerses(b)) {
       list.push({ id: b.id, name: b.name });
     }
   }

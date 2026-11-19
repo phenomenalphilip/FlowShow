@@ -3,13 +3,13 @@ import { AlignCenter, AlignLeft, AlignRight, Check, Copy, Eye, EyeOff, Pencil, P
 import type { OutputSettings, PresentationStyle, SlideDefinition } from '../App';
 import {
   STAGE_ITEM_KINDS, STAGE_LAYOUTS, STAGE_SAMPLES, StageItem, StageItemKind, StageLayout, StageRect,
-  allStageLayouts, isReadyMadeStageLayout, stageLayoutFor,
+  allStageLayouts, isReadyMadeStageLayout, stageLayoutFor, StageSlot, STAGE_SLOT_FIELD, STAGE_SLOT_LABEL, stageSlotSlide,
 } from '../lib/stageLayouts';
 import { FixedStage } from './FixedStage';
 import { StageScreen } from './StageScreen';
 import { DesignBox, InlineTextEditor } from './DesignCanvas';
 import { FONT_OPTIONS } from './TemplateEditor';
-import { Phase, WEIGHTS, selectCls, segBtn, smallBtn, GroupLabel, Divider, SizeStepper, ColorField } from './DesignControls';
+import { Phase, WEIGHTS, selectCls, segBtn, smallBtn, GroupLabel, Divider, SizeStepper, ColorField, FontSelect, TextPositionSwitch } from './DesignControls';
 
 /** What a stage output shows right now */
 export interface StageLiveData {
@@ -36,7 +36,7 @@ interface StageWorkspaceProps {
   onAddStageOutput: () => void;
 }
 
-type Slot = 'lyrics' | 'scripture';
+type Slot = StageSlot;
 type Snapshot = { layouts: StageLayout[]; style?: PresentationStyle };
 
 const UNDO_MERGE_MS = 500;
@@ -62,7 +62,7 @@ export function StageWorkspace({
   const firstLive = output ? getLive(output).slide : null;
 
   // Which of the style's two layouts is being designed
-  const [slot, setSlot] = useState<Slot>(firstLive?.type === 'scripture' ? 'scripture' : 'lyrics');
+  const [slot, setSlot] = useState<Slot>(firstLive?.type === 'scripture' ? 'scripture' : firstLive?.declaration ? 'declaration' : 'lyrics');
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   // An unfinished change (mid-drag, colour being picked): canvas only, never on the stage screens
   const [draft, setDraft] = useState<StageLayout | null>(null);
@@ -73,8 +73,8 @@ export function StageWorkspace({
   const addMenuRef = useRef<HTMLDivElement>(null);
   const history = useRef<{ past: Snapshot[]; future: Snapshot[]; lastAt: number }>({ past: [], future: [], lastAt: 0 });
 
-  const slotField = slot === 'lyrics' ? 'lyricsStageLayoutId' : 'scriptureStageLayoutId';
-  const layout = stageLayoutFor(style, { type: slot }, customLayouts);
+  const slotField = STAGE_SLOT_FIELD[slot];
+  const layout = stageLayoutFor(style, stageSlotSlide(slot), customLayouts);
   const shown = draft ?? layout;
   const readyMade = isReadyMadeStageLayout(layout.id);
   const canEdit = !!style;
@@ -226,7 +226,8 @@ export function StageWorkspace({
 
   // The canvas shows the live slide when it fits this layout, otherwise sample words
   const live = getLive(output);
-  const liveFits = !!live.slide && !live.hideText && (live.slide.type === 'scripture') === (slot === 'scripture');
+  const liveSlot: Slot | null = live.slide ? (live.slide.type === 'scripture' ? 'scripture' : live.slide.declaration ? 'declaration' : 'lyrics') : null;
+  const liveFits = !!live.slide && !live.hideText && liveSlot === slot;
   const sample = STAGE_SAMPLES[slot];
   const data = liveFits
     ? { slide: live.slide, nextSlide: live.nextSlide, songTitle: live.songTitle }
@@ -288,11 +289,12 @@ export function StageWorkspace({
           {/* Row 1: which layout */}
           <div className="flex flex-wrap items-center gap-2">
             <GroupLabel fixed>Layout</GroupLabel>
-            <div className="flex rounded overflow-hidden" title="This style has one layout for song slides and one for scripture">
+            <div className="flex rounded overflow-hidden" title="This style has a layout for song slides, one for declarations and one for scripture">
               <button type="button" onClick={() => setSlot('lyrics')} className={segBtn(slot === 'lyrics')}>For lyrics</button>
+              <button type="button" onClick={() => setSlot('declaration')} className={segBtn(slot === 'declaration')}>For declarations</button>
               <button type="button" onClick={() => setSlot('scripture')} className={segBtn(slot === 'scripture')}>For scripture</button>
             </div>
-            <select value={layout.id} onChange={(e) => chooseLayout(e.target.value)} className={`${selectCls} max-w-[220px]`} title={`The layout this style uses for ${slot === 'lyrics' ? 'song' : 'scripture'} slides`}>
+            <select value={layout.id} onChange={(e) => chooseLayout(e.target.value)} className={`${selectCls} max-w-[220px]`} title={`The layout this style uses for ${STAGE_SLOT_LABEL[slot].noun} slides`}>
               <optgroup label="Ready-made">
                 {STAGE_LAYOUTS.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
               </optgroup>
@@ -362,10 +364,7 @@ export function StageWorkspace({
           {/* Row 3: how the selected item's text looks */}
           <fieldset disabled={!selectedItem} className={`min-w-0 border-0 p-0 m-0 flex flex-wrap items-center gap-2 ${selectedItem ? '' : 'opacity-40'}`}>
             <GroupLabel fixed>Text</GroupLabel>
-            <select value={String(g.fontFamily || 'Inter, sans-serif')} onChange={(e) => setItemStyle({ fontFamily: e.target.value })} className={`${selectCls} w-36`} title="Font">
-              {!FONT_OPTIONS.some(f => f.value === (g.fontFamily || 'Inter, sans-serif')) && <option value={String(g.fontFamily || 'Inter, sans-serif')}>{String(g.fontFamily || 'Inter')}</option>}
-              {FONT_OPTIONS.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
-            </select>
+            <FontSelect value={String(g.fontFamily || 'Inter, sans-serif')} onChange={(v) => setItemStyle({ fontFamily: v })} />
             <SizeStepper value={parseNum(g.fontSize, 60)} onChange={(v) => setItemStyle({ fontSize: `${v}px` })} />
             <select value={String(g.fontWeight || '700')} onChange={(e) => setItemStyle({ fontWeight: e.target.value })} className={selectCls} title="Weight">
               {WEIGHTS.map(w => <option key={w} value={w}>Weight {w}</option>)}
@@ -379,6 +378,9 @@ export function StageWorkspace({
               ))}
             </div>
             <button type="button" onClick={() => setItemStyle({ textTransform: g.textTransform === 'uppercase' ? 'none' : 'uppercase' })} className={`${segBtn(g.textTransform === 'uppercase')} rounded`} title="Capitals">AA</button>
+            {selectedItem && (selectedItem.kind === 'current-slide' || selectedItem.kind === 'next-slide') && (
+              <TextPositionSwitch value={selectedItem.verticalAlign} onChange={(v) => changeItem(selectedItem.id, i => ({ ...i, verticalAlign: v }))} />
+            )}
             {!selectedItem && <span className="text-[11px] text-neutral-500">Click an item on the screen to change it</span>}
           </fieldset>
         </div>
@@ -435,7 +437,7 @@ export function StageWorkspace({
       <div className="h-9 px-3 border-t border-[#262635] bg-[#0b0b10] flex items-center gap-2 shrink-0 text-[11px] text-neutral-500 whitespace-nowrap overflow-hidden">
         <span className="text-white font-semibold">{layout.name}</span>
         <span className="truncate">
-          · {liveFits ? `live: what ${output.name} shows now` : `sample ${slot === 'lyrics' ? 'song' : 'scripture'} words (no ${slot === 'lyrics' ? 'song' : 'scripture'} slide is showing)`}
+          · {liveFits ? `live: what ${output.name} shows now` : `sample ${STAGE_SLOT_LABEL[slot].noun} words (no ${STAGE_SLOT_LABEL[slot].noun} slide is showing)`}
           {style ? ` · changes reach every stage screen using "${style.name}" when you let go` : ''}
         </span>
         {notice && <span className="ml-auto text-emerald-400 flex items-center gap-1 shrink-0"><Check size={12} /> {notice}</span>}

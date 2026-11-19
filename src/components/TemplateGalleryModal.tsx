@@ -3,16 +3,18 @@ import {
   X, Sparkles, Check, Layers, Monitor, Pencil, Plus,
   ArrowRight, Radio, Tv, Music, Type, Copy, Trash
 } from 'lucide-react';
-import { 
-  STARTER_TEMPLATES, 
-  PresentationTemplate, 
-  getStoredTemplates, 
-  saveTemplate, 
-  deleteTemplate 
+import {
+  STARTER_TEMPLATES,
+  PresentationTemplate,
+  SCRIPTURE_SAMPLES,
+  getStoredTemplates,
+  saveTemplate,
+  deleteTemplate
 } from '../lib/templates';
 import { SmartTextLayout } from './SmartTextLayout';
 import { FixedStage } from './FixedStage';
 import { TemplateEditor } from './TemplateEditor';
+import { ExportTemplatesDialog, ImportTemplatesDialog } from './TemplatePackageDialogs';
 
 export interface TemplateGalleryModalProps {
   isOpen: boolean;
@@ -327,16 +329,7 @@ export function TemplateGalleryModal({
                           key={isHovered ? `hover-${previewKey}` : 'static'}
                           className="w-full h-full pointer-events-none"
                         >
-                          <SmartTextLayout
-                            text={"AMAZING GRACE HOW SWEET\nTHE SOUND THAT SAVED A WRETCH"}
-                            animation={template.animation}
-                            styleOverrides={{
-                              global: template.styles.global,
-                              lines: template.styles.lines,
-                              layout: template.styles.layout
-                            }}
-                            className="w-full h-full"
-                          />
+                          <TemplateSample template={template} lyrics={"AMAZING GRACE HOW SWEET\nTHE SOUND THAT SAVED A WRETCH"} />
                         </FixedStage>
 
                         {/* Active Slide Indicator */}
@@ -666,6 +659,7 @@ const INLINE_CATEGORIES = [
   { id: 'high-energy', label: 'High Energy' },
   { id: 'broadcast', label: 'Broadcast' },
   { id: 'scripture', label: 'Scripture' },
+  { id: 'declaration', label: 'Declarations' },
   { id: 'modern', label: 'Modern' },
   { id: 'custom', label: 'Custom' },
 ];
@@ -682,6 +676,7 @@ export function InlineTemplateGrid({
   const [previewKey, setPreviewKey] = useState(0);
   const [editingTemplate, setEditingTemplate] = useState<PresentationTemplate | null>(null);
   const [appliedId, setAppliedId] = useState<string | null>(null);
+  const [packageDialog, setPackageDialog] = useState<'import' | 'export' | null>(null);
 
   // Right-click context menu
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; template: PresentationTemplate } | null>(null);
@@ -800,7 +795,11 @@ export function InlineTemplateGrid({
           </button>
         ))}
         <div className="ml-auto shrink-0 text-[10px] text-neutral-600">{filtered.length} templates</div>
+        <button type="button" onClick={() => setPackageDialog('import')} className="shrink-0 px-2 py-0.5 rounded text-[11px] font-semibold text-neutral-300 hover:text-white hover:bg-white/5" title="Install a template package (.fstemplates)">Import</button>
+        <button type="button" onClick={() => setPackageDialog('export')} className="shrink-0 px-2 py-0.5 rounded text-[11px] font-semibold text-neutral-300 hover:text-white hover:bg-white/5" title="Save templates as a package other FlowShow users can install">Export</button>
       </div>
+      {packageDialog === 'export' && <ExportTemplatesDialog templates={templates} onClose={() => setPackageDialog(null)} />}
+      {packageDialog === 'import' && <ImportTemplatesDialog onClose={() => setPackageDialog(null)} onInstalled={() => onLoadTemplates()} />}
 
       {/* Grid */}
       <div className="flex-1 overflow-y-auto p-2 custom-scrollbar" onClick={() => setCtxMenu(null)}>
@@ -833,12 +832,7 @@ export function InlineTemplateGrid({
                     key={isHovered ? `h-${previewKey}-${t.id}` : `s-${t.id}`}
                     className="w-full h-full pointer-events-none"
                   >
-                    <SmartTextLayout
-                      text={"AMAZING GRACE\nHOW SWEET THE SOUND"}
-                      animation={t.animation}
-                      styleOverrides={{ global: t.styles.global, lines: t.styles.lines, layout: t.styles.layout }}
-                      className="w-full h-full"
-                    />
+                    <TemplateSample template={t} />
                   </FixedStage>
                   {/* Applied flash */}
                   {isApplied && (
@@ -932,4 +926,23 @@ export function InlineTemplateGrid({
       )}
     </div>
   );
+}
+
+/** A template's look on sample words: a verse with its reference for scripture templates, otherwise lyrics */
+function TemplateSample({ template, lyrics = "AMAZING GRACE\nHOW SWEET THE SOUND" }: { template: PresentationTemplate; lyrics?: string }) {
+  const { global, lines, layout, sourceGlobal, sourceLayout } = template.styles;
+  if (template.category === 'scripture') {
+    const verse = SCRIPTURE_SAMPLES.find(s => s.id === 'typical') || SCRIPTURE_SAMPLES[0];
+    return (
+      <SmartTextLayout
+        text={verse.text}
+        source={verse.source}
+        type="scripture"
+        animation={template.animation}
+        styleOverrides={{ global, lines, layout, sourceGlobal, sourceLayout }}
+        className="w-full h-full"
+      />
+    );
+  }
+  return <SmartTextLayout text={lyrics} animation={template.animation} styleOverrides={{ global, lines, layout }} className="w-full h-full" />;
 }
