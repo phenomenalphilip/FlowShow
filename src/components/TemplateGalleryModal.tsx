@@ -1,7 +1,7 @@
-import React, { useState, useEffect } from 'react';
-import { 
-  X, Sparkles, Check, Layers, Monitor, Pencil, Plus, 
-  ArrowRight, Radio, Tv, Music 
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  X, Sparkles, Check, Layers, Monitor, Pencil, Plus,
+  ArrowRight, Radio, Tv, Music, Type, Copy, Trash
 } from 'lucide-react';
 import { 
   STARTER_TEMPLATES, 
@@ -11,6 +11,7 @@ import {
   deleteTemplate 
 } from '../lib/templates';
 import { SmartTextLayout } from './SmartTextLayout';
+import { FixedStage } from './FixedStage';
 import { TemplateEditor } from './TemplateEditor';
 
 export interface TemplateGalleryModalProps {
@@ -322,25 +323,21 @@ export function TemplateGalleryModal({
                         }}
                         title={mode === 'select-for-slide' ? 'Click to apply to slide' : 'Click to edit in studio'}
                       >
-                        <div
+                        <FixedStage
                           key={isHovered ? `hover-${previewKey}` : 'static'}
-                          className="w-full h-full pointer-events-none flex items-center justify-center relative"
+                          className="w-full h-full pointer-events-none"
                         >
                           <SmartTextLayout
                             text={"AMAZING GRACE HOW SWEET\nTHE SOUND THAT SAVED A WRETCH"}
                             animation={template.animation}
                             styleOverrides={{
-                              global: {
-                                ...template.styles.global,
-                                fontSize: '14px',
-                                lineHeight: 1.25
-                              },
+                              global: template.styles.global,
                               lines: template.styles.lines,
                               layout: template.styles.layout
                             }}
                             className="w-full h-full"
                           />
-                        </div>
+                        </FixedStage>
 
                         {/* Active Slide Indicator */}
                         {isSelected && (
@@ -678,15 +675,92 @@ export function InlineTemplateGrid({
   category,
   onCategoryChange,
   onLoadTemplates,
-  onEdit,
   onApplyToSong,
   activeSongId,
 }: InlineTemplateGridProps) {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [previewKey, setPreviewKey] = useState(0);
   const [editingTemplate, setEditingTemplate] = useState<PresentationTemplate | null>(null);
+  const [appliedId, setAppliedId] = useState<string | null>(null);
+
+  // Right-click context menu
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; template: PresentationTemplate } | null>(null);
+  // Inline rename
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const renameInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => { onLoadTemplates(); }, []);
+
+  // Close context menu on outside click
+  useEffect(() => {
+    if (!ctxMenu) return;
+    const close = () => setCtxMenu(null);
+    window.addEventListener('click', close);
+    window.addEventListener('contextmenu', close);
+    return () => { window.removeEventListener('click', close); window.removeEventListener('contextmenu', close); };
+  }, [ctxMenu]);
+
+  // Focus rename input when it appears
+  useEffect(() => {
+    if (renamingId) setTimeout(() => renameInputRef.current?.select(), 30);
+  }, [renamingId]);
+
+  const reload = () => getStoredTemplates().then(list => { /* parent state updated via onLoadTemplates */ onLoadTemplates(); });
+
+  const handleApply = (t: PresentationTemplate) => {
+    if (!onApplyToSong || !activeSongId) return;
+    onApplyToSong(t, activeSongId);
+    setAppliedId(t.id);
+    setTimeout(() => setAppliedId(null), 1400);
+  };
+
+  const handleSave = async (updated: PresentationTemplate) => {
+    await saveTemplate(updated);
+    reload();
+    setEditingTemplate(null);
+  };
+
+  const handleSaveAsCopy = async (copy: PresentationTemplate) => {
+    await saveTemplate(copy);
+    reload();
+    setEditingTemplate(null);
+  };
+
+  const handleDelete = async (id: string) => {
+    await deleteTemplate(id);
+    reload();
+    setEditingTemplate(null);
+    setCtxMenu(null);
+  };
+
+  const handleRenameCommit = async (t: PresentationTemplate) => {
+    const name = renameValue.trim();
+    if (name && name !== t.name) {
+      await saveTemplate({ ...t, name });
+      reload();
+    }
+    setRenamingId(null);
+  };
+
+  const handleNewTemplate = () => {
+    const blank: PresentationTemplate = {
+      id: `custom-${Date.now()}`,
+      name: 'Custom Preset',
+      category: 'custom',
+      tagline: 'Custom Designed Preset',
+      description: 'Operator tailored custom motion and typography preset.',
+      badge: 'Custom',
+      isCustom: true,
+      styles: {
+        global: { fontFamily: 'Inter, sans-serif', fontWeight: '700', fontSize: '28px', color: '#ffffff', letterSpacing: '0.02em', textTransform: 'uppercase', textAlign: 'center', textShadow: '0 8px 24px rgba(0,0,0,0.9)' },
+        layout: { x: 0.08, y: 0.15, width: 0.84, height: 0.7 }
+      },
+      animation: { type: 'blur-in', duration: 0.7, stagger: 0.04, easing: 'easeOut', ambientLoop: 'none' },
+      backgroundPreview: 'linear-gradient(135deg, #09090b 0%, #1e1b4b 100%)'
+    };
+    setEditingTemplate(blank);
+  };
 
   const filtered = category === 'all'
     ? templates
@@ -699,11 +773,11 @@ export function InlineTemplateGrid({
       <div className="flex-1 min-h-0 bg-[#09090b] flex flex-col overflow-hidden">
         <TemplateEditor
           template={editingTemplate}
-          onSave={async (updated) => { onLoadTemplates(); setEditingTemplate(null); }}
-          onSaveAsCopy={async (copy) => { onLoadTemplates(); setEditingTemplate(null); }}
-          onDelete={async () => { onLoadTemplates(); setEditingTemplate(null); }}
+          onSave={handleSave}
+          onSaveAsCopy={handleSaveAsCopy}
+          onDelete={handleDelete}
           onApplyToSlide={() => {}}
-          onApplyToSong={(t) => { onApplyToSong?.(t, activeSongId); setEditingTemplate(null); }}
+          onApplyToSong={(t) => { handleApply(t); setEditingTemplate(null); }}
           onClose={() => setEditingTemplate(null)}
         />
       </div>
@@ -719,9 +793,7 @@ export function InlineTemplateGrid({
             key={cat.id}
             onClick={() => onCategoryChange(cat.id)}
             className={`px-2.5 py-0.5 rounded text-[11px] font-semibold whitespace-nowrap transition-all ${
-              category === cat.id
-                ? 'bg-pink-600 text-white'
-                : 'text-neutral-400 hover:text-white hover:bg-white/5'
+              category === cat.id ? 'bg-pink-600 text-white' : 'text-neutral-400 hover:text-white hover:bg-white/5'
             }`}
           >
             {cat.label}
@@ -731,50 +803,66 @@ export function InlineTemplateGrid({
       </div>
 
       {/* Grid */}
-      <div className="flex-1 overflow-y-auto p-2 custom-scrollbar">
+      <div className="flex-1 overflow-y-auto p-2 custom-scrollbar" onClick={() => setCtxMenu(null)}>
         <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))' }}>
           {filtered.map(t => {
             const isHovered = hoveredId === t.id;
+            const isApplied = appliedId === t.id;
+            const isRenaming = renamingId === t.id;
             return (
               <div
                 key={t.id}
-                className="group flex flex-col rounded-lg overflow-hidden border border-white/8 hover:border-pink-500/60 transition-all duration-150 cursor-pointer bg-[#121218]"
+                className={`group flex flex-col rounded-lg overflow-hidden border transition-all duration-150 cursor-pointer bg-[#121218] ${
+                  isApplied ? 'border-pink-500 shadow-[0_0_12px_rgba(236,72,153,0.4)]' : 'border-white/8 hover:border-pink-500/60'
+                }`}
                 onMouseEnter={() => { setHoveredId(t.id); setPreviewKey(k => k + 1); }}
                 onMouseLeave={() => setHoveredId(null)}
-                onClick={() => setEditingTemplate(t)}
+                onClick={() => handleApply(t)}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setCtxMenu({ x: e.clientX, y: e.clientY, template: t });
+                }}
               >
                 {/* 16:9 preview */}
                 <div
                   className="aspect-video w-full relative overflow-hidden"
                   style={{ background: t.backgroundPreview || '#09090b' }}
                 >
-                  <div
+                  <FixedStage
                     key={isHovered ? `h-${previewKey}-${t.id}` : `s-${t.id}`}
                     className="w-full h-full pointer-events-none"
                   >
                     <SmartTextLayout
                       text={"AMAZING GRACE\nHOW SWEET THE SOUND"}
                       animation={t.animation}
-                      styleOverrides={{
-                        global: { ...t.styles.global, fontSize: '10px', lineHeight: 1.2 },
-                        lines: t.styles.lines,
-                        layout: t.styles.layout,
-                      }}
+                      styleOverrides={{ global: t.styles.global, lines: t.styles.lines, layout: t.styles.layout }}
                       className="w-full h-full"
                     />
-                  </div>
+                  </FixedStage>
+                  {/* Applied flash */}
+                  {isApplied && (
+                    <div className="absolute inset-0 flex items-center justify-center bg-pink-600/30 backdrop-blur-[1px] pointer-events-none">
+                      <Check size={18} className="text-white drop-shadow-lg" />
+                    </div>
+                  )}
                 </div>
                 {/* Name bar */}
-                <div className="px-2 py-1 flex items-center justify-between gap-1 bg-[#0e0e14]">
-                  <span className="text-[10px] font-semibold text-neutral-300 truncate leading-tight">{t.name}</span>
-                  {onApplyToSong && activeSongId && (
-                    <button
-                      onClick={(e) => { e.stopPropagation(); onApplyToSong(t, activeSongId); }}
-                      className="shrink-0 opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded bg-pink-600/80 hover:bg-pink-500 text-white"
-                      title="Apply to current song"
-                    >
-                      <Check size={9} />
-                    </button>
+                <div className="px-2 py-1 flex items-center bg-[#0e0e14]" onClick={(e) => e.stopPropagation()}>
+                  {isRenaming ? (
+                    <input
+                      ref={renameInputRef}
+                      value={renameValue}
+                      onChange={e => setRenameValue(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter') handleRenameCommit(t);
+                        if (e.key === 'Escape') setRenamingId(null);
+                      }}
+                      onBlur={() => handleRenameCommit(t)}
+                      className="flex-1 bg-transparent border-b border-pink-500 text-[10px] text-white outline-none py-0.5"
+                    />
+                  ) : (
+                    <span className="text-[10px] font-semibold text-neutral-300 truncate flex-1 leading-tight">{t.name}</span>
                   )}
                 </div>
               </div>
@@ -784,13 +872,64 @@ export function InlineTemplateGrid({
           {/* New template button */}
           <div
             className="flex flex-col items-center justify-center aspect-video rounded-lg border border-dashed border-white/15 hover:border-pink-500/40 text-neutral-500 hover:text-pink-400 transition-all cursor-pointer bg-[#0e0e14] text-[10px] gap-1"
-            onClick={() => onEdit({} as PresentationTemplate)}
+            onClick={(e) => { e.stopPropagation(); handleNewTemplate(); }}
           >
             <Plus size={16} />
             <span>New</span>
           </div>
         </div>
       </div>
+
+      {/* Right-click context menu */}
+      {ctxMenu && (
+        <div
+          className="fixed z-[200] bg-[#1a1a24] border border-white/10 rounded-lg shadow-2xl py-1 w-44 text-xs"
+          style={{ top: ctxMenu.y, left: ctxMenu.x }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            className="w-full text-left px-3 py-2 hover:bg-white/5 text-neutral-200 hover:text-white flex items-center gap-2 transition-colors"
+            onClick={() => { handleApply(ctxMenu.template); setCtxMenu(null); }}
+          >
+            <Check size={12} className="text-pink-400" /> Apply to Song
+          </button>
+          <div className="h-px bg-white/5 my-1" />
+          <button
+            className="w-full text-left px-3 py-2 hover:bg-white/5 text-neutral-200 hover:text-white flex items-center gap-2 transition-colors"
+            onClick={() => { setEditingTemplate(ctxMenu.template); setCtxMenu(null); }}
+          >
+            <Pencil size={12} className="text-blue-400" /> Edit Template
+          </button>
+          <button
+            className="w-full text-left px-3 py-2 hover:bg-white/5 text-neutral-200 hover:text-white flex items-center gap-2 transition-colors"
+            onClick={() => { setRenameValue(ctxMenu.template.name); setRenamingId(ctxMenu.template.id); setCtxMenu(null); }}
+          >
+            <Type size={12} className="text-neutral-400" /> Rename
+          </button>
+          <button
+            className="w-full text-left px-3 py-2 hover:bg-white/5 text-neutral-200 hover:text-white flex items-center gap-2 transition-colors"
+            onClick={async () => {
+              const copy: PresentationTemplate = { ...ctxMenu.template, id: `custom-${Date.now()}`, name: `${ctxMenu.template.name} (Copy)`, badge: 'Custom', isCustom: true };
+              await saveTemplate(copy);
+              reload();
+              setCtxMenu(null);
+            }}
+          >
+            <Copy size={12} className="text-neutral-400" /> Save as Copy
+          </button>
+          {(ctxMenu.template.isCustom) && (
+            <>
+              <div className="h-px bg-white/5 my-1" />
+              <button
+                className="w-full text-left px-3 py-2 hover:bg-red-500/10 text-red-400 flex items-center gap-2 transition-colors"
+                onClick={() => handleDelete(ctxMenu.template.id)}
+              >
+                <Trash size={12} /> Delete
+              </button>
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 }

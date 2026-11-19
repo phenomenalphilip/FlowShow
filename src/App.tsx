@@ -7,7 +7,7 @@ import {
   Activity, Upload, ExternalLink, Edit2, Copy, Trash, GripVertical, Split,
   Pause, Volume2, VolumeX, Save, ChevronDown, ExternalLink as LaunchIcon, Clock, Lock, Unlock, PanelLeft, PanelLeftClose,
   Radio, Tv, Wifi, ListOrdered, Check, Sparkles, ChevronRight, ChevronLeft,
-  Folder, FolderPlus, RotateCcw, Eye, MoreHorizontal, MoreVertical, Calendar, Puzzle, Sliders, Info, Minus, Maximize2, Square
+  Folder, FolderPlus, RotateCcw, Eye, MoreHorizontal, MoreVertical, Calendar, Puzzle, Sliders, Info, Minus, Maximize2, Square, Wand2
 } from 'lucide-react';
 import { ndiService, NdiSource, NdiOutputChannel } from './lib/ndi';
 import { SetlistManager } from './components/SetlistManager';
@@ -23,13 +23,15 @@ function formatTime(seconds: number) {
 import { MediaLibrary } from './components/MediaLibrary';
 import { AudioModule } from './components/AudioModule';
 import { AddSongModal } from './components/AddSongModal';
-import { EditSongPage } from './components/EditSongPage';
 import { get, set } from 'idb-keyval';
 import { SmartTextLayout } from './components/SmartTextLayout';
 import { FixedStage } from './components/FixedStage';
 import { BibleVersion, getBibleList, getBible, saveBible, deleteBible, initDatabase } from './lib/bibleDb';
 import { parseBibleXml } from './lib/xmlParser';
-import { AnimationConfig, PresentationTemplate, STARTER_TEMPLATES, getStoredTemplates } from './lib/templates';
+import { AnimationConfig, PresentationTemplate, STARTER_TEMPLATES, getStoredTemplates, subscribeTemplates, getCachedTemplates, FALLBACK_ANIMATION } from './lib/templates';
+import { LiveDesignWorkspace, OutputTemplateInfo } from './components/LiveDesignWorkspace';
+import { detectGroups, groupColors } from './lib/slideGroups';
+import { GroupMenu } from './components/GroupMenu';
 import { TemplateGalleryModal, TemplateGalleryModalProps, InlineTemplateGrid } from './components/TemplateGalleryModal';
 
 export type SlideType = 'lyrics' | 'scripture' | 'blank' | 'media';
@@ -43,6 +45,10 @@ export type SlideDefinition = {
   disabled?: boolean;
   templateId?: string;
   outputTemplates?: { [outputId: string]: string };
+  /** This slide's own look per screen, made in Design mode; layered over the template without changing it */
+  designs?: { [outputId: string]: SlideDesign };
+  /** Song section this slide belongs to, e.g. "Verse 1", "Chorus", "Bridge" */
+  group?: string;
   animation?: AnimationConfig;
   styleOverrides?: {
     global?: React.CSSProperties & { '--font-scale'?: number };
@@ -56,11 +62,48 @@ export type SlideDefinition = {
 
 export type OutputType = 'hdmi' | 'ndi';
 
+// ─── Presentation Style ───────────────────────────────────────────────────────
+// A named, reusable style that an output can reference.
+// A style owns its background settings and two template slots (lyrics / scripture).
+// Outputs point to a style by id; the style's templates override per-song templates.
+export interface PresentationStyle {
+  id: string;
+  name: string;
+  backgroundColor: string;
+  backgroundMedia?: { url: string; type: 'image' | 'video'; fileName?: string } | null;
+  transition: 'none' | 'fade' | 'slide' | 'zoom';
+  mediaFit: 'contain' | 'cover' | 'fill' | 'none';
+  aspectRatio: '16:9' | '4:3' | '1:1';
+  activeLayers: { background: boolean; slide: boolean; overlays: boolean };
+  /** Template id used for lyrics/song slides */
+  lyricsTemplateId?: string;
+  /** Template id used for scripture slides */
+  scriptureTemplateId?: string;
+  /** Optional text-style overrides for lyrics */
+  lyricsStyleOverride?: { global?: React.CSSProperties & { '--font-scale'?: number }; layout?: { x: number; y: number; width: number; height: number } };
+  /** Optional text-style overrides for scripture */
+  scriptureStyleOverride?: { global?: React.CSSProperties & { '--font-scale'?: number }; layout?: { x: number; y: number; width: number; height: number }; sourceGlobal?: React.CSSProperties & { '--font-scale'?: number }; sourceLayout?: { x: number; y: number; width: number; height: number } };
+}
+
+export const DEFAULT_STYLES: PresentationStyle[] = [
+  {
+    id: 'default',
+    name: 'Default',
+    backgroundColor: '#000000',
+    transition: 'fade',
+    mediaFit: 'contain',
+    aspectRatio: '16:9',
+    activeLayers: { background: true, slide: true, overlays: true },
+  },
+];
+
 export interface OutputSettings {
   id: string;
   name: string;
   enabled: boolean;
   outputType: OutputType;
+  /** Id of the PresentationStyle this output uses */
+  styleId?: string;
   defaultTemplateId?: string;
   defaultBackground: { 
     url?: string; 
@@ -86,6 +129,7 @@ export interface OutputSettings {
 
 export interface GlobalSettings {
   outputs: OutputSettings[];
+  styles: PresentationStyle[];
 }
 
 const DEFAULT_SETTINGS: GlobalSettings = {
@@ -128,7 +172,8 @@ const DEFAULT_SETTINGS: GlobalSettings = {
         sourceLayout: { x: 0.1, y: 0.8, width: 0.8, height: 0.1 }
       }
     }
-  ]
+  ],
+  styles: DEFAULT_STYLES,
 };
 
 export type PresentState = {
@@ -149,27 +194,136 @@ export type PresentState = {
 
 const CHANNEL_NAME = 'flowshow_presence_channel';
 
+// Undo: changes closer together than this count as one step; keep this many steps
+const UNDO_MERGE_MS = 500;
+const UNDO_LIMIT = 100;
+
 import { getTemplateById } from './lib/templates';
 
-export const resolveSlideForOutput = (
-  slide: SlideDefinition | null, 
+type SongTemplateRefs = { id?: string; templateId?: string; outputTemplates?: { [outputId: string]: string } };
+export type TemplateSource = 'style' | 'slide-output' | 'slide' | 'song-output' | 'song' | 'output-default' | 'none';
+
+/**
+ * Which template an output uses for a slide, and where that choice came from.
+ * Priority: Style template -> Slide output override -> Slide general -> Song output override -> Song general -> Output default
+ */
+export const resolveTemplateSource = (
+  slide: Pick<SlideDefinition, 'type' | 'templateId' | 'outputTemplates'> | null | undefined,
   outputConfig?: OutputSettings,
-  song?: { id?: string; templateId?: string; outputTemplates?: { [outputId: string]: string } }
-): { styleOverrides: SlideDefinition['styleOverrides']; animation?: AnimationConfig } => {
+  song?: SongTemplateRefs,
+  presentationStyle?: PresentationStyle
+): { templateId?: string; source: TemplateSource } => {
+  const outputId = outputConfig?.id || 'main';
+  const styleTemplateId = presentationStyle
+    ? (slide?.type === 'scripture' ? presentationStyle.scriptureTemplateId : presentationStyle.lyricsTemplateId)
+    : undefined;
+
+  const chain: [string | undefined, TemplateSource][] = [
+    [styleTemplateId, 'style'],
+    [slide?.outputTemplates?.[outputId], 'slide-output'],
+    [slide?.templateId, 'slide'],
+    [song?.outputTemplates?.[outputId], 'song-output'],
+    [song?.templateId, 'song'],
+    [outputConfig?.defaultTemplateId, 'output-default'],
+  ];
+  const hit = chain.find(([id]) => !!id);
+  if (!hit || hit[0] === NO_TEMPLATE_ID) return { templateId: undefined, source: 'none' };
+  return { templateId: hit[0], source: hit[1] };
+};
+
+/** An extra text box added to a slide on one output in Design mode */
+export interface CustomTextBox {
+  id: string;
+  text: string;
+  layout: { x: number; y: number; width: number; height: number };
+  style?: React.CSSProperties;
+  animation?: Partial<AnimationConfig>;
+  /** Kept on the slide but not shown on the screen */
+  hidden?: boolean;
+  /** Newly added: not on the screen until its slide goes live */
+  waiting?: boolean;
+}
+
+/** Whether a custom text box appears on the screens (the Design canvas also shows hidden and waiting boxes) */
+export const isBoxOnScreen = (box: CustomTextBox) => !box.hidden && !box.waiting;
+
+export interface SlideDesign {
+  global?: React.CSSProperties;
+  layout?: { x: number; y: number; width: number; height: number };
+  animation?: Partial<AnimationConfig>;
+  /** Hide the slide's own lyrics on this output */
+  hideLyrics?: boolean;
+  customBoxes?: CustomTextBox[];
+  /** Styles for single words of the lyrics, by word number across the slide */
+  words?: { [wordIndex: number]: React.CSSProperties };
+}
+
+type ResolvedLook = { styleOverrides: SlideDefinition['styleOverrides']; animation?: AnimationConfig };
+type WordStyles = { [wordIndex: number]: React.CSSProperties };
+
+export const resolveCustomBoxAnimation = (box: CustomTextBox): AnimationConfig | undefined =>
+  box.animation ? { ...FALLBACK_ANIMATION, ...box.animation } as AnimationConfig : undefined;
+
+const mergeWordStyles = (base: WordStyles | undefined, extra: WordStyles | undefined): WordStyles | undefined => {
+  if (!extra) return base;
+  const merged: WordStyles = { ...(base || {}) };
+  for (const [key, style] of Object.entries(extra)) merged[Number(key)] = { ...(merged[Number(key)] || {}), ...style };
+  return merged;
+};
+
+const applySlideDesign = (base: ResolvedLook, design?: SlideDesign): ResolvedLook => {
+  if (!design) return base;
+  return {
+    styleOverrides: {
+      ...base.styleOverrides,
+      global: { ...(base.styleOverrides?.global || {}), ...(design.global || {}) },
+      layout: design.layout || base.styleOverrides?.layout,
+      words: mergeWordStyles(base.styleOverrides?.words, design.words),
+    },
+    animation: design.animation
+      ? { ...(base.animation || FALLBACK_ANIMATION), ...design.animation } as AnimationConfig
+      : base.animation,
+  };
+};
+
+/** The look of a slide on one output: its template, then the slide's own design for that output on top. */
+export const resolveSlideForOutput = (
+  slide: SlideDefinition | null,
+  outputConfig?: OutputSettings,
+  song?: SongTemplateRefs,
+  presentationStyle?: PresentationStyle
+): ResolvedLook => {
+  const base = resolveBaseLook(slide, outputConfig, song, presentationStyle);
+  return slide ? applySlideDesign(base, slide.designs?.[outputConfig?.id || 'main']) : base;
+};
+
+const resolveBaseLook = (
+  slide: SlideDefinition | null,
+  outputConfig?: OutputSettings,
+  song?: SongTemplateRefs,
+  presentationStyle?: PresentationStyle
+): ResolvedLook => {
   if (!slide) return { styleOverrides: undefined, animation: undefined };
 
-  const outputId = outputConfig?.id || 'main';
-
-  // 1. Resolve template ID in order of priority:
-  // Slide output override -> Slide general -> Song output override -> Song general -> Output default
-  const templateId = 
-    slide.outputTemplates?.[outputId] ||
-    slide.templateId ||
-    song?.outputTemplates?.[outputId] ||
-    song?.templateId ||
-    outputConfig?.defaultTemplateId;
-
+  const { templateId, source } = resolveTemplateSource(slide, outputConfig, song, presentationStyle);
+  const styleTemplateId = source === 'style' ? templateId : undefined;
   const template = templateId ? getTemplateById(templateId) : undefined;
+
+  // Display style template is authoritative: ignore song/slide look (which is baked into
+  // slide.styleOverrides/animation when a template is applied to a song). Word-level emphasis is kept.
+  if (styleTemplateId && template) {
+    return {
+      styleOverrides: {
+        global: { ...(template.styles.global || {}) },
+        lines: { ...(template.styles.lines || {}) },
+        words: slide.styleOverrides?.words,
+        layout: template.styles.layout,
+        sourceGlobal: { ...(template.styles.sourceGlobal || {}) },
+        sourceLayout: template.styles.sourceLayout
+      },
+      animation: template.animation
+    };
+  }
 
   let baseGlobal = template?.styles.global || {};
   let baseLayout = template?.styles.layout;
@@ -213,17 +367,96 @@ export const resolveSlideForOutput = (
   return { styleOverrides: mergedStyle, animation };
 };
 
-const applyGlobalStyles = (slide: SlideDefinition | null, outputConfig?: OutputSettings): SlideDefinition['styleOverrides'] => {
-  return resolveSlideForOutput(slide, outputConfig).styleOverrides;
+// Explicit "no template": stops the fallback to song/output default templates (a display style's template still wins).
+export const NO_TEMPLATE_ID = 'none';
+
+// Reference the template by id instead of copying its look, so later template edits show up.
+// Clears previously copied look; keeps word-level emphasis.
+const linkSlideToTemplate = (s: SlideDefinition, templateId: string): SlideDefinition => ({
+  ...s,
+  templateId,
+  animation: undefined,
+  styleOverrides: s.styleOverrides?.words ? { words: s.styleOverrides.words } : undefined
+});
+
+/** A design with nothing in it is dropped, so the slide shows its template */
+const hasDesignContent = (d: SlideDesign | undefined): d is SlideDesign => !!d && (
+  !!d.layout || !!d.hideLyrics || (d.customBoxes?.length ?? 0) > 0 ||
+  Object.keys(d.global || {}).length > 0 || Object.keys(d.animation || {}).length > 0 ||
+  Object.keys(d.words || {}).length > 0
+);
+
+/** A slide design without the parts a template sets (font, size, colours, position, motion); word styles and text boxes stay */
+const withoutOwnLook = (d: SlideDesign): SlideDesign => ({ ...d, global: undefined, layout: undefined, animation: undefined });
+
+/** The slide with its waiting text boxes put on the screens (the same slide object when none are waiting) */
+const releaseWaitingBoxes = (slide: SlideDefinition): SlideDefinition => {
+  const designs = slide.designs;
+  if (!designs || !Object.values(designs).some(d => d.customBoxes?.some(b => b.waiting))) return slide;
+  const released: { [outputId: string]: SlideDesign } = {};
+  for (const [outputId, d] of Object.entries(designs)) {
+    released[outputId] = d.customBoxes?.some(b => b.waiting)
+      ? { ...d, customBoxes: d.customBoxes.map(b => b.waiting ? { ...b, waiting: undefined } : b) }
+      : d;
+  }
+  return { ...slide, designs: released };
+};
+
+/** Look up the PresentationStyle assigned to an output, given the full settings. */
+export const getStyleForOutput = (outputConfig: OutputSettings | undefined, settings: GlobalSettings | undefined): PresentationStyle | undefined => {
+  if (!outputConfig?.styleId || !settings?.styles) return undefined;
+  return settings.styles.find(s => s.id === outputConfig.styleId);
+};
+
+type RawBackground = { url?: string; color?: string; type: 'image' | 'video' | 'color' | 'ndi' | 'none'; fileName?: string } | null | undefined;
+
+/**
+ * Resolve the effective background for a single output, applying the output's
+ * assigned Style rules on top of the raw (song/global/default) background.
+ *
+ * Priority (highest first):
+ *   1. Style activeLayers.background === false  → null (suppress entirely)
+ *   2. Style has backgroundMedia                → use style's own media
+ *   3. Otherwise                               → pass rawBackground through unchanged
+ */
+export const resolveOutputBackground = (
+  rawBackground: RawBackground,
+  outputConfig: OutputSettings | undefined,
+  settings: GlobalSettings | undefined
+): RawBackground => {
+  const style = getStyleForOutput(outputConfig, settings);
+  if (!style) return rawBackground;
+
+  // Style explicitly disables the background layer
+  if (!style.activeLayers.background) return null;
+
+  // Style supplies its own background media (overrides song/output background)
+  if (style.backgroundMedia) {
+    return { url: style.backgroundMedia.url, type: style.backgroundMedia.type, fileName: style.backgroundMedia.fileName };
+  }
+
+  return rawBackground;
+};
+
+const applyGlobalStyles = (
+  slide: SlideDefinition | null,
+  outputConfig?: OutputSettings,
+  settings?: GlobalSettings
+): SlideDefinition['styleOverrides'] => {
+  const presStyle = getStyleForOutput(outputConfig, settings);
+  return resolveSlideForOutput(slide, outputConfig, undefined, presStyle).styleOverrides;
 };
 
 // We import the new component for settings
 import { OutputStyleEditor, OutputStyleConfig } from './components/OutputStyleEditor';
+import { StylesManager } from './components/StylesManager';
 
 function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogglePresenting, onToggleLockOutput }: any) {
   const [activeTab, setActiveTab] = useState('outputs');
   const [activeOutputId, setActiveOutputId] = useState(settings.outputs[0]?.id || 'main');
   const [local, setLocal] = useState<GlobalSettings>(settings);
+  const [allTemplates, setAllTemplates] = useState<PresentationTemplate[]>(STARTER_TEMPLATES);
+  useEffect(() => { getStoredTemplates().then(setAllTemplates); }, []);
   const [editingStyleType, setEditingStyleType] = useState<'lyrics' | 'scripture' | null>(null);
   const [detectedScreens, setDetectedScreens] = useState<any[]>([]);
   const [selectingTemplateForOutput, setSelectingTemplateForOutput] = useState<OutputSettings | null>(null);
@@ -232,7 +465,22 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
   const [showNewOutputModal, setShowNewOutputModal] = useState(false);
   const [selectedNewOutputType, setSelectedNewOutputType] = useState<OutputType | null>(null);
 
-  useEffect(() => { setLocal(settings); }, [settings, isOpen]);
+  // While open, only pull in styles (saved instantly) so other unsaved edits survive.
+  const wasOpenRef = useRef(false);
+  useEffect(() => {
+    if (isOpen && wasOpenRef.current) {
+      setLocal(prev => ({ ...prev, styles: settings.styles }));
+    } else {
+      setLocal(settings);
+    }
+    wasOpenRef.current = isOpen;
+  }, [settings, isOpen]);
+
+  // Styles save immediately (not gated on "Save Settings").
+  const commitStyleChange = (fn: (prev: GlobalSettings) => GlobalSettings) => {
+    setLocal(fn);
+    onSave((prev: GlobalSettings) => fn(prev));
+  };
   useEffect(() => {
      const current = local.outputs.find(o => o.id === activeOutputId);
      if (!current) setActiveOutputId(local.outputs[0]?.id || 'main');
@@ -358,37 +606,32 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
           </div>
         </div>
 
-        {/* Use Style / Template Selector */}
-        <div className="bg-[#121214] border border-white/5 rounded-xl p-5">
+        {/* Style selector — pick which PresentationStyle this output uses */}
+        <div className="bg-[#121214] border border-white/5 rounded-xl p-5 space-y-3">
           <div className="flex items-center justify-between">
-            <div>
-              <span className="text-[11px] font-bold uppercase tracking-wider text-blue-400 block mb-0.5">Use style</span>
-              <span className="text-sm text-white font-medium">
-                {activeOutput.defaultTemplateId 
-                  ? (getTemplateById(activeOutput.defaultTemplateId)?.name || activeOutput.defaultTemplateId)
-                  : 'Default'
-                }
-              </span>
-            </div>
-            <div className="flex items-center gap-2">
-              {activeOutput.defaultTemplateId && (
-                <button
-                  onClick={() => updateOutput(activeOutputId, { defaultTemplateId: undefined })}
-                  className="p-2 rounded-lg text-neutral-500 hover:text-red-400 hover:bg-red-500/10 transition-all"
-                  title="Clear style"
-                >
-                  <X size={16} />
-                </button>
-              )}
-              <button
-                onClick={() => setSelectingTemplateForOutput(activeOutput)}
-                className="p-2 rounded-lg text-neutral-400 hover:text-white hover:bg-white/10 transition-all"
-                title="Select style"
-              >
-                <Sparkles size={16} />
-              </button>
-            </div>
+            <span className="text-[11px] font-bold uppercase tracking-wider text-blue-400">Style</span>
+            <select
+              value={activeOutput.styleId || ''}
+              onChange={(e) => updateOutput(activeOutputId, { styleId: e.target.value || undefined })}
+              className="bg-[#1e1e28] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white outline-none focus:border-blue-500 cursor-pointer min-w-[160px]"
+            >
+              <option value="">(None — use output defaults)</option>
+              {local.styles.map(s => (
+                <option key={s.id} value={s.id}>{s.name}</option>
+              ))}
+            </select>
           </div>
+          {activeOutput.styleId && (() => {
+            const sel = local.styles.find(s => s.id === activeOutput.styleId);
+            if (!sel) return null;
+            return (
+              <div className="text-[11px] text-neutral-500 leading-relaxed space-y-0.5 pt-1 border-t border-white/5">
+                {sel.lyricsTemplateId && <div>Lyrics template: <span className="text-neutral-300">{getTemplateById(sel.lyricsTemplateId)?.name || sel.lyricsTemplateId}</span></div>}
+                {sel.scriptureTemplateId && <div>Scripture template: <span className="text-neutral-300">{getTemplateById(sel.scriptureTemplateId)?.name || sel.scriptureTemplateId}</span></div>}
+                <div>Background: <span className="text-neutral-300">{sel.backgroundColor}</span> · Transition: <span className="text-neutral-300">{sel.transition}</span> · Fit: <span className="text-neutral-300">{sel.mediaFit}</span></div>
+              </div>
+            );
+          })()}
         </div>
 
         {/* TYPE-SPECIFIC: NDI® Settings */}
@@ -717,65 +960,32 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
                   </div>
                )}
                {activeTab === 'style' && (
-                  <div className="space-y-8 max-w-3xl">
-                     <div className="flex items-center justify-between">
-                       <div>
-                         <h2 className="text-2xl font-bold text-white tracking-tight">Style Profiles</h2>
-                         <p className="text-sm text-neutral-400 mt-2">Manage backgrounds and typography overrides per output screen.</p>
-                       </div>
-                       <div className="bg-[#030303] border border-white/5 p-1.5 rounded-xl flex gap-1 shadow-inner">
-                          {local.outputs.filter(o => o.enabled).map(out => (
-                             <button key={out.id} onClick={() => setActiveOutputId(out.id)} className={`px-5 py-2 rounded-lg text-sm font-medium transition-all ${activeOutputId === out.id ? 'bg-white/10 text-white shadow' : 'text-neutral-500 hover:text-neutral-300'}`}>{out.name}</button>
-                          ))}
-                       </div>
-                     </div>
-                     <div className="h-px bg-white/5 w-full my-8"></div>
-                     <h3 className="text-xl font-bold text-blue-400 mb-6">{activeOutput?.name || 'Output'} Configuration</h3>
-
-                     {activeOutput && (
-                        <>
-                           {/* Default Screen Template */}
-                           <div className="bg-[#121214] border border-white/5 p-6 rounded-xl mb-6 shadow-sm">
-                              <div className="flex items-center justify-between">
-                                 <div>
-                                    <h3 className="text-sm font-bold uppercase tracking-wider text-neutral-200">Default Screen Template</h3>
-                                    <p className="text-sm text-neutral-500 mt-1">
-                                       Baseline motion style and typography layout automatically projected on {activeOutput.name}.
-                                    </p>
-                                 </div>
-                                 <button
-                                    type="button"
-                                    onClick={() => setSelectingTemplateForOutput(activeOutput)}
-                                    className="px-4 py-2 rounded-lg bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 hover:text-white border border-blue-500/30 text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer"
-                                 >
-                                    <Sparkles size={14} />
-                                    {activeOutput.defaultTemplateId ? 'Change Template' : 'Select Template'}
-                                 </button>
-                              </div>
-                              {activeOutput.defaultTemplateId && (
-                                 <div className="mt-4 pt-4 border-t border-white/5 flex items-center justify-between">
-                                    <div className="flex items-center gap-2">
-                                       <span className="text-xs text-neutral-400 font-medium">Assigned Preset:</span>
-                                       <span className="text-xs font-bold text-white bg-white/10 px-2.5 py-1 rounded border border-white/10 flex items-center gap-1.5">
-                                          <Sparkles size={11} className="text-blue-400" />
-                                          {getTemplateById(activeOutput.defaultTemplateId)?.name || activeOutput.defaultTemplateId}
-                                       </span>
-                                    </div>
-                                    <button
-                                       type="button"
-                                       onClick={() => updateOutput(activeOutputId, { defaultTemplateId: undefined })}
-                                       className="text-xs text-neutral-500 hover:text-red-400 transition-colors cursor-pointer"
-                                    >
-                                       Clear Default
-                                    </button>
-                                 </div>
-                              )}
-                           </div>
-                           <StyleConfigurator title="Override Lyrics Style" enabled={activeOutput.lyricsStyleEnabled} onToggle={(val: boolean) => updateOutput(activeOutputId, { lyricsStyleEnabled: val })} onEdit={() => setEditingStyleType('lyrics')} />
-                           <StyleConfigurator title="Override Bible Style" enabled={activeOutput.bibleStyleEnabled} onToggle={(val: boolean) => updateOutput(activeOutputId, { bibleStyleEnabled: val })} onEdit={() => setEditingStyleType('scripture')} />
-                        </>
-                     )}
-                  </div>
+                  <StylesManager
+                    styles={local.styles}
+                    templates={allTemplates}
+                    onReloadTemplates={() => getStoredTemplates().then(setAllTemplates)}
+                    onAdd={() => {
+                      const newStyle: PresentationStyle = {
+                        id: `style-${Date.now()}`,
+                        name: 'New Style',
+                        backgroundColor: '#000000',
+                        transition: 'fade',
+                        mediaFit: 'contain',
+                        aspectRatio: '16:9',
+                        activeLayers: { background: true, slide: true, overlays: true },
+                      };
+                      commitStyleChange(prev => ({ ...prev, styles: [...prev.styles, newStyle] }));
+                    }}
+                    onUpdate={(updated) => commitStyleChange(prev => ({
+                      ...prev,
+                      styles: prev.styles.map(s => s.id === updated.id ? updated : s)
+                    }))}
+                    onDelete={(id) => commitStyleChange(prev => ({
+                      ...prev,
+                      styles: prev.styles.filter(s => s.id !== id),
+                      outputs: prev.outputs.map(o => o.styleId === id ? { ...o, styleId: undefined } : o)
+                    }))}
+                  />
                )}
                {activeTab !== 'outputs' && activeTab !== 'style' && activeTab !== 'help' && (
                   <div className="py-12 text-center text-neutral-500">
@@ -986,6 +1196,13 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
   );
 }
 
+/** The look given to a whole song section; slides tagged with the group later pick it up too */
+export interface GroupLook {
+  templateId?: string;
+  outputTemplates?: { [outputId: string]: string };
+  designs?: { [outputId: string]: SlideDesign };
+}
+
 export interface PresentationItem {
   id: string;
   title: string;
@@ -994,6 +1211,8 @@ export interface PresentationItem {
   modifiedAt?: string;
   usedAt?: string;
   slides: SlideDefinition[];
+  /** Looks assigned to sections of this song, by group name */
+  groupLooks?: { [group: string]: GroupLook };
 }
 
 const MOCK_SONGS: PresentationItem[] = [
@@ -1035,7 +1254,17 @@ const MOCK_SONGS: PresentationItem[] = [
 ];
 
 function ControlPanel() {
-  const [appMode, setAppMode] = useState<'show' | 'edit' | 'stage'>('show');
+  const [appMode, setAppMode] = useState<'show' | 'design' | 'stage'>('show');
+  const [designOutputId, setDesignOutputId] = useState('main');
+  // Slide picked in the Design strip; null = follow the slide that's on air
+  const [designSlideId, setDesignSlideId] = useState<string | null>(null);
+  // Right-click menu on a group in the Arrangement Groups panel
+  const [groupMenu, setGroupMenu] = useState<{ x: number; y: number; songId: string; group: string } | null>(null);
+  // Open Design mode on a slide, or (null) on whatever slide is on air
+  const openDesign = (slideId: string | null = null) => {
+    setDesignSlideId(slideId);
+    setAppMode('design');
+  };
   const [activeTab, setActiveTab] = useState<'shows' | 'songs' | 'setlist' | 'bibles' | 'media' | 'audio'>('songs');
   const [bottomTab, setBottomTab] = useState<'shows' | 'media' | 'audio' | 'overlays' | 'templates' | 'scripture' | 'calendar' | 'functions'>('shows');
   const [selectedCategory, setSelectedCategory] = useState<'all' | 'Presentations' | 'Songs'>('all');
@@ -1045,12 +1274,29 @@ function ControlPanel() {
 
   // Inline template grid
   const [inlineTemplates, setInlineTemplates] = useState<PresentationTemplate[]>(STARTER_TEMPLATES);
+  useEffect(() => { getStoredTemplates().then(setInlineTemplates); }, []);
+  // Live template edits (this window or others) re-render previews and outputs immediately
+  useEffect(() => subscribeTemplates(() => setInlineTemplates([...getCachedTemplates()])), []);
   const [inlineTemplateCategory, setInlineTemplateCategory] = useState<string>('all');
 
   // Resizable bottom panel
   const [bottomPanelHeight, setBottomPanelHeight] = useState(280);
   const [bottomPanelCollapsed, setBottomPanelCollapsed] = useState(false);
   const bottomDragRef = useRef<{ startY: number; startH: number } | null>(null);
+
+  // Design mode folds the bottom panel away for the biggest canvas, and restores it on leaving
+  const panelStateBeforeDesign = useRef<boolean | null>(null);
+  useEffect(() => {
+    if (appMode === 'design') {
+      if (panelStateBeforeDesign.current === null) {
+        panelStateBeforeDesign.current = bottomPanelCollapsed;
+        setBottomPanelCollapsed(true);
+      }
+    } else if (panelStateBeforeDesign.current !== null) {
+      setBottomPanelCollapsed(panelStateBeforeDesign.current);
+      panelStateBeforeDesign.current = null;
+    }
+  }, [appMode]);
 
   const handleDividerMouseDown = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -1149,8 +1395,13 @@ function ControlPanel() {
     handleUpdateSetlist(updated);
   };
 
+  // Don't write settings until the saved copy has loaded, or the defaults overwrite it
+  // (StrictMode runs effects twice, so a second read can otherwise see the defaults).
+  const settingsLoadedRef = useRef(false);
+
   useEffect(() => {
-    get('globalSettings').then((val: any) => { 
+    get('globalSettings').then((val: any) => {
+        settingsLoadedRef.current = true;
         if (val) {
             // Merge default outputs with saved settings
             const mergedOutputs = DEFAULT_SETTINGS.outputs.map(defOut => {
@@ -1170,19 +1421,124 @@ function ControlPanel() {
             // Also include any dynamically added outputs (ndi, extra hdmi) not in defaults
             const extraOutputs = (val.outputs || []).filter((o: any) => !DEFAULT_SETTINGS.outputs.find(d => d.id === o.id));
             const allOutputs = [...mergedOutputs, ...extraOutputs.map((o: any) => ({ ...o, outputType: o.outputType || 'hdmi' }))];
-            setGlobalSettings({ ...DEFAULT_SETTINGS, ...val, outputs: allOutputs });
+            // Merge saved styles with defaults (add any new default styles not already in saved)
+            const savedStyles: PresentationStyle[] = val.styles || [];
+            const mergedStyles = DEFAULT_STYLES.map(def => savedStyles.find(s => s.id === def.id) || def);
+            const extraStyles = savedStyles.filter(s => !DEFAULT_STYLES.find(d => d.id === s.id));
+            setGlobalSettings({ ...DEFAULT_SETTINGS, ...val, outputs: allOutputs, styles: [...mergedStyles, ...extraStyles] });
+        } else {
+            setGlobalSettings(prev => ({ ...prev }));
         }
     });
-    get('songsList').then((val) => { if (val) setSongsList(val); });
+    get('songsList').then((val) => {
+      if (val) {
+        skipNextUndoRecordRef.current = true; // loading isn't an edit
+        setSongsList(val);
+      }
+      songsLoadedRef.current = true;
+    });
   }, []);
 
   useEffect(() => {
-    set('globalSettings', globalSettings).catch(()=>{});
+    if (settingsLoadedRef.current) set('globalSettings', globalSettings).catch(()=>{});
     setLiveState(prev => ({ ...prev, settings: globalSettings }));
     ndiService.syncWithOutputs(globalSettings.outputs);
   }, [globalSettings]);
 
-  useEffect(() => { if (songsList !== MOCK_SONGS) set('songsList', songsList).catch(() => {}); }, [songsList]);
+  // Save songs shortly after the last change (edits can come in quick bursts), and flush on close.
+  // Nothing is saved until the stored songs have loaded, so the sample songs never overwrite them.
+  const songsLoadedRef = useRef(false);
+  const latestSongsRef = useRef(songsList);
+  latestSongsRef.current = songsList;
+  useEffect(() => {
+    if (!songsLoadedRef.current) return;
+    const t = setTimeout(() => { set('songsList', songsList).catch(() => {}); }, 300);
+    return () => clearTimeout(t);
+  }, [songsList]);
+  useEffect(() => {
+    const flush = () => { if (songsLoadedRef.current) set('songsList', latestSongsRef.current).catch(() => {}); };
+    window.addEventListener('beforeunload', flush);
+    return () => window.removeEventListener('beforeunload', flush);
+  }, []);
+
+  // ─── Undo / redo for song and slide changes (Ctrl+Z, Ctrl+Y or Ctrl+Shift+Z) ───
+  // Every change to the songs keeps the version before it; changes in quick succession count as one step.
+  const undoStackRef = useRef<{ past: (typeof songsList)[]; future: (typeof songsList)[] }>({ past: [], future: [] });
+  const recordedSongsRef = useRef(songsList);
+  const lastSongChangeAtRef = useRef(0);
+  const skipNextUndoRecordRef = useRef(false);
+  // Short message at the bottom of the screen (undo/redo, or 'info' for other changes Ctrl+Z can undo)
+  const [undoToast, setUndoToast] = useState<{ text: string; at: number; kind?: 'info' } | null>(null);
+
+  useEffect(() => {
+    const before = recordedSongsRef.current;
+    recordedSongsRef.current = songsList;
+    if (skipNextUndoRecordRef.current) { skipNextUndoRecordRef.current = false; return; }
+    if (!songsLoadedRef.current || before === songsList) return;
+    const stack = undoStackRef.current;
+    const now = Date.now();
+    if (stack.past.length === 0 || now - lastSongChangeAtRef.current > UNDO_MERGE_MS) {
+      stack.past.push(before);
+      if (stack.past.length > UNDO_LIMIT) stack.past.shift();
+    }
+    lastSongChangeAtRef.current = now;
+    stack.future = [];
+  }, [songsList]);
+
+  useEffect(() => {
+    if (!undoToast) return;
+    const t = setTimeout(() => setUndoToast(null), undoToast.kind === 'info' ? 3200 : 1400);
+    return () => clearTimeout(t);
+  }, [undoToast]);
+
+  const restoreSongs = (list: typeof songsList) => {
+    skipNextUndoRecordRef.current = true;
+    lastSongChangeAtRef.current = 0;
+    setSongsList(list);
+    // The live and preview slides are copies, so bring them back in line too (the screens follow)
+    const byId = new Map<string, SlideDefinition>();
+    list.forEach(song => song.slides.forEach(s => byId.set(s.id, s)));
+    setLiveState(prev => prev.slide && byId.has(prev.slide.id) ? { ...prev, slide: byId.get(prev.slide.id)! } : prev);
+    setPreviewSlide(prev => prev && byId.has(prev.id) ? byId.get(prev.id)! : prev);
+  };
+  const undoSongChange = () => {
+    const stack = undoStackRef.current;
+    const previous = stack.past.pop();
+    if (!previous) { setUndoToast({ text: 'Nothing to undo', at: Date.now() }); return; }
+    stack.future.push(latestSongsRef.current);
+    restoreSongs(previous);
+    setUndoToast({ text: 'Undone', at: Date.now() });
+  };
+  const redoSongChange = () => {
+    const stack = undoStackRef.current;
+    const next = stack.future.pop();
+    if (!next) { setUndoToast({ text: 'Nothing to redo', at: Date.now() }); return; }
+    stack.past.push(latestSongsRef.current);
+    restoreSongs(next);
+    setUndoToast({ text: 'Redone', at: Date.now() });
+  };
+  const undoActionsRef = useRef({ undo: undoSongChange, redo: redoSongChange });
+  undoActionsRef.current = { undo: undoSongChange, redo: redoSongChange };
+
+  useEffect(() => {
+    const NON_TEXT_INPUTS = new Set(['range', 'checkbox', 'radio', 'color', 'button', 'submit', 'reset', 'file']);
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+      const key = e.key.toLowerCase();
+      const isUndo = key === 'z' && !e.shiftKey;
+      const isRedo = key === 'y' || (key === 'z' && e.shiftKey);
+      if (!isUndo && !isRedo) return;
+      // While typing in a text box, Ctrl+Z undoes the typing there instead
+      const el = e.target as HTMLElement | null;
+      const typing = el instanceof HTMLTextAreaElement || !!el?.isContentEditable
+        || (el instanceof HTMLInputElement && !NON_TEXT_INPUTS.has(el.type));
+      if (typing) return;
+      e.preventDefault();
+      if (isUndo) undoActionsRef.current.undo(); else undoActionsRef.current.redo();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
   
   const [contextMenu, setContextMenu] = useState<{ x: number, y: number, type: 'song'|'bible'|'slide', id: string | number } | null>(null);
 
@@ -1258,9 +1614,6 @@ function ControlPanel() {
 
   const [isAddSongModalOpen, setIsAddSongModalOpen] = useState(false);
   const [isTemplateGalleryOpen, setIsTemplateGalleryOpen] = useState(false);
-  const [isEditingSong, setIsEditingSong] = useState(false);
-  const [editingSlideIndex, setEditingSlideIndex] = useState<number | null>(null);
-  const [editingSlideText, setEditingSlideText] = useState('');
   const [draggedSlideIndex, setDraggedSlideIndex] = useState<number | null>(null);
   const [dragOverSlideIndex, setDragOverSlideIndex] = useState<number | null>(null);
   
@@ -1378,7 +1731,7 @@ function ControlPanel() {
   // Keyboard Navigation Support & Live Production Shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement) return;
 
       // Global Production Hotkeys
       if (e.key === 'F1' || ((e.key === 'b' || e.key === 'B') && !e.ctrlKey && !e.metaKey)) {
@@ -1620,8 +1973,11 @@ function ControlPanel() {
   };
 
   const goLive = (slide: SlideDefinition) => {
-      setLiveState(prev => ({ ...prev, slide, clearText: false, clearedOutputs: {} }));
-      setPreviewSlide(slide);
+      // Text boxes added in Design mode wait off the screens until their slide goes live
+      const released = releaseWaitingBoxes(slide);
+      if (released !== slide) updateSlidesById(new Set([slide.id]), releaseWaitingBoxes);
+      setLiveState(prev => ({ ...prev, slide: released, clearText: false, clearedOutputs: {} }));
+      setPreviewSlide(released);
   };
   
   const setGlobalBackground = (url: string | null, type: 'image' | 'video' = 'image') => setLiveState(prev => ({ ...prev, globalBackground: url ? { url, type } : null, clearedOutputs: {} }));
@@ -1899,6 +2255,16 @@ function ControlPanel() {
     });
   };
 
+  const handleRemoveTemplate = (scope: 'slide' | 'song', index: number) => {
+    setSongsList(prev => prev.map((song, idx) => {
+      if (idx !== activeItemIndex) return song;
+      const slides = song.slides.map((s, i) => (scope === 'song' || i === index) ? linkSlideToTemplate({ ...s, outputTemplates: undefined }, NO_TEMPLATE_ID) : s);
+      return scope === 'song'
+        ? { ...song, templateId: undefined, outputTemplates: undefined, slides }
+        : { ...song, slides };
+    }));
+  };
+
   const handleDuplicateSlide = (index: number) => {
     if (activeTab !== 'songs' || !songsList[activeItemIndex]) return;
     setSongsList(prev => {
@@ -2114,18 +2480,6 @@ function ControlPanel() {
   const renderCenterWorkspace = () => {
     if (activeTab === 'media') return <MediaLibrary onSelectBackground={setGlobalBackground} />;
     if (activeTab === 'audio') return <AudioModule onVerseDetected={handleVerseDetected} />;
-
-    if (isEditingSong && activeTab === 'songs' && songsList[activeItemIndex]) {
-      return (
-        <EditSongPage 
-          song={songsList[activeItemIndex]} initialSlideIndex={editingSlideIndex || 0} onClose={() => setIsEditingSong(false)}
-          onSave={(songId, updatedSlides) => {
-            setSongsList(prev => { const next = [...prev]; const idx = next.findIndex(s => s.id === songId); if (idx !== -1) next[idx] = { ...next[idx], slides: updatedSlides }; return next; });
-            setLiveState(prev => { if (prev.slide) { const match = updatedSlides.find(s => s.id === prev.slide!.id); if (match) return { ...prev, slide: match }; } return prev; });
-          }}
-        />
-      );
-    }
 
     if (activeTab === 'bibles') {
       const isSearchingKeyword = bibleKeywordQuery.trim().length > 0;
@@ -2364,7 +2718,7 @@ function ControlPanel() {
                     `}
                   >
                     <FixedStage className="w-full h-full pointer-events-none">
-                      <SmartTextLayout text={slide.text} source={slide.source} type={slide.type} styleOverrides={applyGlobalStyles(slide, liveState.settings?.outputs.find(o => o.id === 'main'))} />
+                      <SmartTextLayout text={slide.text} source={slide.source} type={slide.type} styleOverrides={applyGlobalStyles(slide, liveState.settings?.outputs.find(o => o.id === 'main'), liveState.settings)} />
                     </FixedStage>
                     <div className="absolute top-2 left-2 text-[10px] font-bold text-neutral-500 bg-[#09090B]/80 px-2 py-0.5 rounded shadow-sm border border-white/10 backdrop-blur-md z-10">{i + 1}</div>
                   </div>
@@ -2396,9 +2750,10 @@ function ControlPanel() {
                     <Sparkles size={14} className="text-blue-400" />
                     Templates & Motion
                  </button>
-                 <button 
-                   onClick={() => { setIsEditingSong(true); setEditingSlideIndex(0); }} 
+                 <button
+                   onClick={() => openDesign(activeSong.slides[0]?.id ?? null)}
                    className="text-xs bg-white/5 hover:bg-white/10 px-3.5 py-2 rounded-lg transition-colors text-neutral-300 font-medium"
+                   title="Open this song in Design"
                  >
                    Edit Song
                  </button>
@@ -2426,7 +2781,7 @@ function ControlPanel() {
                          `}
                        >
                          <FixedStage className="w-full h-full pointer-events-none">
-                            <SmartTextLayout text={slide.text} source={slide.source} type={slide.type} styleOverrides={applyGlobalStyles(slide, liveState.settings?.outputs.find(o => o.id === 'main'))} />
+                            <SmartTextLayout text={slide.text} source={slide.source} type={slide.type} styleOverrides={applyGlobalStyles(slide, liveState.settings?.outputs.find(o => o.id === 'main'), liveState.settings)} />
                          </FixedStage>
                          
                          {/* Slide Number Badge */}
@@ -2470,7 +2825,7 @@ function ControlPanel() {
                          
                          {previewSlide && (
                             <div className="absolute inset-0 z-10 flex">
-                               <SmartTextLayout text={previewSlide.text} source={previewSlide.source} type={previewSlide.type} animation={previewSlide.animation} styleOverrides={applyGlobalStyles(previewSlide, mainConfig)} />
+                               <SmartTextLayout text={previewSlide.text} source={previewSlide.source} type={previewSlide.type} animation={previewSlide.animation} styleOverrides={applyGlobalStyles(previewSlide, mainConfig, globalSettings)} />
                             </div>
                          )}
 
@@ -2509,7 +2864,8 @@ function ControlPanel() {
                             const isCleared = !!liveState.clearedOutputs?.['main'];
                             
                             const displaySlide = isLocked ? frozenState?.slide : liveState.slide;
-                            const displayBg = isLocked ? frozenState?.bg : (liveState.globalBackground || mainConfig?.defaultBackground);
+                            const rawBg = isLocked ? frozenState?.bg : (liveState.globalBackground || mainConfig?.defaultBackground);
+                            const displayBg = resolveOutputBackground(rawBg, mainConfig, globalSettings);
                             const displayClearText = isLocked ? frozenState?.clearText : liveState.clearText;
 
                             return (
@@ -2531,14 +2887,14 @@ function ControlPanel() {
                                     </div>
                                   )}
                                   
-                                  {!isCleared && !displayClearText && displaySlide && (
-                                    <SmartTextLayout 
-                                      text={displaySlide.text} 
-                                      source={displaySlide.source} 
-                                      type={displaySlide.type} 
-                                      animation={resolveSlideForOutput(displaySlide, mainConfig).animation} 
-                                      styleOverrides={resolveSlideForOutput(displaySlide, mainConfig).styleOverrides} 
-                                      className="relative z-10 w-full h-full" 
+                                  {!isCleared && !displayClearText && displaySlide && getStyleForOutput(mainConfig, globalSettings)?.activeLayers.slide !== false && (
+                                    <SmartTextLayout
+                                      text={displaySlide.text}
+                                      source={displaySlide.source}
+                                      type={displaySlide.type}
+                                      animation={resolveSlideForOutput(displaySlide, mainConfig, undefined, getStyleForOutput(mainConfig, globalSettings)).animation}
+                                      styleOverrides={resolveSlideForOutput(displaySlide, mainConfig, undefined, getStyleForOutput(mainConfig, globalSettings)).styleOverrides}
+                                      className="relative z-10 w-full h-full"
                                     />
                                   )}
                                   
@@ -2583,7 +2939,8 @@ function ControlPanel() {
                                   {(() => {
                                      const frozenState = liveState.frozenStates?.[out.id];
                                      const displaySlide = isOutLocked ? frozenState?.slide : liveState.slide;
-                                     const displayBg = isOutLocked ? frozenState?.bg : out.defaultBackground;
+                                     const rawOutBg = isOutLocked ? frozenState?.bg : (liveState.globalBackground || out.defaultBackground);
+                                     const displayBg = resolveOutputBackground(rawOutBg, out, globalSettings);
                                      const displayClearText = isOutLocked ? frozenState?.clearText : liveState.clearText;
                                      const hideBg = isOutCleared;
 
@@ -2618,13 +2975,13 @@ function ControlPanel() {
                                              </div>
                                           )}
                                           
-                                          {!isOutCleared && !displayClearText && displaySlide && (
-                                             <SmartTextLayout 
-                                               text={displaySlide.text} 
-                                               source={displaySlide.source} 
-                                               type={displaySlide.type} 
-                                               animation={resolveSlideForOutput(displaySlide, out).animation} 
-                                               styleOverrides={resolveSlideForOutput(displaySlide, out).styleOverrides} 
+                                          {!isOutCleared && !displayClearText && displaySlide && getStyleForOutput(out, globalSettings)?.activeLayers.slide !== false && (
+                                             <SmartTextLayout
+                                               text={displaySlide.text}
+                                               source={displaySlide.source}
+                                               type={displaySlide.type}
+                                               animation={resolveSlideForOutput(displaySlide, out, undefined, getStyleForOutput(out, globalSettings)).animation} 
+                                               styleOverrides={resolveSlideForOutput(displaySlide, out, undefined, getStyleForOutput(out, globalSettings)).styleOverrides} 
                                                className="relative z-10 w-full h-full" 
                                              />
                                           )}
@@ -2664,7 +3021,8 @@ function ControlPanel() {
     const isOutCleared = !!liveState.clearedOutputs?.[out.id];
     const frozenState = liveState.frozenStates?.[out.id];
     const displaySlide = isOutLocked ? frozenState?.slide : liveState.slide;
-    const displayBg = isOutLocked ? frozenState?.bg : (liveState.globalBackground || out.defaultBackground);
+    const rawCardBg = isOutLocked ? frozenState?.bg : (liveState.globalBackground || out.defaultBackground);
+    const displayBg = resolveOutputBackground(rawCardBg, out, globalSettings);
     const displayClearText = isOutLocked ? frozenState?.clearText : liveState.clearText;
     const isLive = liveState.isPresenting && !isOutCleared && !isOutLocked;
 
@@ -2692,23 +3050,15 @@ function ControlPanel() {
           )}
 
           <FixedStage className="w-full h-full pointer-events-none bg-transparent">
-            {displayBg?.type === 'color' && <div className="absolute inset-0 w-full h-full" style={{ backgroundColor: displayBg.color || '#000' }} />}
-            {displayBg?.url && displayBg.type === 'video' ? (
-              <video src={displayBg.url} className="absolute inset-0 w-full h-full object-cover opacity-80" autoPlay loop muted playsInline />
-            ) : displayBg?.url ? (
-              <img src={displayBg.url} className="absolute inset-0 w-full h-full object-cover opacity-80" alt="bg" />
-            ) : null}
-
-            {!isOutCleared && !displayClearText && displaySlide && (
-              <SmartTextLayout 
-                text={displaySlide.text} 
-                source={displaySlide.source} 
-                type={displaySlide.type} 
-                animation={resolveSlideForOutput(displaySlide, out).animation} 
-                styleOverrides={resolveSlideForOutput(displaySlide, out).styleOverrides} 
-                className="relative z-10 w-full h-full" 
-              />
-            )}
+            <AudienceOutputContent
+              output={out}
+              settings={globalSettings}
+              slide={displaySlide}
+              background={displayBg}
+              hideBackground={isOutCleared && out.id !== 'main'}
+              hideText={isOutCleared || !!displayClearText}
+              muted
+            />
 
             {isOutCleared && (
               <div className="absolute inset-0 flex items-center justify-center bg-black/60"><EyeOff size={16} className="text-neutral-500" /></div>
@@ -2843,8 +3193,20 @@ function ControlPanel() {
     );
   };
 
+  // The slides the Show grid lists: the open setlist item's, otherwise the open song's
+  const getShownSlides = (): { title: string; slides: SlideDefinition[] } => {
+    if (activeTab === 'setlist') {
+      const item = serviceSetlist.items.find(i => i.id === activeSetlistItemId);
+      if (item?.slides) return { title: item.title, slides: item.slides };
+    }
+    const song = songsList[activeItemIndex];
+    return { title: song?.title || 'Welcome', slides: song?.slides || [] };
+  };
+
   // --- CENTER SLIDE GRID / WORKSPACE (TOP-CENTER) ---
   const renderCenterSlideArea = () => {
+    if (appMode === 'design') return renderDesignWorkspace();
+
     // Stage monitor mode
     if (appMode === 'stage') {
       const activeSlide = previewSlide || liveState.slide;
@@ -2867,48 +3229,9 @@ function ControlPanel() {
       );
     }
 
-    // Edit song mode
-    if (appMode === 'edit' || (isEditingSong && songsList[activeItemIndex])) {
-      return (
-        <EditSongPage 
-          song={songsList[activeItemIndex]} 
-          initialSlideIndex={editingSlideIndex || 0} 
-          onClose={() => {
-            setIsEditingSong(false);
-            setAppMode('show');
-          }}
-          onSave={(songId, updatedSlides) => {
-            setSongsList(prev => { 
-              const next = [...prev]; 
-              const idx = next.findIndex(s => s.id === songId); 
-              if (idx !== -1) next[idx] = { ...next[idx], slides: updatedSlides }; 
-              return next; 
-            });
-            setLiveState(prev => { 
-              if (prev.slide) { 
-                const match = updatedSlides.find(s => s.id === prev.slide!.id); 
-                if (match) return { ...prev, slide: match }; 
-              } 
-              return prev; 
-            });
-            setIsEditingSong(false);
-            setAppMode('show');
-          }}
-        />
-      );
-    }
-
-    // Determine slides to display
-    let activeTitle = songsList[activeItemIndex]?.title || 'Welcome';
-    let currentSlides: SlideDefinition[] = songsList[activeItemIndex]?.slides || [];
-
-    if (activeTab === 'setlist') {
-      const activeItem = serviceSetlist.items.find(i => i.id === activeSetlistItemId);
-      if (activeItem && activeItem.slides) {
-        activeTitle = activeItem.title;
-        currentSlides = activeItem.slides;
-      }
-    }
+    const { title: activeTitle, slides: currentSlides } = getShownSlides();
+    // Room for group names under the slides, only when the song has groups
+    const hasGroups = currentSlides.some(s => s.group);
 
     return (
       <div className="flex-1 flex flex-col min-w-0 bg-[#0d0d12] relative overflow-hidden select-none">
@@ -2919,13 +3242,14 @@ function ControlPanel() {
             <button className="text-neutral-500 hover:text-white p-1 rounded transition-colors"><MoreHorizontal size={14} /></button>
           </div>
           <div className="flex items-center gap-2">
-            <button 
+            <button
               onClick={() => {
-                setAppMode('edit');
-                setIsEditingSong(true);
-                setEditingSlideIndex(0);
+                // Design this song: the slide on air when it's one of these, otherwise the first slide
+                const onAir = currentSlides.some(s => s.id === liveState.slide?.id);
+                openDesign(onAir ? null : currentSlides[0]?.id ?? null);
               }}
               className="text-xs text-neutral-300 hover:text-white px-2.5 py-1 rounded bg-white/5 hover:bg-white/10 border border-white/5 transition-colors font-medium flex items-center gap-1"
+              title="Open this song in Design"
             >
               <Edit2 size={12} />
               Edit
@@ -2949,9 +3273,12 @@ function ControlPanel() {
                 const currentIndex = currentSlides.findIndex(s => s.id === currentSlideId);
                 const isNextLogical = currentIndex !== -1 && i === currentIndex + 1;
 
+                // The group's name goes under the first slide of each run (Verse 1, Chorus, Verse 2, Chorus…)
+                const startsGroup = !!slide.group && currentSlides[i - 1]?.group !== slide.group;
+
                 return (
+                  <div key={slide.id} className="flex flex-col gap-1 min-w-0">
                   <div
-                    key={slide.id}
                     draggable
                     onDragStart={(e) => { setDraggedSlideIndex(i); e.dataTransfer.effectAllowed = 'move'; }}
                     onDragOver={(e) => { e.preventDefault(); setDragOverSlideIndex(i); }}
@@ -2980,14 +3307,27 @@ function ControlPanel() {
                         text={slide.text} 
                         source={slide.source} 
                         type={slide.type} 
-                        styleOverrides={applyGlobalStyles(slide, liveState.settings?.outputs.find(o => o.id === 'main'))} 
+                        styleOverrides={applyGlobalStyles(slide, liveState.settings?.outputs.find(o => o.id === 'main'), liveState.settings)} 
                       />
                     </FixedStage>
 
                     {/* Slide Number Badge */}
-                    <div className="absolute top-2 left-2 text-[10px] font-bold text-neutral-400 bg-black/80 px-1.5 py-0.5 rounded border border-white/10 backdrop-blur-sm z-10">
-                      {i + 1}
+                    <div className="absolute top-2 left-2 z-10">
+                      <span className="text-[10px] font-bold text-neutral-400 bg-black/80 px-1.5 py-0.5 rounded border border-white/10 backdrop-blur-sm">
+                        {i + 1}
+                      </span>
                     </div>
+                  </div>
+                  {hasGroups && (
+                    <div className="h-4 px-0.5 flex items-center min-w-0">
+                      {startsGroup && (
+                        <span className={`flex items-center gap-1.5 min-w-0 text-[10px] font-bold uppercase tracking-wide ${groupColors(slide.group!).text}`}>
+                          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${groupColors(slide.group!).dot}`} />
+                          <span className="truncate">{slide.group}</span>
+                        </span>
+                      )}
+                    </div>
+                  )}
                   </div>
                 );
               })}
@@ -3016,6 +3356,437 @@ function ControlPanel() {
           </div>
         </div>
       </div>
+    );
+  };
+
+  // --- DESIGN MODE ---
+  // The slide whose look an output is showing: frozen slide if locked, else what's live, else the preview/active song.
+  const getOnAirSlide = (outputId: string): SlideDefinition | null => {
+    if (liveState.lockedOutputs?.[outputId]) return liveState.frozenStates?.[outputId]?.slide ?? null;
+    return liveState.slide || previewSlide || songsList[activeItemIndex]?.slides?.[0] || null;
+  };
+  const getSongForSlide = (slide: SlideDefinition | null) =>
+    (slide && songsList.find(song => song.slides.some(s => s.id === slide.id))) || songsList[activeItemIndex];
+  const findSlideById = (id: string | null | undefined): SlideDefinition | null => {
+    if (!id) return null;
+    for (const song of songsList) {
+      const s = song.slides.find(x => x.id === id);
+      if (s) return s;
+    }
+    return liveState.slide?.id === id ? liveState.slide : null;
+  };
+  // Design mode works on the slide picked in its strip, otherwise it follows what's on air
+  const getDesignSlide = (outputId: string): SlideDefinition | null => {
+    const picked = findSlideById(designSlideId);
+    if (picked) return picked;
+    const onAir = getOnAirSlide(outputId);
+    return findSlideById(onAir?.id) || onAir;
+  };
+
+  const getOutputTemplateInfo = (outputId: string, slide: SlideDefinition | null): OutputTemplateInfo => {
+    const out = globalSettings.outputs.find(o => o.id === outputId);
+    const style = getStyleForOutput(out, globalSettings);
+    const { templateId, source } = resolveTemplateSource(slide, out, undefined, style);
+    return { templateId, source, styleName: style?.name };
+  };
+
+  // Rewrite every slide of a song (and the copies held as live/preview slides) with fn
+  const updateSongSlides = (songId: string, fn: (s: SlideDefinition) => SlideDefinition, songPatch: Partial<(typeof songsList)[number]> = {}) => {
+    const song = songsList.find(s => s.id === songId);
+    if (!song) return;
+    const inSong = (s: SlideDefinition | null) => !!s && song.slides.some(x => x.id === s.id);
+    setSongsList(prev => prev.map(s => s.id === songId ? { ...s, ...songPatch, slides: s.slides.map(fn) } : s));
+    setLiveState(prev => inSong(prev.slide) ? { ...prev, slide: fn(prev.slide!) } : prev);
+    setPreviewSlide(prev => inSong(prev) ? fn(prev!) : prev);
+  };
+
+  const handleAssignLiveTemplate = (outputId: string, templateId: string, slide: SlideDefinition | null) => {
+    const info = getOutputTemplateInfo(outputId, slide);
+    const out = globalSettings.outputs.find(o => o.id === outputId);
+
+    if (info.source === 'style' && out?.styleId) {
+      const key = slide?.type === 'scripture' ? 'scriptureTemplateId' : 'lyricsTemplateId';
+      setGlobalSettings(prev => ({ ...prev, styles: prev.styles.map(st => st.id === out.styleId ? { ...st, [key]: templateId } : st) }));
+      return;
+    }
+    const song = getSongForSlide(slide);
+    if (song) {
+      updateSongSlides(song.id, s => {
+        const linked = linkSlideToTemplate(s, templateId);
+        if (!linked.outputTemplates?.[outputId]) return linked;
+        const { [outputId]: _, ...rest } = linked.outputTemplates;
+        return { ...linked, outputTemplates: rest };
+      }, { templateId });
+      return;
+    }
+    setGlobalSettings(prev => ({ ...prev, outputs: prev.outputs.map(o => o.id === outputId ? { ...o, defaultTemplateId: templateId } : o) }));
+  };
+
+  // Change slides everywhere they are held: their song, the live copy and the preview copy
+  const updateSlidesById = (ids: Set<string>, fn: (s: SlideDefinition) => SlideDefinition) => {
+    if (ids.size === 0) return;
+    const apply = (s: SlideDefinition) => ids.has(s.id) ? fn(s) : s;
+    setSongsList(prev => prev.map(song => song.slides.some(s => ids.has(s.id)) ? { ...song, slides: song.slides.map(apply) } : song));
+    setLiveState(prev => prev.slide && ids.has(prev.slide.id) ? { ...prev, slide: fn(prev.slide) } : prev);
+    setPreviewSlide(prev => prev && ids.has(prev.id) ? fn(prev) : prev);
+  };
+
+  const handleEditSlideText = (slideId: string, text: string) => updateSlidesById(new Set([slideId]), s => ({ ...s, text }));
+
+  // Set (or clear) one slide's design for one output; an empty design is removed so the slide falls back to its template
+  const withDesign = (s: SlideDefinition, outputId: string, design: SlideDesign | undefined): SlideDefinition => {
+    const { [outputId]: _previous, ...others } = s.designs || {};
+    const designs = hasDesignContent(design) ? { ...others, [outputId]: design } : others;
+    return { ...s, designs: Object.keys(designs).length ? designs : undefined };
+  };
+
+  // Show one output's text boxes (and hidden lyrics) for this slide on every other enabled output
+  const sendTextBoxesToAllScreens = (slideId: string, fromOutputId: string) => {
+    const targets = globalSettings.outputs.filter(o => o.enabled && o.id !== fromOutputId).map(o => o.id);
+    updateSlidesById(new Set([slideId]), s => {
+      const source = s.designs?.[fromOutputId];
+      return targets.reduce((acc, id) => withDesign(acc, id, {
+        ...(acc.designs?.[id] || {}),
+        customBoxes: source?.customBoxes,
+        hideLyrics: source?.hideLyrics,
+      }), s);
+    });
+    return targets.length;
+  };
+
+  // Split a slide's lines into two slides (the second half follows it); both halves keep the slide's designs
+  const handleSplitSlideById = (slideId: string) => {
+    const lines = findSlideById(slideId)?.text.split('\n') || [];
+    if (lines.length <= 1) return;
+    const mid = Math.ceil(lines.length / 2);
+    const firstText = lines.slice(0, mid).join('\n');
+    const secondText = lines.slice(mid).join('\n');
+    const newId = `s-${Date.now()}`;
+    setSongsList(prev => prev.map(song => {
+      const idx = song.slides.findIndex(s => s.id === slideId);
+      if (idx < 0) return song;
+      const slide = song.slides[idx];
+      const slides = [...song.slides];
+      slides.splice(idx, 1, { ...slide, text: firstText }, { ...slide, text: secondText, id: newId });
+      return { ...song, slides };
+    }));
+    setLiveState(prev => prev.slide?.id === slideId ? { ...prev, slide: { ...prev.slide, text: firstText } } : prev);
+    setPreviewSlide(prev => prev?.id === slideId ? { ...prev, text: firstText } : prev);
+  };
+
+  // Insert a new slide into a song at a position (0 = first). It uses the same template as the slide
+  // beside it, but not that slide's own design. Returns the new slide's id.
+  const handleInsertSlide = (songId: string, index: number): string => {
+    const id = `s-${Date.now()}`;
+    setSongsList(prev => prev.map(song => {
+      if (song.id !== songId) return song;
+      const neighbour = song.slides[index - 1] || song.slides[index];
+      const slide: SlideDefinition = {
+        id,
+        text: 'New slide',
+        type: neighbour?.type === 'scripture' ? 'scripture' : 'lyrics',
+        templateId: neighbour?.templateId,
+        outputTemplates: neighbour?.outputTemplates,
+      };
+      const slides = [...song.slides];
+      slides.splice(Math.max(0, Math.min(index, slides.length)), 0, slide);
+      return { ...song, slides };
+    }));
+    return id;
+  };
+
+  // Move slides (kept in their current order) so they sit just before position `beforeIndex` of the song.
+  const handleMoveSlides = (songId: string, slideIds: string[], beforeIndex: number) => {
+    const song = songsList.find(s => s.id === songId);
+    if (!song) return;
+    const moving = new Set(slideIds);
+    const moved = song.slides.filter(s => moving.has(s.id));
+    const rest = song.slides.filter(s => !moving.has(s.id));
+    const at = song.slides.slice(0, beforeIndex).filter(s => !moving.has(s.id)).length;
+    rest.splice(at, 0, ...moved);
+    if (rest.every((s, i) => s.id === song.slides[i].id)) return; // same order: nothing to do (and nothing to undo)
+    setSongsList(prev => prev.map(s => s.id === songId ? { ...s, slides: rest } : s));
+  };
+
+  // ─── Slide groups (Verse 1, Chorus, Bridge…) ───
+  // Replace a song, keeping the live and preview slide copies in step (the screens follow)
+  const updateSong = (songId: string, fn: (song: PresentationItem) => PresentationItem) => {
+    const song = songsList.find(s => s.id === songId);
+    if (!song) return;
+    const next = fn(song);
+    setSongsList(prev => prev.map(s => s.id === songId ? next : s));
+    const byId = new Map(next.slides.map(s => [s.id, s] as const));
+    setLiveState(prev => prev.slide && byId.has(prev.slide.id) ? { ...prev, slide: byId.get(prev.slide.id)! } : prev);
+    setPreviewSlide(prev => prev && byId.has(prev.id) ? byId.get(prev.id)! : prev);
+  };
+
+  // Give a slide its group's saved look, if the group has one. The group's look replaces the slide's own
+  // font, size, colours, position and motion on every screen; its word styles and text boxes stay.
+  const applyGroupLook = (slide: SlideDefinition, look: GroupLook | undefined): SlideDefinition => {
+    if (!look) return slide;
+    let next: SlideDefinition = { ...(look.templateId ? linkSlideToTemplate(slide, look.templateId) : slide), outputTemplates: look.outputTemplates };
+    for (const [outputId, design] of Object.entries(next.designs || {})) next = withDesign(next, outputId, withoutOwnLook(design));
+    for (const [outputId, design] of Object.entries(look.designs || {})) next = withDesign(next, outputId, design);
+    return next;
+  };
+
+  // Slides that join a group take on its look; slides already in it keep theirs
+  const handleSetSlideGroup = (songId: string, slideIds: string[], group: string | undefined) => {
+    const ids = new Set(slideIds);
+    updateSong(songId, song => ({
+      ...song,
+      slides: song.slides.map(s => !ids.has(s.id) || s.group === group ? s
+        : applyGroupLook({ ...s, group }, group ? song.groupLooks?.[group] : undefined)),
+    }));
+  };
+
+  // Give every slide of a group (and slides tagged with it later) one slide's whole look:
+  // its template and its design on every screen
+  const handleUseLookForGroup = (songId: string, group: string, fromSlideId: string) => {
+    updateSong(songId, song => {
+      const source = song.slides.find(s => s.id === fromSlideId);
+      if (!source) return song;
+      const copyLook = (s: SlideDefinition): SlideDefinition => ({
+        ...(source.templateId ? linkSlideToTemplate(s, source.templateId) : s),
+        outputTemplates: source.outputTemplates,
+        designs: source.designs,
+      });
+      return {
+        ...song,
+        groupLooks: { ...(song.groupLooks || {}), [group]: { templateId: source.templateId, outputTemplates: source.outputTemplates, designs: source.designs } },
+        slides: song.slides.map(s => s.group === group && s.id !== source.id ? copyLook(s) : s),
+      };
+    });
+  };
+
+  // The group's slides take the template on every screen: their own font, size, colours, position and
+  // motion edits and any per-screen template go (a display style's template still wins on its screen)
+  const handleSetGroupTemplate = (songId: string, group: string, templateId: string) => {
+    updateSong(songId, song => {
+      const keptDesigns = Object.entries(song.groupLooks?.[group]?.designs || {})
+        .map(([outputId, d]) => [outputId, withoutOwnLook(d)] as const)
+        .filter(([, d]) => hasDesignContent(d));
+      return {
+        ...song,
+        groupLooks: { ...(song.groupLooks || {}), [group]: { templateId, designs: keptDesigns.length ? Object.fromEntries(keptDesigns) : undefined } },
+        // Each slide keeps its own word styles and text boxes
+        slides: song.slides.map(s => s.group === group ? applyGroupLook(s, { templateId }) : s),
+      };
+    });
+  };
+
+  // Re-detecting only gives a group's look to slides whose group changed
+  const handleAutoGroup = (songId: string) => {
+    updateSong(songId, song => {
+      const groups = detectGroups(song.slides.map(s => s.text));
+      return {
+        ...song,
+        slides: song.slides.map((s, i) => groups[i] === s.group ? s
+          : applyGroupLook({ ...s, group: groups[i] }, groups[i] ? song.groupLooks?.[groups[i]!] : undefined)),
+      };
+    });
+  };
+
+  // Remove a slide from its song. If it is on screen it stays there until the next slide goes live.
+  const handleDeleteSlideById = (slideId: string) => {
+    setSongsList(prev => prev.map(song => song.slides.some(s => s.id === slideId)
+      ? { ...song, slides: song.slides.filter(s => s.id !== slideId) }
+      : song));
+    if (designSlideId === slideId) setDesignSlideId(null);
+  };
+
+  // --- DESIGN MODE: large live canvas of one screen ---
+  const renderDesignWorkspace = () => {
+    const outputs = globalSettings.outputs.filter(o => o.enabled);
+    if (outputs.length === 0) {
+      return <div className="flex-1 flex items-center justify-center text-sm text-neutral-500">Enable an output in Settings to design it.</div>;
+    }
+    const out = outputs.find(o => o.id === designOutputId) || outputs[0];
+    const locked = !!liveState.lockedOutputs?.[out.id];
+    const slide = getDesignSlide(out.id);
+    const onAirId = locked ? liveState.frozenStates?.[out.id]?.slide?.id : liveState.slide?.id;
+    const style = getStyleForOutput(out, globalSettings);
+    const resolved = resolveSlideForOutput(slide, out, undefined, style);
+    const rawBg = locked ? liveState.frozenStates?.[out.id]?.bg : (liveState.globalBackground || out.defaultBackground);
+    const background = resolveOutputBackground(rawBg, out, globalSettings);
+    const song = getSongForSlide(slide);
+    const setDesignOn = (ids: string[], design: SlideDesign | undefined) =>
+      updateSlidesById(new Set(ids), s => withDesign(s, out.id, design));
+
+    return (
+      <LiveDesignWorkspace
+        outputs={outputs}
+        selectedOutputId={out.id}
+        onSelectOutput={setDesignOutputId}
+        templates={inlineTemplates}
+        templateInfo={getOutputTemplateInfo(out.id, slide)}
+        onAssignTemplate={(templateId) => handleAssignLiveTemplate(out.id, templateId, slide)}
+        look={{
+          global: { ...(resolved.styleOverrides?.global || {}) },
+          layout: { x: 0.05, y: 0.05, width: 0.9, height: 0.9, ...(resolved.styleOverrides?.layout || {}) },
+          animation: resolved.animation,
+          words: resolved.styleOverrides?.words,
+          lines: resolved.styleOverrides?.lines,
+        }}
+        design={slide?.designs?.[out.id]}
+        onChangeDesign={(fn) => { if (slide) updateSlidesById(new Set([slide.id]), s => withDesign(s, out.id, fn(s.designs?.[out.id] || {}))); }}
+        onCopyDesign={(toIds) => { if (slide) setDesignOn(toIds, slide.designs?.[out.id]); }}
+        onResetDesign={(ids) => setDesignOn(ids, undefined)}
+        textHidden={style?.activeLayers.slide === false}
+        status={{
+          presenting: !!liveState.isPresenting,
+          textCleared: !!(liveState.clearedOutputs?.[out.id] || liveState.clearText),
+          locked,
+        }}
+        slideIsOnAir={!!slide && slide.id === onAirId}
+        followingLive={!findSlideById(designSlideId)}
+        renderOutput={(scrollPreviewPos, draftDesign, highlightWordIndex) => (
+          // A draft (an edit still being dragged) shows here only; the screens keep the saved design
+          <AudienceOutputContent
+            output={out}
+            settings={globalSettings}
+            slide={slide && draftDesign !== undefined ? withDesign(slide, out.id, draftDesign) : slide}
+            background={background}
+            muted
+            scrollPreviewPos={scrollPreviewPos}
+            highlightWordIndex={highlightWordIndex}
+            designPreview
+          />
+        )}
+        slideText={slide ? slide.text : null}
+        onEditSlideText={(text) => { if (slide) handleEditSlideText(slide.id, text); }}
+        onSendTextBoxesToAllScreens={() => slide ? sendTextBoxesToAllScreens(slide.id, out.id) : 0}
+        canSplit={!!slide && slide.text.split('\n').length > 1}
+        onSplitSlide={() => { if (slide) handleSplitSlideById(slide.id); }}
+        onInsertSlide={song ? (index) => { const id = handleInsertSlide(song.id, index); setDesignSlideId(id); return id; } : undefined}
+        onDeleteSlide={handleDeleteSlideById}
+        onMoveSlides={song ? (ids, beforeIndex) => handleMoveSlides(song.id, ids, beforeIndex) : undefined}
+        onSetSlideGroup={song ? (ids, group) => handleSetSlideGroup(song.id, ids, group) : undefined}
+        onUseLookForGroup={song ? (group, fromSlideId) => handleUseLookForGroup(song.id, group, fromSlideId) : undefined}
+        songTitle={song?.title}
+        slides={song?.slides || []}
+        liveSlideId={liveState.slide?.id}
+        canvasSlideId={slide?.id}
+        canvasSlide={slide}
+        onPickSlide={(s) => setDesignSlideId(s.id)}
+        onGoLive={(s) => { goLive(s); setDesignSlideId(null); }}
+        onFollowLive={() => setDesignSlideId(null)}
+      />
+    );
+  };
+
+  // --- ARRANGEMENT GROUPS (right panel): the song's sections instead of every slide ---
+  // The song and "current slide" follow Design mode's canvas there, otherwise the open song and the slide on air
+  const getGroupsContext = () => {
+    if (appMode === 'design') {
+      const out = globalSettings.outputs.find(o => o.enabled && o.id === designOutputId) || globalSettings.outputs.find(o => o.enabled);
+      const slide = out ? getDesignSlide(out.id) : null;
+      return { song: getSongForSlide(slide), current: slide };
+    }
+    const song = songsList[activeItemIndex];
+    const inSong = (s: SlideDefinition | null) => !!s && !!song?.slides.some(x => x.id === s.id);
+    return { song, current: inSong(liveState.slide) ? liveState.slide : inSong(previewSlide) ? previewSlide : null };
+  };
+
+  const renderGroupsPanel = () => {
+    const { song, current } = getGroupsContext();
+    if (!song) return <div className="text-xs text-neutral-500 px-1">No song open</div>;
+    const groups: { name: string; slides: SlideDefinition[] }[] = [];
+    song.slides.forEach(s => {
+      if (!s.group) return;
+      const existing = groups.find(g => g.name === s.group);
+      if (existing) existing.slides.push(s);
+      else groups.push({ name: s.group, slides: [s] });
+    });
+    const ungrouped = song.slides.filter(s => !s.group).length;
+    // Click a group: design its first slide in Design mode, otherwise put it live
+    const openGroup = (first: SlideDefinition) => {
+      if (appMode === 'design') setDesignSlideId(first.id);
+      else if (!first.disabled) goLive(first);
+    };
+
+    return (
+      <div className="space-y-1.5">
+        <div className="flex items-center justify-between px-1">
+          <span className="text-[10px] uppercase font-bold text-neutral-500">Arrangement Groups</span>
+          <button
+            onClick={() => { handleAutoGroup(song.id); setUndoToast({ text: 'Slides grouped', at: Date.now(), kind: 'info' }); }}
+            className="flex items-center gap-1 text-[10px] font-semibold text-neutral-400 hover:text-white transition-colors"
+            title="Group the slides from section labels in the lyrics (like [Chorus] or Verse 2:), or else from repeated lyrics. Replaces the current groups; Ctrl+Z undoes it."
+          >
+            <Wand2 size={11} /> Auto-detect
+          </button>
+        </div>
+        {groups.length === 0 && (
+          <p className="text-[11px] text-neutral-500 px-1 leading-relaxed">
+            No groups yet. Click Auto-detect, or in Design mode right-click slides → Set group.
+          </p>
+        )}
+        {groups.map(g => {
+          const c = groupColors(g.name);
+          const isCurrent = !!current && g.slides.some(s => s.id === current.id);
+          const templateId = song.groupLooks?.[g.name]?.templateId;
+          const templateName = templateId ? getTemplateById(templateId)?.name : undefined;
+          return (
+            <div
+              key={g.name}
+              onClick={() => openGroup(g.slides[0])}
+              onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setGroupMenu({ x: e.clientX, y: e.clientY, songId: song.id, group: g.name }); }}
+              className={`px-2.5 py-1.5 rounded-lg cursor-pointer text-xs transition-colors ${isCurrent ? 'bg-white/15 ring-1 ring-white/20' : 'bg-white/5 hover:bg-white/10'}`}
+              title={`Click to ${appMode === 'design' ? 'design' : 'show'} its first slide · right-click for the group's look`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className={`w-2 h-2 rounded-full shrink-0 ${c.dot}`} />
+                  <span className={`truncate font-semibold ${c.text}`}>{g.name}</span>
+                </div>
+                <span className="text-[10px] text-neutral-500 shrink-0">{g.slides.length} slide{g.slides.length === 1 ? '' : 's'}</span>
+              </div>
+              {templateName && <div className="pl-4 mt-0.5 text-[10px] text-neutral-500 truncate">Template: {templateName}</div>}
+            </div>
+          );
+        })}
+        {groups.length > 0 && ungrouped > 0 && (
+          <div className="px-1 text-[10px] text-neutral-500">{ungrouped} slide{ungrouped === 1 ? '' : 's'} not in a group</div>
+        )}
+      </div>
+    );
+  };
+
+  const renderGroupMenu = () => {
+    if (!groupMenu) return null;
+    const song = songsList.find(s => s.id === groupMenu.songId);
+    if (!song) return null;
+    const { current } = getGroupsContext();
+    const currentIndex = current ? song.slides.findIndex(s => s.id === current.id) : -1;
+    const close = () => setGroupMenu(null);
+    return (
+      <GroupMenu
+        x={groupMenu.x}
+        y={groupMenu.y}
+        group={groupMenu.group}
+        slideCount={song.slides.filter(s => s.group === groupMenu.group).length}
+        templates={inlineTemplates}
+        templateId={song.groupLooks?.[groupMenu.group]?.templateId}
+        currentSlideLabel={currentIndex >= 0 ? `slide ${currentIndex + 1}` : undefined}
+        onSetTemplate={(templateId) => {
+          handleSetGroupTemplate(song.id, groupMenu.group, templateId);
+          // A screen whose style sets a template keeps showing that one
+          const key = song.slides.find(s => s.group === groupMenu.group)?.type === 'scripture' ? 'scriptureTemplateId' : 'lyricsTemplateId';
+          const screens = globalSettings.outputs.filter(o => o.enabled);
+          const styled = screens.filter(o => getStyleForOutput(o, globalSettings)?.[key]);
+          const note = styled.length === 0 ? ''
+            : styled.length === screens.length ? " · every screen keeps its style's template"
+            : ` · ${styled.map(o => o.name).join(', ')} ${styled.length === 1 ? "keeps its style's template" : "keep their styles' templates"}`;
+          setUndoToast({ text: `${groupMenu.group} now uses "${getTemplateById(templateId)?.name || 'that template'}"${note}`, at: Date.now(), kind: 'info' });
+        }}
+        onUseCurrentLook={() => {
+          if (!current || currentIndex < 0) return;
+          handleUseLookForGroup(song.id, groupMenu.group, current.id);
+          setUndoToast({ text: `Every ${groupMenu.group} slide now looks like slide ${currentIndex + 1}`, at: Date.now(), kind: 'info' });
+        }}
+        onClose={close}
+      />
     );
   };
 
@@ -3076,7 +3847,7 @@ function ControlPanel() {
 
         {/* Inspector Tabs (Groups | Metadata) */}
         <div className="h-9 px-3 border-b border-[#262635] flex items-center gap-4 shrink-0 bg-[#101015]">
-          <button 
+          <button
             onClick={() => setRightInspectorTab('groups')}
             className={`h-full text-xs font-semibold flex items-center gap-1.5 transition-colors border-b-2 ${
               rightInspectorTab === 'groups' ? 'text-pink-400 border-pink-500' : 'text-neutral-400 border-transparent hover:text-white'
@@ -3098,27 +3869,7 @@ function ControlPanel() {
 
         {/* Inspector Content */}
         <div className="flex-1 overflow-y-auto custom-scrollbar p-3">
-          {rightInspectorTab === 'groups' ? (
-            <div className="space-y-1.5">
-              <div className="text-[10px] uppercase font-bold text-neutral-500 px-1">Arrangement Groups</div>
-              {activeSong?.slides.map((s, idx) => (
-                <div 
-                  key={s.id}
-                  onClick={() => {
-                    setPreviewSlide(s);
-                    goLive(s);
-                  }}
-                  className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 cursor-pointer text-xs transition-colors"
-                >
-                  <div className="flex items-center gap-2 truncate">
-                    <span className="w-2 h-2 rounded-full bg-pink-500 shrink-0" />
-                    <span className="text-neutral-300 truncate">Slide {idx + 1}</span>
-                  </div>
-                  <span className="text-[10px] font-mono text-neutral-500">{s.text.slice(0, 15)}...</span>
-                </div>
-              ))}
-            </div>
-          ) : (
+          {rightInspectorTab === 'groups' ? renderGroupsPanel() : (
             <div className="space-y-3 text-xs">
               <div className="text-[10px] uppercase font-bold text-neutral-500">Show Properties</div>
               <div>
@@ -3447,17 +4198,7 @@ function ControlPanel() {
         return {
           ...song,
           templateId: template.id,
-          slides: song.slides.map(s => ({
-            ...s,
-            templateId: template.id,
-            animation: template.animation,
-            styleOverrides: {
-              ...(s.styleOverrides || {}),
-              global: { ...(s.styleOverrides?.global || {}), ...(template.styles.global || {}) },
-              lines: { ...(s.styleOverrides?.lines || {}), ...(template.styles.lines || {}) },
-              layout: template.styles.layout || s.styleOverrides?.layout
-            }
-          }))
+          slides: song.slides.map(s => linkSlideToTemplate(s, template.id))
         };
       }));
     },
@@ -3473,17 +4214,7 @@ function ControlPanel() {
               outputTemplates: { ...(s.outputTemplates || {}), [outputId]: template.id }
             };
           }
-          return {
-            ...s,
-            templateId: template.id,
-            animation: template.animation,
-            styleOverrides: {
-              ...(s.styleOverrides || {}),
-              global: { ...(s.styleOverrides?.global || {}), ...(template.styles.global || {}) },
-              lines: { ...(s.styleOverrides?.lines || {}), ...(template.styles.lines || {}) },
-              layout: template.styles.layout || s.styleOverrides?.layout
-            }
-          };
+          return linkSlideToTemplate(s, template.id);
         }
         return s;
       });
@@ -3508,8 +4239,18 @@ function ControlPanel() {
 
   return (
     <div className="flex flex-col h-screen bg-black text-neutral-200 overflow-hidden font-sans select-none">
-      <SettingsModal 
-        isOpen={isSettingsModalOpen} 
+      {renderGroupMenu()}
+      {undoToast && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[200] px-4 py-2 rounded-full bg-neutral-900/95 border border-white/10 shadow-2xl pointer-events-none flex items-center gap-2 text-sm text-white">
+          {undoToast.kind === 'info'
+            ? <Check size={14} className="text-emerald-400" />
+            : <RotateCcw size={14} className={undoToast.text === 'Redone' ? '-scale-x-100' : ''} />}
+          {undoToast.text}
+          <span className="text-[11px] text-neutral-500">Ctrl+Z undo · Ctrl+Y redo</span>
+        </div>
+      )}
+      <SettingsModal
+        isOpen={isSettingsModalOpen}
         onClose={() => setIsSettingsModalOpen(false)} 
         settings={globalSettings} 
         onSave={setGlobalSettings}
@@ -3531,13 +4272,10 @@ function ControlPanel() {
           <span className="font-black text-pink-500 tracking-wider text-base ml-2">FlowShow</span>
         </div>
 
-        {/* Center: Mode Tabs (Show | Edit | Stage) */}
+        {/* Center: Mode Tabs (Show | Design | Stage) */}
         <div className="flex items-center gap-1 bg-[#121218] p-0.5 rounded-lg border border-[#262635]">
           <button
-            onClick={() => {
-              setAppMode('show');
-              setIsEditingSong(false);
-            }}
+            onClick={() => setAppMode('show')}
             className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs font-semibold transition-all ${
               appMode === 'show' ? 'text-pink-400 bg-pink-500/15 shadow-sm' : 'text-neutral-400 hover:text-white'
             }`}
@@ -3546,16 +4284,14 @@ function ControlPanel() {
             Show
           </button>
           <button
-            onClick={() => {
-              setAppMode('edit');
-              setIsEditingSong(true);
-            }}
+            onClick={() => { if (appMode !== 'design') openDesign(); }}
             className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs font-semibold transition-all ${
-              appMode === 'edit' ? 'text-pink-400 bg-pink-500/15 shadow-sm' : 'text-neutral-400 hover:text-white'
+              appMode === 'design' ? 'text-pink-400 bg-pink-500/15 shadow-sm' : 'text-neutral-400 hover:text-white'
             }`}
+            title="Design the look of a screen live, on a large canvas"
           >
-            <Edit2 size={12} />
-            Edit
+            <Sparkles size={12} />
+            Design
           </button>
           <button
             onClick={() => setAppMode('stage')}
@@ -3646,9 +4382,12 @@ function ControlPanel() {
         <div className="fixed z-50 bg-[#18181B] border border-white/10 rounded-lg shadow-2xl overflow-hidden py-1.5 w-48 backdrop-blur-xl" style={{ top: contextMenu.y, left: contextMenu.x }} onClick={(e) => e.stopPropagation()}>
           {contextMenu.type === 'slide' ? (
              <>
-               <button className="w-full text-left px-4 py-2 hover:bg-white/5 text-neutral-300 hover:text-white text-sm transition-colors flex items-center gap-2" onClick={() => { setIsEditingSong(true); setEditingSlideIndex(contextMenu.id as number); setEditingSlideText(songsList[activeItemIndex].slides[contextMenu.id as number].text); setContextMenu(null); }}><Edit2 size={14}/> Edit</button>
+               <button className="w-full text-left px-4 py-2 hover:bg-white/5 text-neutral-300 hover:text-white text-sm transition-colors flex items-center gap-2" onClick={() => { openDesign(getShownSlides().slides[contextMenu.id as number]?.id ?? null); setContextMenu(null); }}><Edit2 size={14}/> Edit</button>
                <button className="w-full text-left px-4 py-2 hover:bg-white/5 text-neutral-300 hover:text-white text-sm transition-colors flex items-center gap-2" onClick={() => { handleDuplicateSlide(contextMenu.id as number); setContextMenu(null); }}><Copy size={14}/> Duplicate</button>
                <button className="w-full text-left px-4 py-2 hover:bg-white/5 text-neutral-300 hover:text-white text-sm transition-colors flex items-center gap-2" onClick={() => { handleSplitSlide(contextMenu.id as number); setContextMenu(null); }}><Split size={14}/> Split</button>
+               <div className="h-px w-full bg-white/5 my-1" />
+               <button className="w-full text-left px-4 py-2 hover:bg-white/5 text-neutral-300 hover:text-white text-sm transition-colors flex items-center gap-2" onClick={() => { handleRemoveTemplate('slide', contextMenu.id as number); setContextMenu(null); }}><X size={14}/> Remove template (this slide)</button>
+               <button className="w-full text-left px-4 py-2 hover:bg-white/5 text-neutral-300 hover:text-white text-sm transition-colors flex items-center gap-2" onClick={() => { handleRemoveTemplate('song', contextMenu.id as number); setContextMenu(null); }}><X size={14}/> Remove template (whole song)</button>
                <div className="h-px w-full bg-white/5 my-1" />
                <button className="w-full text-left px-4 py-2 hover:bg-red-500/10 text-red-400 text-sm transition-colors flex items-center gap-2" onClick={() => { handleDeleteSlide(contextMenu.id as number); setContextMenu(null); }}><Trash size={14}/> Delete</button>
              </>
@@ -3685,6 +4424,82 @@ function ControlPanel() {
   );
 }
 
+/**
+ * What an audience output draws inside its FixedStage. The projector window and the Design canvas
+ * both render through this, so the canvas is always exactly what the screen shows.
+ */
+function AudienceOutputContent({ output, settings, slide, background, hideBackground = false, hideText = false, videoRef, muted = false, scrollPreviewPos, highlightWordIndex, designPreview = false }: {
+  output: OutputSettings | undefined;
+  settings: GlobalSettings | undefined;
+  slide: SlideDefinition | null | undefined;
+  background: ReturnType<typeof resolveOutputBackground>;
+  hideBackground?: boolean;
+  hideText?: boolean;
+  videoRef?: React.RefObject<HTMLVideoElement>;
+  muted?: boolean;
+  scrollPreviewPos?: number;
+  /** Design canvas only: outline the word being styled */
+  highlightWordIndex?: number;
+  /** Design canvas only: also draw text boxes that are hidden (faded) or waiting for Go live */
+  designPreview?: boolean;
+}) {
+  const style = getStyleForOutput(output, settings);
+  const bg = hideBackground ? null : background;
+  const resolved = slide ? resolveSlideForOutput(slide, output, undefined, style) : null;
+  const design = slide?.designs?.[output?.id || 'main'];
+  const showText = !hideText && !!slide && style?.activeLayers.slide !== false;
+
+  return (
+    <>
+      {bg?.type === 'color' && <div className="absolute inset-0 w-full h-full pointer-events-none" style={{ backgroundColor: bg.color || '#000' }} />}
+
+      {bg?.type === 'ndi' && (
+        <div className="absolute inset-0 w-full h-full bg-slate-950 flex items-center justify-center overflow-hidden pointer-events-none">
+          <div className="text-center z-10 select-none">
+            <Radio size={32} className="text-red-500 mx-auto animate-pulse mb-2" />
+            <span className="text-xs font-mono text-white/90 block uppercase tracking-wider">{bg.fileName || 'NDI Live Camera Feed'}</span>
+            <span className="text-[10px] font-mono text-emerald-400">1080p60 • LIVE NDI IN</span>
+          </div>
+        </div>
+      )}
+
+      {bg?.url && bg.type === 'video' ? (
+        <video ref={videoRef} src={bg.url} className="absolute inset-0 w-full h-full object-cover opacity-80 pointer-events-none" autoPlay loop muted={muted} playsInline />
+      ) : bg?.url ? (
+        <img src={bg.url} className="absolute inset-0 w-full h-full object-cover opacity-80 pointer-events-none" alt="bg" />
+      ) : null}
+
+      {/* data-text-layer lets the Design canvas tell which words belong to the lyrics */}
+      {showText && slide && resolved && !design?.hideLyrics && (
+        <div data-text-layer="lyrics" style={{ display: 'contents' }}>
+          <SmartTextLayout
+            text={slide.text}
+            source={slide.source}
+            type={slide.type}
+            animation={resolved.animation}
+            styleOverrides={resolved.styleOverrides}
+            scrollPreviewPos={scrollPreviewPos}
+            highlightWordIndex={highlightWordIndex}
+            className="relative z-10 w-full h-full"
+          />
+        </div>
+      )}
+
+      {showText && design?.customBoxes?.filter(box => designPreview || isBoxOnScreen(box)).map(box => (
+        <div key={box.id} data-text-layer={box.id} style={{ display: 'contents' }}>
+          <SmartTextLayout
+            text={box.text}
+            type="lyrics"
+            animation={resolveCustomBoxAnimation(box)}
+            styleOverrides={{ global: box.style, layout: box.layout }}
+            className={`relative z-10 w-full h-full ${box.hidden ? 'opacity-30' : ''}`}
+          />
+        </div>
+      ))}
+    </>
+  );
+}
+
 function ProjectorView() {
   const { outputId = 'main' } = useParams();
   
@@ -3698,6 +4513,13 @@ function ProjectorView() {
   useEffect(() => {
     lockedRef.current = !!liveState.lockedOutputs?.[outputId];
   }, [liveState.lockedOutputs, outputId]);
+
+  // Projector windows are separate pages: populate the template cache so style/custom templates resolve here.
+  const [, setTemplatesVersion] = useState(0);
+  useEffect(() => {
+    getStoredTemplates().then(() => setTemplatesVersion(v => v + 1));
+  }, [liveState.settings, liveState.slide]);
+  useEffect(() => subscribeTemplates(() => setTemplatesVersion(v => v + 1)), []);
 
   useEffect(() => {
     const channel = new BroadcastChannel(CHANNEL_NAME);
@@ -3751,13 +4573,10 @@ function ProjectorView() {
   const isLocked = !!liveState.lockedOutputs?.[outputId];
   const frozenState = liveState.frozenStates?.[outputId];
   
-  let activeBg = outputConfig?.defaultBackground;
-  if (outputId === 'main' && liveState.globalBackground) {
-      activeBg = liveState.globalBackground;
-  }
+  const rawActiveBg = (liveState.globalBackground || outputConfig?.defaultBackground) ?? null;
 
   const displaySlide = isLocked ? frozenState?.slide : liveState.slide;
-  const displayBg = isLocked ? frozenState?.bg : activeBg;
+  const displayBg = resolveOutputBackground(isLocked ? frozenState?.bg : rawActiveBg, outputConfig, liveState.settings);
   const displayClearText = isLocked ? frozenState?.clearText : liveState.clearText;
 
   const hideBg = isCleared && outputId !== 'main';
@@ -3767,36 +4586,15 @@ function ProjectorView() {
     <div className="w-screen h-screen bg-transparent flex flex-col items-center justify-center overflow-hidden relative cursor-none select-none">
       <div className={`w-full h-full transition-opacity duration-700 ease-in-out ${liveState.isPresenting ? 'opacity-100' : 'opacity-0'}`}>
         <FixedStage className="w-full h-full relative">
-          
-          {!hideBg && displayBg && displayBg.type === 'color' && ( <div className="absolute inset-0 w-full h-full pointer-events-none" style={{ backgroundColor: displayBg.color || '#000' }}></div> )}
-          
-          {!hideBg && displayBg && displayBg.type === 'ndi' && (
-            <div className="absolute inset-0 w-full h-full bg-slate-950 flex items-center justify-center overflow-hidden pointer-events-none">
-              <div className="text-center z-10 select-none">
-                <Radio size={32} className="text-red-500 mx-auto animate-pulse mb-2" />
-                <span className="text-xs font-mono text-white/90 block uppercase tracking-wider">{displayBg.fileName || 'NDI Live Camera Feed'}</span>
-                <span className="text-[10px] font-mono text-emerald-400">1080p60 • LIVE NDI IN</span>
-              </div>
-            </div>
-          )}
-          
-          {!hideBg && displayBg && displayBg.url && displayBg.type === 'video' ? (
-            <video ref={projectorVideoRef} src={displayBg.url} className="absolute inset-0 w-full h-full object-cover opacity-80 pointer-events-none" autoPlay loop playsInline />
-          ) : !hideBg && displayBg && displayBg.url ? (
-            <img src={displayBg.url} className="absolute inset-0 w-full h-full object-cover opacity-80 pointer-events-none" alt="bg" />
-          ) : null}
-          
-          {!hideText && !displayClearText && displaySlide && (
-            <SmartTextLayout 
-              text={displaySlide.text} 
-              source={displaySlide.source} 
-              type={displaySlide.type} 
-              animation={resolveSlideForOutput(displaySlide, outputConfig).animation} 
-              styleOverrides={resolveSlideForOutput(displaySlide, outputConfig).styleOverrides} 
-              className="relative z-10 w-full h-full" 
-            />
-          )}
-
+          <AudienceOutputContent
+            output={outputConfig}
+            settings={liveState.settings}
+            slide={displaySlide}
+            background={displayBg}
+            hideBackground={hideBg}
+            hideText={hideText || !!displayClearText}
+            videoRef={projectorVideoRef}
+          />
         </FixedStage>
       </div>
     </div>

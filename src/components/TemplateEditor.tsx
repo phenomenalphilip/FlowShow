@@ -3,8 +3,10 @@ import {
   X, RotateCcw, Save, Copy, Play, Check, Layers, Sparkles, 
   Type, Move, Sliders, Palette, Trash2, ArrowLeft 
 } from 'lucide-react';
-import { PresentationTemplate, AnimationType, AnimationConfig } from '../lib/templates';
+import { PresentationTemplate, AnimationType, AnimationConfig, getScrollPositions, SCROLL_POS_MIN, SCROLL_POS_MAX } from '../lib/templates';
 import { SmartTextLayout } from './SmartTextLayout';
+import { FixedStage } from './FixedStage';
+import { DesignBox, Rect, getPlacement, placeAcross, placeDown, resizeBox } from './DesignCanvas';
 
 interface TemplateEditorProps {
   template: PresentationTemplate;
@@ -16,7 +18,7 @@ interface TemplateEditorProps {
   onClose: () => void;
 }
 
-const FONT_OPTIONS = [
+export const FONT_OPTIONS = [
   { label: 'Inter (Clean Sans)', value: 'Inter, sans-serif' },
   { label: 'Montserrat (Modern Bold)', value: 'Montserrat, sans-serif' },
   { label: 'Cinzel (Majestic Serif)', value: 'Cinzel, Georgia, serif' },
@@ -29,7 +31,7 @@ const FONT_OPTIONS = [
   { label: 'Plus Jakarta Sans (Crisp UI)', value: 'Plus Jakarta Sans, sans-serif' },
 ];
 
-const MOTION_PRESETS: { type: AnimationType; label: string; desc: string }[] = [
+export const MOTION_PRESETS: { type: AnimationType; label: string; desc: string }[] = [
   { type: 'blur-in', label: 'Blur Bloom', desc: 'Soft depth-of-field focus reveal' },
   { type: 'kinetic-punch', label: 'Kinetic Punch', desc: 'High energy spring overshoot' },
   { type: 'mask-slide', label: 'Mask Slide', desc: 'Sleek upward wipe mask' },
@@ -41,9 +43,12 @@ const MOTION_PRESETS: { type: AnimationType; label: string; desc: string }[] = [
   { type: 'opposing-drift', label: 'Opposing Drift', desc: 'Multi-directional kinetic reveal' },
   { type: 'rhythm-typewriter', label: 'Rhythm Typewriter', desc: 'Cadenced word typewriter' },
   { type: 'vertical-scroll', label: 'Vertical Scroll', desc: 'Large text roll from bottom to top' },
+  { type: 'word-stack', label: 'Word Stack', desc: 'Words stack vertically and pop in one by one' },
+  { type: 'flicker', label: 'Flicker', desc: 'Words flicker on like a neon sign' },
+  { type: 'bounce', label: 'Bounce', desc: 'Words bounce in (letters bounce for a single word)' },
 ];
 
-const LAYOUT_PRESETS = [
+export const LAYOUT_PRESETS = [
   { label: 'Center Stage', layout: { x: 0.08, y: 0.15, width: 0.84, height: 0.7 } },
   { label: 'Lower Third (Broadcast)', layout: { x: 0.05, y: 0.65, width: 0.9, height: 0.28 } },
   { label: 'Cinematic Widescreen', layout: { x: 0.12, y: 0.25, width: 0.76, height: 0.5 } },
@@ -61,7 +66,7 @@ const BACKGROUND_PRESETS = [
   { label: 'Broadcast Green (Chroma)', value: '#00b140' }
 ];
 
-const SHADOW_PRESETS = [
+export const SHADOW_PRESETS = [
   { label: 'None', value: 'none' },
   { label: 'Subtle Drop', value: '0 4px 12px rgba(0,0,0,0.8)' },
   { label: 'Heavy Contrast', value: '0 8px 0px rgba(0,0,0,1), 0 20px 40px rgba(0,0,0,0.9)' },
@@ -87,6 +92,9 @@ export function TemplateEditor({
 
   const globalStyle = draft.styles.global || {};
   const currentAnimation = draft.animation;
+  const isScrollTemplate = currentAnimation.type === 'vertical-scroll';
+  const scrollPos = getScrollPositions(currentAnimation);
+  const [activeScrollFader, setActiveScrollFader] = useState<'start' | 'end' | null>(null);
 
   const updateGlobalStyle = (patch: Partial<React.CSSProperties>) => {
     setDraft(prev => ({
@@ -111,6 +119,14 @@ export function TemplateEditor({
     }));
     setPreviewKey(k => k + 1);
   };
+
+  // Where the text box sits: drag it on the preview, or use the Position sliders
+  const box: Rect = { x: 0.05, y: 0.05, width: 0.9, height: 0.9, ...(draft.styles.layout || {}) };
+  const placement = getPlacement(box);
+  const updateBox = (patch: Partial<Rect>) => setDraft(prev => ({
+    ...prev,
+    styles: { ...prev.styles, layout: { x: 0.05, y: 0.05, width: 0.9, height: 0.9, ...(prev.styles.layout || {}), ...patch } }
+  }));
 
   const replay = () => setPreviewKey(k => k + 1);
 
@@ -248,27 +264,39 @@ export function TemplateEditor({
           </div>
 
           {/* 16:9 Monitor Frame */}
-          <div className="w-full max-w-3xl aspect-video rounded-xl overflow-hidden shadow-2xl border border-white/10 relative flex items-center justify-center select-none"
+          <div className="w-full max-w-3xl aspect-video rounded-xl overflow-hidden shadow-2xl border border-white/10 select-none"
             style={{ background: draft.backgroundPreview || '#09090b' }}
           >
-            <div 
-              key={previewKey} 
-              className="w-full h-full relative"
-            >
-              <SmartTextLayout
-                text={sampleText}
-                animation={draft.animation}
-                styleOverrides={{
-                  global: {
-                    ...draft.styles.global,
-                    fontSize: draft.styles.global?.fontSize || '26px'
-                  },
-                  lines: draft.styles.lines,
-                  layout: draft.styles.layout
-                }}
-                className="w-full h-full"
-              />
-            </div>
+            <FixedStage key={previewKey} className="w-full h-full">
+              {(scale: number) => (
+                <>
+                  <SmartTextLayout
+                    text={sampleText}
+                    animation={draft.animation}
+                    scrollPreviewPos={isScrollTemplate && activeScrollFader ? scrollPos[activeScrollFader] : undefined}
+                    styleOverrides={{
+                      global: draft.styles.global,
+                      lines: draft.styles.lines,
+                      layout: draft.styles.layout
+                    }}
+                    className="w-full h-full"
+                  />
+                  {isScrollTemplate && (
+                    <>
+                      <ScrollMarker pos={scrollPos.start} color="#f59e0b" label="START" />
+                      <ScrollMarker pos={scrollPos.end} color="#10b981" label="STOP" />
+                    </>
+                  )}
+                  <DesignBox
+                    rect={box}
+                    scale={scale}
+                    movable
+                    label="Drag to move · edges to resize"
+                    onChange={(r) => updateBox(r)}
+                  />
+                </>
+              )}
+            </FixedStage>
           </div>
 
           {/* Sample Text Editor Input */}
@@ -638,7 +666,9 @@ export function TemplateEditor({
                         <Move size={13} />
                         Vertical Scroll Settings
                       </span>
-                      <span className="text-[10px] text-neutral-400 font-mono">Bottom → Top</span>
+                      <span className="text-[10px] text-neutral-400 font-mono">
+                        {scrollPos.start > scrollPos.end ? 'Upward' : scrollPos.start < scrollPos.end ? 'Downward' : 'Static'}
+                      </span>
                     </div>
 
                     {/* Scroll Duration / Speed */}
@@ -667,87 +697,20 @@ export function TemplateEditor({
                       </div>
                     </div>
 
-                    {/* Start Position */}
-                    <div>
-                      <div className="flex items-center justify-between mb-1.5">
-                        <label className="text-[11px] font-bold uppercase tracking-wider text-neutral-300">
-                          Where Scrolling Starts
-                        </label>
-                        <span className="text-[11px] font-mono text-amber-400 font-bold">
-                          +{currentAnimation.scrollStart ?? 100}%
-                        </span>
-                      </div>
-                      <div className="grid grid-cols-3 gap-1.5 mb-2">
-                        {[
-                          { label: 'Offscreen Bottom', val: 100 },
-                          { label: 'Lower Half', val: 50 },
-                          { label: 'Center', val: 0 }
-                        ].map(p => (
-                          <button
-                            key={p.label}
-                            type="button"
-                            onClick={() => updateAnimation({ scrollStart: p.val })}
-                            className={`py-1 text-[10px] font-semibold rounded border transition-all cursor-pointer ${
-                              (currentAnimation.scrollStart ?? 100) === p.val
-                                ? 'bg-blue-600 text-white border-blue-500'
-                                : 'bg-[#141417] text-neutral-400 hover:text-white border-white/5'
-                            }`}
-                          >
-                            {p.label}
-                          </button>
-                        ))}
-                      </div>
-                      <input
-                        type="range"
-                        min="0"
-                        max="150"
-                        step="5"
-                        value={currentAnimation.scrollStart ?? 100}
-                        onChange={(e) => updateAnimation({ scrollStart: parseInt(e.target.value, 10) })}
-                        className="w-full accent-amber-500 cursor-pointer"
-                      />
-                    </div>
-
-                    {/* Stop / End Position */}
-                    <div>
-                      <div className="flex items-center justify-between mb-1.5">
-                        <label className="text-[11px] font-bold uppercase tracking-wider text-neutral-300">
-                          Where Scrolling Stops
-                        </label>
-                        <span className="text-[11px] font-mono text-emerald-400 font-bold">
-                          {currentAnimation.scrollEnd ?? -100}%
-                        </span>
-                      </div>
-                      <div className="grid grid-cols-3 gap-1.5 mb-2">
-                        {[
-                          { label: 'Offscreen Top', val: -100 },
-                          { label: 'Hold Center', val: 0 },
-                          { label: 'Top Third', val: -40 }
-                        ].map(p => (
-                          <button
-                            key={p.label}
-                            type="button"
-                            onClick={() => updateAnimation({ scrollEnd: p.val })}
-                            className={`py-1 text-[10px] font-semibold rounded border transition-all cursor-pointer ${
-                              (currentAnimation.scrollEnd ?? -100) === p.val
-                                ? 'bg-blue-600 text-white border-blue-500'
-                                : 'bg-[#141417] text-neutral-400 hover:text-white border-white/5'
-                            }`}
-                          >
-                            {p.label}
-                          </button>
-                        ))}
-                      </div>
-                      <input
-                        type="range"
-                        min="-150"
-                        max="50"
-                        step="5"
-                        value={currentAnimation.scrollEnd ?? -100}
-                        onChange={(e) => updateAnimation({ scrollEnd: parseInt(e.target.value, 10) })}
-                        className="w-full accent-emerald-500 cursor-pointer"
-                      />
-                    </div>
+                    <ScrollPositionFader
+                      label="Where Scrolling Starts"
+                      accent="amber"
+                      value={scrollPos.start}
+                      onChange={(v) => updateAnimation({ scrollStartPos: v })}
+                      onActiveChange={(on) => setActiveScrollFader(on ? 'start' : null)}
+                    />
+                    <ScrollPositionFader
+                      label="Where Scrolling Stops"
+                      accent="emerald"
+                      value={scrollPos.end}
+                      onChange={(v) => updateAnimation({ scrollEndPos: v })}
+                      onActiveChange={(on) => setActiveScrollFader(on ? 'end' : null)}
+                    />
 
                     {/* Loop Mode */}
                     <div>
@@ -806,6 +769,68 @@ export function TemplateEditor({
                       </div>
                     </div>
                   </div>
+                ) : currentAnimation.type === 'word-stack' ? (
+                  /* Dedicated Word Stack Controls */
+                  <div className="space-y-5 p-4 rounded-xl bg-blue-950/20 border border-blue-500/20">
+                    <div className="flex items-center justify-between border-b border-white/5 pb-2">
+                      <span className="text-xs font-bold text-blue-400 uppercase tracking-wider flex items-center gap-1.5">
+                        <Layers size={13} />
+                        Word Stack Settings
+                      </span>
+                      <span className="text-[10px] text-neutral-400 font-mono">One word per line</span>
+                    </div>
+
+                    <div>
+                      <div className="flex items-center justify-between mb-1.5">
+                        <label className="text-[11px] font-bold uppercase tracking-wider text-neutral-300">
+                          Time Between Words (Speed)
+                        </label>
+                        <span className="text-[11px] font-mono text-blue-400 font-bold">
+                          {(currentAnimation.stagger ?? 0.35).toFixed(2)}s
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min="0.05"
+                        max="2"
+                        step="0.05"
+                        value={currentAnimation.stagger ?? 0.35}
+                        onChange={(e) => updateAnimation({ stagger: parseFloat(e.target.value) })}
+                        className="w-full accent-blue-500 cursor-pointer"
+                      />
+                      <div className="flex justify-between text-[9px] text-neutral-500 font-mono mt-1">
+                        <span>Fast (0.05s)</span>
+                        <span>Steady (0.5s)</span>
+                        <span>Slow (2s)</span>
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="flex items-center justify-between mb-1.5">
+                        <label className="text-[11px] font-bold uppercase tracking-wider text-neutral-300">
+                          Pop Length
+                        </label>
+                        <span className="text-[11px] font-mono text-blue-400 font-bold">
+                          {(currentAnimation.duration ?? 0.35).toFixed(2)}s
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min="0.1"
+                        max="1"
+                        step="0.05"
+                        value={currentAnimation.duration ?? 0.35}
+                        onChange={(e) => updateAnimation({ duration: parseFloat(e.target.value) })}
+                        className="w-full accent-blue-500 cursor-pointer"
+                      />
+                    </div>
+
+                    <p className="text-[11px] text-neutral-500 leading-relaxed">
+                      Each word stays on screen as the next one pops in. Line the words up with Alignment
+                      (Typography tab), and place the stack anywhere with the Position sliders (Layout tab) or by
+                      dragging the box on the preview.
+                    </p>
+                  </div>
                 ) : (
                   <>
                     {/* Duration Slider */}
@@ -821,7 +846,7 @@ export function TemplateEditor({
                       <input
                         type="range"
                         min="0.2"
-                        max="2.5"
+                        max="10"
                         step="0.05"
                         value={currentAnimation.duration}
                         onChange={(e) => updateAnimation({ duration: parseFloat(e.target.value) })}
@@ -842,13 +867,30 @@ export function TemplateEditor({
                       <input
                         type="range"
                         min="0.00"
-                        max="0.20"
+                        max={currentAnimation.type === 'flicker' || currentAnimation.type === 'bounce' ? '1' : '0.20'}
                         step="0.01"
                         value={currentAnimation.stagger || 0.04}
                         onChange={(e) => updateAnimation({ stagger: parseFloat(e.target.value) })}
                         className="w-full accent-blue-500 cursor-pointer"
                       />
                     </div>
+
+                    {(currentAnimation.type === 'flicker' || currentAnimation.type === 'bounce') && (
+                      <label className="flex items-center justify-between gap-3 cursor-pointer">
+                        <span className="text-[11px] font-bold uppercase tracking-wider text-neutral-400">
+                          {currentAnimation.type === 'bounce' ? 'Keep Bouncing' : 'Keep Flickering'}
+                          <span className="block normal-case font-normal tracking-normal text-neutral-500 mt-0.5">
+                            {currentAnimation.type === 'bounce' ? 'Words keep gently bouncing after they land' : 'Words flicker now and then after they appear'}
+                          </span>
+                        </span>
+                        <input
+                          type="checkbox"
+                          checked={!!currentAnimation.effectLoop}
+                          onChange={(e) => updateAnimation({ effectLoop: e.target.checked })}
+                          className="w-4 h-4 accent-blue-500 cursor-pointer"
+                        />
+                      </label>
+                    )}
 
                     {/* Easing Physics */}
                     <div>
@@ -914,10 +956,24 @@ export function TemplateEditor({
             {activeTab === 'layout' && (
               <div className="space-y-5">
                 
+                {/* Position on screen: continuous sliders (or drag the box on the preview) */}
+                <div className="space-y-3 p-4 rounded-xl bg-[#141417] border border-white/5">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[11px] font-bold uppercase tracking-wider text-neutral-300">
+                      Position on Screen
+                    </label>
+                    <span className="text-[10px] text-neutral-500">or drag the box on the preview</span>
+                  </div>
+                  <PositionSlider label="Across" value={placement.across} start="Left" end="Right" onChange={(v) => updateBox(placeAcross(box, v))} />
+                  <PositionSlider label="Down" value={placement.down} start="Top" end="Bottom" onChange={(v) => updateBox(placeDown(box, v))} />
+                  <PositionSlider label="Width" unit="%" min={5} value={Math.round(box.width * 100)} start="Narrow" end="Full width" onChange={(v) => updateBox(resizeBox(box, { width: v / 100 }))} />
+                  <PositionSlider label="Height" unit="%" min={5} value={Math.round(box.height * 100)} start="Short" end="Full height" onChange={(v) => updateBox(resizeBox(box, { height: v / 100 }))} />
+                </div>
+
                 {/* Layout Presets */}
                 <div>
                   <label className="text-[11px] font-bold uppercase tracking-wider text-neutral-400 block mb-2">
-                    Screen Positioning Preset
+                    Quick Positions (optional)
                   </label>
                   <div className="grid grid-cols-1 gap-2">
                     {LAYOUT_PRESETS.map(p => (
@@ -1010,6 +1066,125 @@ export function TemplateEditor({
 
       </div>
 
+    </div>
+  );
+}
+const describeScrollPos = (v: number) =>
+  v < 0 ? 'Above screen' : v === 0 ? 'Top edge' : v < 50 ? 'Upper half' : v === 50 ? 'Center' : v < 100 ? 'Lower half' : v === 100 ? 'Bottom edge' : 'Below screen';
+
+export function ScrollPositionFader({ label, accent, value, onChange, onActiveChange }: {
+  label: string;
+  accent: 'amber' | 'emerald';
+  value: number;
+  onChange: (v: number) => void;
+  onActiveChange: (active: boolean) => void;
+}) {
+  const pct = (v: number) => `${((v - SCROLL_POS_MIN) / (SCROLL_POS_MAX - SCROLL_POS_MIN)) * 100}%`;
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-1.5">
+        <label className="text-[11px] font-bold uppercase tracking-wider text-neutral-300">{label}</label>
+        <span className={`text-[11px] font-mono font-bold ${accent === 'amber' ? 'text-amber-400' : 'text-emerald-400'}`}>
+          {value}% · {describeScrollPos(value)}
+        </span>
+      </div>
+      <input
+        type="range"
+        min={SCROLL_POS_MIN}
+        max={SCROLL_POS_MAX}
+        step="1"
+        value={value}
+        onChange={(e) => onChange(parseInt(e.target.value, 10))}
+        onPointerDown={() => {
+          onActiveChange(true);
+          window.addEventListener('pointerup', () => onActiveChange(false), { once: true });
+        }}
+        onPointerCancel={() => onActiveChange(false)}
+        onKeyDown={() => onActiveChange(true)}
+        onKeyUp={() => onActiveChange(false)}
+        onBlur={() => onActiveChange(false)}
+        className={`w-full cursor-pointer ${accent === 'amber' ? 'accent-amber-500' : 'accent-emerald-500'}`}
+      />
+      <div className="relative h-3 text-[9px] text-neutral-500 font-mono mt-1">
+        {[
+          { v: SCROLL_POS_MIN, t: 'Above', align: 'left' },
+          { v: 0, t: 'Top', align: 'center' },
+          { v: 50, t: 'Center', align: 'center' },
+          { v: 100, t: 'Bottom', align: 'center' },
+          { v: SCROLL_POS_MAX, t: 'Below', align: 'right' },
+        ].map(m => (
+          <span
+            key={m.t}
+            className="absolute whitespace-nowrap"
+            style={{
+              left: pct(m.v),
+              transform: m.align === 'center' ? 'translateX(-50%)' : m.align === 'right' ? 'translateX(-100%)' : undefined
+            }}
+          >
+            {m.t}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Shows on the editor preview where the text centre starts/stops. Off-screen positions pin to the edge.
+export function ScrollMarker({ pos, color, label }: { pos: number; color: string; label: string }) {
+  const offTop = pos < 0;
+  const offBottom = pos > 100;
+  const top = Math.min(100, Math.max(0, pos));
+  return (
+    <div
+      className="absolute left-0 right-0 pointer-events-none z-20"
+      style={{ top: `${top}%`, borderTop: `4px dashed ${color}`, opacity: 0.85 }}
+    >
+      <span
+        className="absolute left-4 px-3 py-1 rounded font-mono font-bold"
+        style={{
+          fontSize: 28,
+          background: color,
+          color: '#000',
+          top: offBottom || top > 90 ? undefined : 6,
+          bottom: offBottom || top > 90 ? 6 : undefined,
+        }}
+      >
+        {label} {offTop ? `↑ ${pos}%` : offBottom ? `↓ ${pos}%` : `${pos}%`}
+      </span>
+    </div>
+  );
+}
+
+function PositionSlider({ label, value, onChange, start, end, min = 0, unit }: {
+  label: string;
+  value: number;
+  onChange: (v: number) => void;
+  start: string;
+  end: string;
+  min?: number;
+  /** Show the raw value with this unit instead of a Left/Centre/Right style readout */
+  unit?: string;
+}) {
+  const readout = unit ? `${value}${unit}` : value <= 0 ? start : value >= 100 ? end : value === 50 ? 'Centre' : `${value}%`;
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-1">
+        <span className="text-[11px] text-neutral-400">{label}</span>
+        <span className="text-[11px] font-mono text-blue-400">{readout}</span>
+      </div>
+      <input
+        type="range"
+        min={min}
+        max={100}
+        step={1}
+        value={value}
+        onChange={(e) => onChange(parseInt(e.target.value, 10))}
+        className="w-full accent-blue-500 cursor-pointer"
+      />
+      <div className="flex justify-between text-[9px] text-neutral-600 font-mono mt-0.5">
+        <span>{start}</span>
+        <span>{end}</span>
+      </div>
     </div>
   );
 }

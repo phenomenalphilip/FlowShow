@@ -6,6 +6,7 @@ interface FixedStageProps {
   className?: string;
   width?: number;
   height?: number;
+  key?: string;
 }
 
 export function FixedStage({ children, className = '', width = 1920, height = 1080 }: FixedStageProps) {
@@ -15,8 +16,9 @@ export function FixedStage({ children, className = '', width = 1920, height = 10
   
   return (
     <div ref={ref} className={`relative overflow-hidden ${className}`}>
-      <div 
+      <div
         className="absolute left-1/2 top-1/2"
+        data-fixed-stage="1"
         style={{
           width: `${width}px`,
           height: `${height}px`,

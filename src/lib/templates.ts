@@ -12,7 +12,10 @@ export type AnimationType =
   | 'acoustic-dissolve' 
   | 'opposing-drift' 
   | 'rhythm-typewriter'
-  | 'vertical-scroll';
+  | 'vertical-scroll'
+  | 'word-stack'
+  | 'flicker'
+  | 'bounce';
 
 export interface AnimationConfig {
   type: AnimationType;
@@ -20,9 +23,31 @@ export interface AnimationConfig {
   stagger?: number; // delay between words/lines
   easing?: 'easeOut' | 'backOut' | 'easeInOut' | 'spring' | 'linear';
   ambientLoop?: 'breathe' | 'drift' | 'none';
-  scrollStart?: number; // start offset percentage (e.g. 100 for bottom offscreen, 50 for mid)
-  scrollEnd?: number;   // end offset percentage (e.g. -100 for top offscreen, 0 for center pause)
+  /** Flicker / Bounce: keep flickering or bouncing after the words have appeared */
+  effectLoop?: boolean;
+  /** @deprecated offset from layout centre; superseded by scrollStartPos/scrollEndPos */
+  scrollStart?: number;
+  /** @deprecated offset from layout centre; superseded by scrollStartPos/scrollEndPos */
+  scrollEnd?: number;
+  /** Screen position of the text's centre where scrolling starts, % of screen height (0 = top edge, 100 = bottom edge) */
+  scrollStartPos?: number;
+  /** Screen position of the text's centre where scrolling stops, % of screen height (0 = top edge, 100 = bottom edge) */
+  scrollEndPos?: number;
   scrollLoop?: boolean; // whether to loop continuously
+}
+
+/** Used when a slide or text box picks a motion but nothing underneath it has one */
+export const FALLBACK_ANIMATION: AnimationConfig = { type: 'blur-in', duration: 0.6, stagger: 0.06, easing: 'easeOut', ambientLoop: 'none' };
+
+export const SCROLL_POS_MIN = -100;
+export const SCROLL_POS_MAX = 200;
+
+/** Absolute start/stop screen positions, converting legacy offsets (relative to screen centre). */
+export function getScrollPositions(anim?: AnimationConfig): { start: number; end: number } {
+  return {
+    start: anim?.scrollStartPos ?? 50 + (anim?.scrollStart ?? 100),
+    end: anim?.scrollEndPos ?? 50 + (anim?.scrollEnd ?? -100),
+  };
 }
 
 export interface PresentationTemplate {
@@ -344,6 +369,35 @@ export const STARTER_TEMPLATES: PresentationTemplate[] = [
     backgroundPreview: 'linear-gradient(180deg, #09090b 0%, #18181b 100%)'
   },
   {
+    id: 'word-stack-pop',
+    name: 'Word Stack Pop',
+    category: 'modern',
+    tagline: 'Words stack and pop in one by one',
+    description: 'Each word sits on its own line and pops in after the one before it, building the phrase vertically. Set the speed with "Time between words" and drag the stack to any side of the screen.',
+    styles: {
+      global: {
+        fontFamily: 'Bebas Neue, sans-serif',
+        fontWeight: '400',
+        fontSize: '150px',
+        color: '#ffffff',
+        letterSpacing: '0.03em',
+        lineHeight: '1',
+        textTransform: 'uppercase',
+        textAlign: 'left',
+        textShadow: '0 8px 24px rgba(0,0,0,0.85)'
+      },
+      layout: { x: 0.06, y: 0.06, width: 0.4, height: 0.88 }
+    },
+    animation: {
+      type: 'word-stack',
+      duration: 0.35,
+      stagger: 0.35,
+      easing: 'backOut',
+      ambientLoop: 'none'
+    },
+    backgroundPreview: 'radial-gradient(ellipse at left, #1e1b4b 0%, #030712 100%)'
+  },
+  {
     id: 'vertical-scroll-marquee',
     name: 'Vertical Teleprompter & Roll',
     category: 'worship',
@@ -368,8 +422,8 @@ export const STARTER_TEMPLATES: PresentationTemplate[] = [
       type: 'vertical-scroll',
       duration: 14,
       easing: 'linear',
-      scrollStart: 100,
-      scrollEnd: -100,
+      scrollStartPos: 150,
+      scrollEndPos: -50,
       scrollLoop: true,
       ambientLoop: 'none'
     },
@@ -382,13 +436,68 @@ const TEMPLATE_OVERRIDES_KEY = 'flowshow_template_overrides';
 
 let templateMemoryCache: PresentationTemplate[] = [...STARTER_TEMPLATES];
 
+// ─── Template sync between windows ────────────────────────────────────────────
+// Every window (control panel + projectors) keeps saved template changes in memory and
+// shares them over a BroadcastChannel, so they reach the screens without a reload.
+const TEMPLATE_CHANNEL = 'flowshow_template_channel';
+const liveEdits: Record<string, PresentationTemplate> = {};
+const deletedIds = new Set<string>();
+const listeners = new Set<() => void>();
+
+const templateChannel: BroadcastChannel | null =
+  typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel(TEMPLATE_CHANNEL) : null;
+
+const notifyTemplateListeners = () => listeners.forEach(fn => fn());
+
+function putInCache(t: PresentationTemplate) {
+  liveEdits[t.id] = t;
+  deletedIds.delete(t.id);
+  const idx = templateMemoryCache.findIndex(x => x.id === t.id);
+  templateMemoryCache = idx >= 0
+    ? templateMemoryCache.map(x => x.id === t.id ? t : x)
+    : [...templateMemoryCache, t];
+}
+
+function removeFromCache(id: string) {
+  delete liveEdits[id];
+  deletedIds.add(id);
+  templateMemoryCache = templateMemoryCache.filter(t => t.id !== id || STARTER_TEMPLATES.some(s => s.id === id));
+  const starter = STARTER_TEMPLATES.find(s => s.id === id);
+  if (starter) templateMemoryCache = templateMemoryCache.map(t => t.id === id ? starter : t);
+}
+
+if (templateChannel) {
+  templateChannel.onmessage = (e) => {
+    if (e.data?.type === 'TEMPLATE_UPDATED' && e.data.template) {
+      putInCache(e.data.template);
+      notifyTemplateListeners();
+    } else if (e.data?.type === 'TEMPLATE_DELETED' && e.data.id) {
+      removeFromCache(e.data.id);
+      notifyTemplateListeners();
+    }
+  };
+}
+
+/** Re-render hook source: called whenever any template changes in this or another window. */
+export function subscribeTemplates(fn: () => void): () => void {
+  listeners.add(fn);
+  return () => { listeners.delete(fn); };
+}
+
+export function getCachedTemplates(): PresentationTemplate[] {
+  return templateMemoryCache;
+}
+
 export async function getStoredTemplates(): Promise<PresentationTemplate[]> {
   try {
     const overrides = ((await get(TEMPLATE_OVERRIDES_KEY)) as Record<string, PresentationTemplate>) || {};
     const customList = ((await get(CUSTOM_TEMPLATES_KEY)) as PresentationTemplate[]) || [];
 
     const baseMerged = STARTER_TEMPLATES.map(t => overrides[t.id] ? { ...t, ...overrides[t.id] } : t);
-    templateMemoryCache = [...baseMerged, ...customList];
+    // Live edits not yet persisted (or received from another window) win over storage
+    const merged = [...baseMerged, ...customList.filter(t => !deletedIds.has(t.id))].map(t => liveEdits[t.id] || t);
+    const extraLive = Object.values(liveEdits).filter(t => !merged.some(m => m.id === t.id));
+    templateMemoryCache = [...merged, ...extraLive];
     return templateMemoryCache;
   } catch (err) {
     console.warn('Failed to load templates from IndexedDB, falling back to starters', err);
@@ -397,6 +506,14 @@ export async function getStoredTemplates(): Promise<PresentationTemplate[]> {
 }
 
 export async function saveTemplate(template: PresentationTemplate): Promise<PresentationTemplate[]> {
+  putInCache(template);
+  notifyTemplateListeners();
+  templateChannel?.postMessage({ type: 'TEMPLATE_UPDATED', template });
+  await persistTemplate(template);
+  return await getStoredTemplates();
+}
+
+async function persistTemplate(template: PresentationTemplate): Promise<void> {
   const isStarter = STARTER_TEMPLATES.some(t => t.id === template.id);
   if (isStarter) {
     const overrides = ((await get(TEMPLATE_OVERRIDES_KEY)) as Record<string, PresentationTemplate>) || {};
@@ -412,10 +529,12 @@ export async function saveTemplate(template: PresentationTemplate): Promise<Pres
     }
     await set(CUSTOM_TEMPLATES_KEY, customList);
   }
-  return await getStoredTemplates();
 }
 
 export async function deleteTemplate(templateId: string): Promise<PresentationTemplate[]> {
+  removeFromCache(templateId);
+  notifyTemplateListeners();
+  templateChannel?.postMessage({ type: 'TEMPLATE_DELETED', id: templateId });
   const isStarter = STARTER_TEMPLATES.some(t => t.id === templateId);
   if (isStarter) {
     const overrides = ((await get(TEMPLATE_OVERRIDES_KEY)) as Record<string, PresentationTemplate>) || {};

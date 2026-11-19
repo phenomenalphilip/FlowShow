@@ -44,12 +44,14 @@ const DEFAULT_RULES: StyleRule[] = [
 export function tokenize(
   text: string, 
   rules: StyleRule[] = DEFAULT_RULES,
-  wordOverrides?: { [index: number]: React.CSSProperties }
+  wordOverrides?: { [index: number]: React.CSSProperties },
+  /** Number of words on earlier lines, so word numbers run across the whole slide */
+  startIndex = 0
 ): Token[] {
   const regex = /(\([^)]+\)|\[[^\]]+\]|\s+|[.,;!?()[\]{}'"]+)/g;
   const parts = text.split(regex).filter(Boolean);
   
-  let wordIndex = 0;
+  let wordIndex = startIndex;
 
   return parts.map((part, index) => {
     let type: TokenType = 'word';
