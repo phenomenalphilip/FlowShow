@@ -1,5 +1,5 @@
 import { BrowserRouter, Routes, Route, useParams } from 'react-router-dom';
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { 
   Settings, MonitorPlay, Mic, BookOpen, Music, Image as ImageIcon, 
   Plus, Search, List, Grid, X, LayoutTemplate, Layers, Play,
@@ -33,6 +33,9 @@ import { LiveDesignWorkspace, OutputTemplateInfo } from './components/LiveDesign
 import { detectGroups, groupColors } from './lib/slideGroups';
 import { GroupMenu } from './components/GroupMenu';
 import { TemplateGalleryModal, TemplateGalleryModalProps, InlineTemplateGrid } from './components/TemplateGalleryModal';
+import { StageScreen } from './components/StageScreen';
+import { StageWorkspace } from './components/StageWorkspace';
+import { DEFAULT_LYRICS_STAGE_LAYOUT, DEFAULT_SCRIPTURE_STAGE_LAYOUT, stageLayoutFor } from './lib/stageLayouts';
 
 export type SlideType = 'lyrics' | 'scripture' | 'blank' | 'media';
 
@@ -61,6 +64,8 @@ export type SlideDefinition = {
 };
 
 export type OutputType = 'hdmi' | 'ndi';
+/** Who a screen (or a style) is for: the audience ('normal') or the people on stage */
+export type ScreenKind = 'normal' | 'stage';
 
 // ─── Presentation Style ───────────────────────────────────────────────────────
 // A named, reusable style that an output can reference.
@@ -69,6 +74,12 @@ export type OutputType = 'hdmi' | 'ndi';
 export interface PresentationStyle {
   id: string;
   name: string;
+  /** Chosen when the style is made; a stage output only offers Stage styles and vice versa (missing = normal) */
+  kind?: ScreenKind;
+  /** Stage styles: the stage layout for lyrics/song slides */
+  lyricsStageLayoutId?: string;
+  /** Stage styles: the stage layout for scripture slides */
+  scriptureStageLayoutId?: string;
   backgroundColor: string;
   backgroundMedia?: { url: string; type: 'image' | 'video'; fileName?: string } | null;
   transition: 'none' | 'fade' | 'slide' | 'zoom';
@@ -95,13 +106,30 @@ export const DEFAULT_STYLES: PresentationStyle[] = [
     aspectRatio: '16:9',
     activeLayers: { background: true, slide: true, overlays: true },
   },
+  {
+    id: 'stage',
+    name: 'Stage',
+    kind: 'stage',
+    lyricsStageLayoutId: DEFAULT_LYRICS_STAGE_LAYOUT,
+    scriptureStageLayoutId: DEFAULT_SCRIPTURE_STAGE_LAYOUT,
+    backgroundColor: '#000000',
+    transition: 'none',
+    mediaFit: 'contain',
+    aspectRatio: '16:9',
+    activeLayers: { background: true, slide: true, overlays: true },
+  },
 ];
+
+/** Built-in styles come back on every load, so they can't be deleted */
+export const BUILT_IN_STYLE_IDS = new Set(DEFAULT_STYLES.map(s => s.id));
 
 export interface OutputSettings {
   id: string;
   name: string;
   enabled: boolean;
   outputType: OutputType;
+  /** Chosen when the output is made: an audience screen ('normal', the default) or a stage screen */
+  kind?: ScreenKind;
   /** Id of the PresentationStyle this output uses */
   styleId?: string;
   defaultTemplateId?: string;
@@ -190,6 +218,51 @@ export type PresentState = {
   };
   settings?: GlobalSettings;
   isPresenting?: boolean;
+  /** What stage screens show besides the live slide */
+  stage?: StageInfo;
+};
+
+export interface StageInfo {
+  /** The slide that comes after the live one (null at the end) */
+  nextSlide: SlideDefinition | null;
+  songTitle?: string;
+}
+
+export const isStageOutput = (o: OutputSettings | null | undefined) => o?.kind === 'stage';
+export const styleKind = (s: PresentationStyle): ScreenKind => s.kind ?? 'normal';
+
+/** A new output with the usual defaults. A stage output starts with the first Stage style. */
+export const createOutput = (type: OutputType, kind: ScreenKind, existing: OutputSettings[], styles: PresentationStyle[]): OutputSettings => {
+  const stage = kind === 'stage';
+  const name = stage ? `Stage ${existing.filter(isStageOutput).length + 1}`
+    : type === 'ndi' ? `NDI ${existing.filter(o => o.outputType === 'ndi').length + 1}`
+    : `Output ${existing.length + 1}`;
+  return {
+    id: `${type}-${Date.now()}`,
+    name,
+    enabled: true,
+    outputType: type,
+    kind,
+    styleId: stage ? styles.find(s => styleKind(s) === 'stage')?.id : undefined,
+    defaultBackground: null,
+    lyricsStyleEnabled: false,
+    lyricsStyle: { color: '#ffffff', textAlign: 'center', fontWeight: 'bold', fontStyle: 'normal' },
+    bibleStyleEnabled: false,
+    bibleStyle: {
+      global: { color: '#ffffff', textAlign: 'left', fontWeight: 'normal', fontStyle: 'normal' },
+      layout: { x: 0.1, y: 0.1, width: 0.8, height: 0.6 },
+      sourceGlobal: { color: '#fbbf24', textAlign: 'left', fontWeight: 'bold', fontStyle: 'normal' },
+      sourceLayout: { x: 0.1, y: 0.8, width: 0.8, height: 0.1 }
+    },
+    ...(type === 'ndi' ? {
+      ndiStreamName: `FlowShow NDI - ${name}`,
+      ndiGroup: '',
+      ndiResolution: '1920x1080' as const,
+      ndiFrameRate: 30,
+      ndiTransparent: !stage,
+      ndiAlphaChannel: false
+    } : {})
+  };
 };
 
 const CHANNEL_NAME = 'flowshow_presence_channel';
@@ -464,6 +537,7 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
   const [isScanningNdi, setIsScanningNdi] = useState(false);
   const [showNewOutputModal, setShowNewOutputModal] = useState(false);
   const [selectedNewOutputType, setSelectedNewOutputType] = useState<OutputType | null>(null);
+  const [selectedNewOutputKind, setSelectedNewOutputKind] = useState<ScreenKind | null>(null);
 
   // While open, only pull in styles (saved instantly) so other unsaved edits survive.
   const wasOpenRef = useRef(false);
@@ -518,41 +592,17 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
     }
   };
 
-  const addNewOutput = (type: OutputType) => {
-    const existingOfType = local.outputs.filter(o => o.outputType === type);
-    const count = existingOfType.length + 1;
-    const id = `${type}-${Date.now()}`;
-    const name = type === 'ndi' ? `NDI ${count}` : `Output ${local.outputs.length + 1}`;
-
-    const newOutput: OutputSettings = {
-      id,
-      name,
-      enabled: true,
-      outputType: type,
-      defaultBackground: type === 'ndi' ? null : null,
-      lyricsStyleEnabled: false,
-      lyricsStyle: { color: '#ffffff', textAlign: 'center', fontWeight: 'bold', fontStyle: 'normal' },
-      bibleStyleEnabled: false,
-      bibleStyle: {
-        global: { color: '#ffffff', textAlign: 'left', fontWeight: 'normal', fontStyle: 'normal' },
-        layout: { x: 0.1, y: 0.1, width: 0.8, height: 0.6 },
-        sourceGlobal: { color: '#fbbf24', textAlign: 'left', fontWeight: 'bold', fontStyle: 'normal' },
-        sourceLayout: { x: 0.1, y: 0.8, width: 0.8, height: 0.1 }
-      },
-      ...(type === 'ndi' ? {
-        ndiStreamName: `FlowShow NDI - NDI ${count}`,
-        ndiGroup: '',
-        ndiResolution: '1920x1080' as const,
-        ndiFrameRate: 30,
-        ndiTransparent: true,
-        ndiAlphaChannel: false
-      } : {})
-    };
-
-    setLocal(prev => ({ ...prev, outputs: [...prev.outputs, newOutput] }));
-    setActiveOutputId(id);
+  const closeNewOutputModal = () => {
     setShowNewOutputModal(false);
     setSelectedNewOutputType(null);
+    setSelectedNewOutputKind(null);
+  };
+
+  const addNewOutput = (type: OutputType, kind: ScreenKind) => {
+    const newOutput = createOutput(type, kind, local.outputs, local.styles);
+    setLocal(prev => ({ ...prev, outputs: [...prev.outputs, newOutput] }));
+    setActiveOutputId(newOutput.id);
+    closeNewOutputModal();
   };
 
   const removeOutput = (id: string) => {
@@ -587,6 +637,7 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
     if (!activeOutput) return null;
     const isNdi = activeOutput.outputType === 'ndi';
     const isHdmi = activeOutput.outputType === 'hdmi' || !activeOutput.outputType;
+    const isStage = isStageOutput(activeOutput);
 
     return (
       <div className="space-y-6">
@@ -606,17 +657,26 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
           </div>
         </div>
 
-        {/* Style selector — pick which PresentationStyle this output uses */}
+        {/* What the screen is for (chosen when it was made) */}
+        <div className="bg-[#121214] border border-white/5 rounded-xl px-5 py-3 flex items-center gap-3">
+          {isStage ? <Tv size={16} className="text-amber-400 shrink-0" /> : <MonitorPlay size={16} className="text-blue-400 shrink-0" />}
+          <div className="text-xs">
+            <span className="font-semibold text-white">{isStage ? 'Stage output' : 'Normal output'}</span>
+            <span className="text-neutral-500"> · {isStage ? 'for the people on stage: current and next slide, section name and time' : 'for the audience: lyrics and scripture in your templates and designs'}</span>
+          </div>
+        </div>
+
+        {/* Style selector — pick which PresentationStyle this output uses (only styles of the same kind) */}
         <div className="bg-[#121214] border border-white/5 rounded-xl p-5 space-y-3">
           <div className="flex items-center justify-between">
-            <span className="text-[11px] font-bold uppercase tracking-wider text-blue-400">Style</span>
+            <span className="text-[11px] font-bold uppercase tracking-wider text-blue-400">{isStage ? 'Stage style' : 'Style'}</span>
             <select
               value={activeOutput.styleId || ''}
               onChange={(e) => updateOutput(activeOutputId, { styleId: e.target.value || undefined })}
               className="bg-[#1e1e28] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white outline-none focus:border-blue-500 cursor-pointer min-w-[160px]"
             >
-              <option value="">(None — use output defaults)</option>
-              {local.styles.map(s => (
+              <option value="">{isStage ? '(None — ready-made stage layouts)' : '(None — use output defaults)'}</option>
+              {local.styles.filter(s => styleKind(s) === (isStage ? 'stage' : 'normal')).map(s => (
                 <option key={s.id} value={s.id}>{s.name}</option>
               ))}
             </select>
@@ -624,6 +684,13 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
           {activeOutput.styleId && (() => {
             const sel = local.styles.find(s => s.id === activeOutput.styleId);
             if (!sel) return null;
+            if (isStage) return (
+              <div className="text-[11px] text-neutral-500 leading-relaxed space-y-0.5 pt-1 border-t border-white/5">
+                <div>Lyrics layout: <span className="text-neutral-300">{stageLayoutFor(sel, { type: 'lyrics' }).name}</span></div>
+                <div>Scripture layout: <span className="text-neutral-300">{stageLayoutFor(sel, { type: 'scripture' }).name}</span></div>
+                <div>Background: <span className="text-neutral-300">{sel.backgroundColor}</span></div>
+              </div>
+            );
             return (
               <div className="text-[11px] text-neutral-500 leading-relaxed space-y-0.5 pt-1 border-t border-white/5">
                 {sel.lyricsTemplateId && <div>Lyrics template: <span className="text-neutral-300">{getTemplateById(sel.lyricsTemplateId)?.name || sel.lyricsTemplateId}</span></div>}
@@ -751,7 +818,8 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
           </div>
         )}
 
-        {/* Default Background (shared by all types) */}
+        {/* Default Background and style overrides: audience screens only (a stage screen's look comes from its Stage style) */}
+        {!isStage && <>
         <div className="bg-[#121214] border border-white/5 p-5 rounded-xl shadow-sm">
           <h3 className="text-[11px] font-bold uppercase tracking-wider text-neutral-400 mb-3">Default Background</h3>
           <div className="flex flex-wrap items-center gap-3">
@@ -815,6 +883,7 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
         {/* Style Overrides */}
         <StyleConfigurator title="Override Lyrics Style" enabled={activeOutput.lyricsStyleEnabled} onToggle={(val: boolean) => updateOutput(activeOutputId, { lyricsStyleEnabled: val })} onEdit={() => setEditingStyleType('lyrics')} />
         <StyleConfigurator title="Override Bible Style" enabled={activeOutput.bibleStyleEnabled} onToggle={(val: boolean) => updateOutput(activeOutputId, { bibleStyleEnabled: val })} onEdit={() => setEditingStyleType('scripture')} />
+        </>}
       </div>
     );
   };
@@ -915,8 +984,11 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
                                     <div className={`w-2 h-2 rounded-full ${out.enabled ? (isNdi ? 'bg-emerald-400 animate-pulse' : 'bg-blue-400') : 'bg-neutral-600'}`} />
                                     <span className="text-xs font-bold text-white truncate">{out.name}</span>
                                   </div>
-                                  <span className="text-[9px] font-mono uppercase px-1 rounded bg-white/5 text-neutral-400">
-                                    {isNdi ? 'NDI' : 'HDMI'}
+                                  <span className="flex items-center gap-1 shrink-0">
+                                    {isStageOutput(out) && <span className="text-[9px] font-bold uppercase px-1 rounded bg-amber-500/15 text-amber-400">Stage</span>}
+                                    <span className="text-[9px] font-mono uppercase px-1 rounded bg-white/5 text-neutral-400">
+                                      {isNdi ? 'NDI' : 'HDMI'}
+                                    </span>
                                   </span>
                                 </div>
 
@@ -964,17 +1036,22 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
                     styles={local.styles}
                     templates={allTemplates}
                     onReloadTemplates={() => getStoredTemplates().then(setAllTemplates)}
-                    onAdd={() => {
-                      const newStyle: PresentationStyle = {
+                    onAdd={(kind) => {
+                      const base: PresentationStyle = {
                         id: `style-${Date.now()}`,
                         name: 'New Style',
+                        kind,
                         backgroundColor: '#000000',
                         transition: 'fade',
                         mediaFit: 'contain',
                         aspectRatio: '16:9',
                         activeLayers: { background: true, slide: true, overlays: true },
                       };
+                      const newStyle: PresentationStyle = kind === 'stage'
+                        ? { ...base, name: 'New Stage Style', transition: 'none', lyricsStageLayoutId: DEFAULT_LYRICS_STAGE_LAYOUT, scriptureStageLayoutId: DEFAULT_SCRIPTURE_STAGE_LAYOUT }
+                        : base;
                       commitStyleChange(prev => ({ ...prev, styles: [...prev.styles, newStyle] }));
+                      return newStyle.id;
                     }}
                     onUpdate={(updated) => commitStyleChange(prev => ({
                       ...prev,
@@ -1015,15 +1092,17 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
                          {/* Checkmark icon as shown in Image c & e */}
                          <Check size={12} className={out.enabled ? (isNdi ? 'text-emerald-400' : 'text-blue-400') : 'text-neutral-600'} />
                          <span className="truncate">{out.name}</span>
+                         {isStageOutput(out) && <Tv size={10} className="text-amber-400 shrink-0" />}
                          {isNdi && <Wifi size={10} className="text-neutral-500 shrink-0" />}
                          {local.outputs.length > 1 && (
-                           <button
+                           <span
+                             role="button"
                              onClick={(e) => { e.stopPropagation(); removeOutput(out.id); }}
                              className="ml-1 opacity-0 group-hover:opacity-100 text-neutral-600 hover:text-red-400 transition-all shrink-0"
                              title="Remove output"
                            >
                              <X size={12} />
-                           </button>
+                           </span>
                          )}
                        </button>
                      );
@@ -1056,18 +1135,43 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
        </div>
     </div>
 
-    {/* MODAL: Choose Output Type */}
+    {/* MODAL: New output — what it's for, then how it connects */}
     {showNewOutputModal && (
       <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-[60] flex items-center justify-center p-4">
         <div className="bg-[#121214] border border-white/10 rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden">
           <div className="p-6 flex items-center justify-between border-b border-white/5">
-            <h3 className="text-lg font-bold text-white">Choose output type</h3>
-            <button onClick={() => { setShowNewOutputModal(false); setSelectedNewOutputType(null); }} className="text-neutral-400 hover:text-white transition-colors">
+            <h3 className="text-lg font-bold text-white">New output</h3>
+            <button onClick={closeNewOutputModal} className="text-neutral-400 hover:text-white transition-colors">
               <X size={20} />
             </button>
           </div>
 
           <div className="p-6 space-y-6">
+            {/* Who the screen is for */}
+            <div>
+              <span className="text-xs font-bold uppercase tracking-wider text-neutral-400 mb-3 block">What is it for?</span>
+              <div className="grid grid-cols-2 gap-3">
+                {([
+                  ['normal', 'Normal', 'For the audience: lyrics and scripture in your templates and designs', MonitorPlay],
+                  ['stage', 'Stage', 'For the people on stage: current and next slide, section name and time', Tv],
+                ] as const).map(([kind, title, text, Icon]) => (
+                  <button
+                    key={kind}
+                    onClick={() => setSelectedNewOutputKind(kind)}
+                    className={`p-4 rounded-xl border-2 flex flex-col items-center gap-2 text-center transition-all ${
+                      selectedNewOutputKind === kind
+                        ? 'border-blue-500 bg-blue-600/10 text-white'
+                        : 'border-white/10 bg-[#09090B] text-neutral-400 hover:border-white/30 hover:text-white'
+                    }`}
+                  >
+                    <Icon size={28} className={selectedNewOutputKind === kind ? 'text-blue-400' : ''} />
+                    <span className="font-bold text-sm">{title}</span>
+                    <span className="text-[11px] text-neutral-500 leading-snug">{text}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
             {/* Local Output */}
             <div>
               <span className="text-xs font-bold uppercase tracking-wider text-neutral-400 mb-3 block">Local output</span>
@@ -1142,9 +1246,10 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
 
           <div className="p-5 border-t border-white/5 bg-[#09090B]">
             <button
-              onClick={() => { if (selectedNewOutputType) addNewOutput(selectedNewOutputType); }}
-              disabled={!selectedNewOutputType}
+              onClick={() => { if (selectedNewOutputType && selectedNewOutputKind) addNewOutput(selectedNewOutputType, selectedNewOutputKind); }}
+              disabled={!selectedNewOutputType || !selectedNewOutputKind}
               className="w-full py-3 bg-blue-600 hover:bg-blue-500 disabled:opacity-30 disabled:hover:bg-blue-600 text-white font-bold text-sm rounded-xl transition-all shadow-lg"
+              title={!selectedNewOutputKind ? 'Choose Normal or Stage first' : !selectedNewOutputType ? 'Choose how it connects' : undefined}
             >
               Confirm
             </button>
@@ -1260,6 +1365,8 @@ function ControlPanel() {
   const [designSlideId, setDesignSlideId] = useState<string | null>(null);
   // Right-click menu on a group in the Arrangement Groups panel
   const [groupMenu, setGroupMenu] = useState<{ x: number; y: number; songId: string; group: string } | null>(null);
+  // Stage output shown in the Stage tab (null = the first one)
+  const [stageOutputId, setStageOutputId] = useState<string | null>(null);
   // Open Design mode on a slide, or (null) on whatever slide is on air
   const openDesign = (slideId: string | null = null) => {
     setDesignSlideId(slideId);
@@ -1925,16 +2032,49 @@ function ControlPanel() {
     }
   }, [activeBibleId]);
 
+  // What stage screens show besides the live slide: what comes next (as the arrow keys would go) and the song title
+  const stageInfo = useMemo<StageInfo>(() => {
+    const live = liveState.slide;
+    if (!live) return { nextSlide: null };
+    const nextIn = (slides: SlideDefinition[], i: number) => slides.slice(i + 1).find(s => !s.disabled) ?? null;
+    // The open setlist item first (its order is what's being presented), continuing into the next item
+    if (activeTab === 'setlist') {
+      const itemIndex = serviceSetlist.items.findIndex(it => it.id === activeSetlistItemId);
+      const item = serviceSetlist.items[itemIndex];
+      const i = item?.slides?.findIndex(s => s.id === live.id) ?? -1;
+      if (item?.slides && i >= 0) {
+        const following = serviceSetlist.items.slice(itemIndex + 1).find(it => it.type !== 'header' && it.slides?.length);
+        return { nextSlide: nextIn(item.slides, i) ?? following?.slides?.[0] ?? null, songTitle: item.title };
+      }
+    }
+    for (const song of songsList) {
+      const i = song.slides.findIndex(s => s.id === live.id);
+      if (i >= 0) return { nextSlide: nextIn(song.slides, i), songTitle: song.title };
+    }
+    // A Bible verse: the verse after it in the open Bible
+    const ref = live.type === 'scripture' ? live.source?.match(/^(.+)\s+(\d+):(\d+)$/) : null;
+    if (ref && activeBibleData) {
+      const book = activeBibleData.books.find(b => b.name === ref[1]);
+      const chapter = book?.chapters.find(c => c.c === Number(ref[2]));
+      const at = chapter ? chapter.verses.findIndex(x => x.v === Number(ref[3])) : -1;
+      const v = at >= 0 ? chapter!.verses[at + 1] : undefined;
+      if (book && chapter && v) {
+        return { nextSlide: { id: `b-${book.name}-${chapter.c}-${v.v}`, text: v.lines.join('\n'), source: `${book.name} ${chapter.c}:${v.v}`, type: 'scripture' } };
+      }
+    }
+    return { nextSlide: null };
+  }, [liveState.slide, songsList, serviceSetlist, activeTab, activeSetlistItemId, activeBibleData]);
+
   useEffect(() => {
     const channel = new BroadcastChannel(CHANNEL_NAME);
-    channel.postMessage(liveState);
+    channel.postMessage({ ...liveState, stage: stageInfo });
     channel.onmessage = (event) => {
       if (event.data?.type === 'REQUEST_CURRENT_STATE') {
-        channel.postMessage({ ...liveState, videoInitState: { time: liveVideoRef.current?.currentTime || 0, muted: isVideoMuted, playing: isVideoPlaying } });
+        channel.postMessage({ ...liveState, stage: stageInfo, videoInitState: { time: liveVideoRef.current?.currentTime || 0, muted: isVideoMuted, playing: isVideoPlaying } });
       }
     };
     return () => channel.close();
-  }, [liveState, isVideoMuted, isVideoPlaying]);
+  }, [liveState, stageInfo, isVideoMuted, isVideoPlaying]);
 
   const openProjector = async (outputId: string) => {
     const config = liveState.settings?.outputs.find(o => o.id === outputId);
@@ -3016,6 +3156,25 @@ function ControlPanel() {
   };
 
   // --- FREESHOW-STYLE OUTPUT PREVIEW THUMBNAILS ---
+  // What a stage output shows right now (the projector window draws the same)
+  const renderStageScreenFor = (out: OutputSettings) => {
+    const locked = !!liveState.lockedOutputs?.[out.id];
+    const frozen = liveState.frozenStates?.[out.id];
+    const slide = locked ? frozen?.slide : liveState.slide;
+    const cleared = !!liveState.clearedOutputs?.[out.id] || !!(locked ? frozen?.clearText : liveState.clearText);
+    const style = getStyleForOutput(out, globalSettings);
+    return (
+      <StageScreen
+        layout={stageLayoutFor(style, slide)}
+        slide={slide}
+        nextSlide={stageInfo.nextSlide}
+        songTitle={stageInfo.songTitle}
+        background={style?.backgroundColor}
+        hideText={cleared}
+      />
+    );
+  };
+
   const renderOutputMonitorCard = (out: OutputSettings) => {
     const isOutLocked = !!liveState.lockedOutputs?.[out.id];
     const isOutCleared = !!liveState.clearedOutputs?.[out.id];
@@ -3025,6 +3184,7 @@ function ControlPanel() {
     const displayBg = resolveOutputBackground(rawCardBg, out, globalSettings);
     const displayClearText = isOutLocked ? frozenState?.clearText : liveState.clearText;
     const isLive = liveState.isPresenting && !isOutCleared && !isOutLocked;
+    const isStage = isStageOutput(out);
 
     return (
       <div key={out.id} className="flex-1 min-w-0 flex flex-col">
@@ -3033,9 +3193,12 @@ function ControlPanel() {
             <div className={`w-2 h-2 rounded-full ${isLive ? 'bg-red-500 animate-pulse' : 'bg-neutral-600'}`} />
             <span className="text-[11px] font-bold text-neutral-300 truncate">{out.name}</span>
           </div>
-          {out.outputType === 'ndi' && (
-            <span className="text-[9px] font-bold px-1 py-0.5 bg-purple-500/20 text-purple-400 rounded">NDI</span>
-          )}
+          <div className="flex items-center gap-1 shrink-0">
+            {isStage && <span className="text-[9px] font-bold px-1 py-0.5 bg-amber-500/15 text-amber-400 rounded">STAGE</span>}
+            {out.outputType === 'ndi' && (
+              <span className="text-[9px] font-bold px-1 py-0.5 bg-purple-500/20 text-purple-400 rounded">NDI</span>
+            )}
+          </div>
         </div>
         <div 
           onClick={() => openProjector(out.id)}
@@ -3050,15 +3213,17 @@ function ControlPanel() {
           )}
 
           <FixedStage className="w-full h-full pointer-events-none bg-transparent">
-            <AudienceOutputContent
-              output={out}
-              settings={globalSettings}
-              slide={displaySlide}
-              background={displayBg}
-              hideBackground={isOutCleared && out.id !== 'main'}
-              hideText={isOutCleared || !!displayClearText}
-              muted
-            />
+            {isStage ? renderStageScreenFor(out) : (
+              <AudienceOutputContent
+                output={out}
+                settings={globalSettings}
+                slide={displaySlide}
+                background={displayBg}
+                hideBackground={isOutCleared && out.id !== 'main'}
+                hideText={isOutCleared || !!displayClearText}
+                muted
+              />
+            )}
 
             {isOutCleared && (
               <div className="absolute inset-0 flex items-center justify-center bg-black/60"><EyeOff size={16} className="text-neutral-500" /></div>
@@ -3207,25 +3372,25 @@ function ControlPanel() {
   const renderCenterSlideArea = () => {
     if (appMode === 'design') return renderDesignWorkspace();
 
-    // Stage monitor mode
+    // Stage tab: what the stage screens show, and the layouts their Stage styles use
     if (appMode === 'stage') {
-      const activeSlide = previewSlide || liveState.slide;
+      const stageOutputs = globalSettings.outputs.filter(isStageOutput);
       return (
-        <div className="flex-1 flex flex-col bg-black text-white p-6 justify-between select-none">
-          <div className="flex justify-between items-center border-b border-white/10 pb-3">
-            <span className="text-xs uppercase font-bold tracking-widest text-pink-400">STAGE CONFIDENCE DISPLAY</span>
-            <span className="text-sm font-mono text-neutral-400">{new Date().toLocaleTimeString()}</span>
-          </div>
-          <div className="flex-1 flex flex-col items-center justify-center text-center p-6">
-            <h1 className="text-4xl lg:text-5xl font-black leading-tight max-w-4xl tracking-wide text-white">
-              {activeSlide ? activeSlide.text : 'FLOWSHOW STAGE READY'}
-            </h1>
-          </div>
-          <div className="border-t border-white/10 pt-3 flex justify-between items-center text-xs text-neutral-400 font-mono">
-            <span>Next: {songsList[activeItemIndex]?.slides?.[1]?.text?.slice(0, 40) || 'End of Item'}...</span>
-            <button onClick={() => setAppMode('show')} className="text-pink-400 hover:underline">Exit Stage View</button>
-          </div>
-        </div>
+        <StageWorkspace
+          outputs={stageOutputs}
+          selectedOutputId={stageOutputId}
+          onSelectOutput={setStageOutputId}
+          styles={globalSettings.styles.filter(s => styleKind(s) === 'stage')}
+          onSetOutputStyle={(outputId, styleId) => setGlobalSettings(prev => ({ ...prev, outputs: prev.outputs.map(o => o.id === outputId ? { ...o, styleId } : o) }))}
+          onUpdateStyle={(style) => setGlobalSettings(prev => ({ ...prev, styles: prev.styles.map(s => s.id === style.id ? style : s) }))}
+          renderScreen={renderStageScreenFor}
+          liveSlideType={liveState.slide?.type}
+          onAddStageOutput={() => {
+            const out = createOutput('hdmi', 'stage', globalSettings.outputs, globalSettings.styles);
+            setGlobalSettings(prev => ({ ...prev, outputs: [...prev.outputs, out] }));
+            setStageOutputId(out.id);
+          }}
+        />
       );
     }
 
@@ -3442,7 +3607,7 @@ function ControlPanel() {
 
   // Show one output's text boxes (and hidden lyrics) for this slide on every other enabled output
   const sendTextBoxesToAllScreens = (slideId: string, fromOutputId: string) => {
-    const targets = globalSettings.outputs.filter(o => o.enabled && o.id !== fromOutputId).map(o => o.id);
+    const targets = globalSettings.outputs.filter(o => o.enabled && !isStageOutput(o) && o.id !== fromOutputId).map(o => o.id);
     updateSlidesById(new Set([slideId]), s => {
       const source = s.designs?.[fromOutputId];
       return targets.reduce((acc, id) => withDesign(acc, id, {
@@ -3597,9 +3762,10 @@ function ControlPanel() {
 
   // --- DESIGN MODE: large live canvas of one screen ---
   const renderDesignWorkspace = () => {
-    const outputs = globalSettings.outputs.filter(o => o.enabled);
+    // Design is for audience screens; stage screens get their look from Stage styles
+    const outputs = globalSettings.outputs.filter(o => o.enabled && !isStageOutput(o));
     if (outputs.length === 0) {
-      return <div className="flex-1 flex items-center justify-center text-sm text-neutral-500">Enable an output in Settings to design it.</div>;
+      return <div className="flex-1 flex items-center justify-center text-sm text-neutral-500">Enable a normal (audience) output in Settings to design it.</div>;
     }
     const out = outputs.find(o => o.id === designOutputId) || outputs[0];
     const locked = !!liveState.lockedOutputs?.[out.id];
@@ -3773,7 +3939,7 @@ function ControlPanel() {
           handleSetGroupTemplate(song.id, groupMenu.group, templateId);
           // A screen whose style sets a template keeps showing that one
           const key = song.slides.find(s => s.group === groupMenu.group)?.type === 'scripture' ? 'scriptureTemplateId' : 'lyricsTemplateId';
-          const screens = globalSettings.outputs.filter(o => o.enabled);
+          const screens = globalSettings.outputs.filter(o => o.enabled && !isStageOutput(o));
           const styled = screens.filter(o => getStyleForOutput(o, globalSettings)?.[key]);
           const note = styled.length === 0 ? ''
             : styled.length === screens.length ? " · every screen keeps its style's template"
@@ -4179,7 +4345,7 @@ function ControlPanel() {
   const templateGalleryHandlers = {
     mode: "manage" as const,
     availableSongs: songsList,
-    availableOutputs: globalSettings.outputs.filter(o => o.enabled),
+    availableOutputs: globalSettings.outputs.filter(o => o.enabled && !isStageOutput(o)),
     onApplyToSong: (template, songId, outputId) => {
       const targetSongId = songId || songsList[activeItemIndex]?.id;
       if (!targetSongId) return;
@@ -4546,6 +4712,7 @@ function ProjectorView() {
                  return {
                      ...incoming,
                      slide: prev.slide,
+                     stage: prev.stage,
                      globalBackground: prev.globalBackground,
                      clearText: prev.clearText,
                      clearedOutputs: {
@@ -4581,20 +4748,32 @@ function ProjectorView() {
 
   const hideBg = isCleared && outputId !== 'main';
   const hideText = isCleared;
+  const stageStyle = getStyleForOutput(outputConfig, liveState.settings);
 
   return (
     <div className="w-screen h-screen bg-transparent flex flex-col items-center justify-center overflow-hidden relative cursor-none select-none">
       <div className={`w-full h-full transition-opacity duration-700 ease-in-out ${liveState.isPresenting ? 'opacity-100' : 'opacity-0'}`}>
         <FixedStage className="w-full h-full relative">
-          <AudienceOutputContent
-            output={outputConfig}
-            settings={liveState.settings}
-            slide={displaySlide}
-            background={displayBg}
-            hideBackground={hideBg}
-            hideText={hideText || !!displayClearText}
-            videoRef={projectorVideoRef}
-          />
+          {isStageOutput(outputConfig) ? (
+            <StageScreen
+              layout={stageLayoutFor(stageStyle, displaySlide)}
+              slide={displaySlide}
+              nextSlide={liveState.stage?.nextSlide}
+              songTitle={liveState.stage?.songTitle}
+              background={stageStyle?.backgroundColor}
+              hideText={hideText || !!displayClearText}
+            />
+          ) : (
+            <AudienceOutputContent
+              output={outputConfig}
+              settings={liveState.settings}
+              slide={displaySlide}
+              background={displayBg}
+              hideBackground={hideBg}
+              hideText={hideText || !!displayClearText}
+              videoRef={projectorVideoRef}
+            />
+          )}
         </FixedStage>
       </div>
     </div>
