@@ -1,14 +1,16 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Plus, Trash, Pencil, Check, X, Sparkles, MonitorPlay, Tv } from 'lucide-react';
-import { BUILT_IN_STYLE_IDS, PresentationStyle, ScreenKind, SlideDefinition, styleKind } from '../App';
+import { BUILT_IN_STYLE_IDS, PresentationStyle, ScreenKind, styleKind } from '../App';
 import { PresentationTemplate } from '../lib/templates';
-import { STAGE_LAYOUTS, stageLayoutFor } from '../lib/stageLayouts';
+import { STAGE_LAYOUTS, STAGE_SAMPLES, StageLayout, stageLayoutFor } from '../lib/stageLayouts';
 import { InlineTemplateGrid } from './TemplateGalleryModal';
 import { FixedStage } from './FixedStage';
 import { StageScreen } from './StageScreen';
 
 interface StylesManagerProps {
   styles: PresentationStyle[];
+  /** Stage layouts made in the Stage tab */
+  stageLayouts: StageLayout[];
   templates: PresentationTemplate[];
   /** Make a new style of this kind; returns its id */
   onAdd: (kind: ScreenKind) => string;
@@ -17,24 +19,12 @@ interface StylesManagerProps {
   onReloadTemplates?: () => void;
 }
 
-// Sample slides for the stage layout previews
-const SAMPLE: Record<'lyrics' | 'scripture', { slide: SlideDefinition; next: SlideDefinition }> = {
-  lyrics: {
-    slide: { id: 'sample-1', type: 'lyrics', group: 'Verse 1', text: 'Amazing grace, how sweet the sound\nThat saved a wretch like me' },
-    next: { id: 'sample-2', type: 'lyrics', group: 'Chorus', text: 'My chains are gone\nI\'ve been set free' },
-  },
-  scripture: {
-    slide: { id: 'sample-3', type: 'scripture', source: 'John 3:16', text: 'For God so loved the world, that he gave his only begotten Son, that whosoever believeth in him should not perish, but have everlasting life.' },
-    next: { id: 'sample-4', type: 'scripture', source: 'John 3:17', text: 'For God sent not his Son into the world to condemn the world; but that the world through him might be saved.' },
-  },
-};
-
 const KIND_INFO: Record<ScreenKind, { title: string; hint: string; Icon: typeof Tv }> = {
   normal: { title: 'Normal style', hint: 'For audience screens: templates for lyrics and scripture', Icon: MonitorPlay },
   stage: { title: 'Stage style', hint: 'For stage screens: what the people on stage see', Icon: Tv },
 };
 
-export function StylesManager({ styles, templates, onAdd, onUpdate, onDelete, onReloadTemplates }: StylesManagerProps) {
+export function StylesManager({ styles, stageLayouts, templates, onAdd, onUpdate, onDelete, onReloadTemplates }: StylesManagerProps) {
   const [selectedId, setSelectedId] = useState<string>(styles[0]?.id || '');
   const [editingName, setEditingName] = useState(false);
   const [nameInput, setNameInput] = useState('');
@@ -211,7 +201,7 @@ export function StylesManager({ styles, templates, onAdd, onUpdate, onDelete, on
               {/* Stage layouts, one for lyrics and one for scripture, with a preview of each */}
               <Section title="Stage layouts">
                 {(['lyrics', 'scripture'] as const).map(type => {
-                  const layout = stageLayoutFor(selected, { type });
+                  const layout = stageLayoutFor(selected, { type }, stageLayouts);
                   const field = type === 'lyrics' ? 'lyricsStageLayoutId' : 'scriptureStageLayoutId';
                   return (
                     <div key={type} className="px-4 py-3 flex items-start gap-4">
@@ -223,17 +213,24 @@ export function StylesManager({ styles, templates, onAdd, onUpdate, onDelete, on
                           className="w-full bg-[#1e1e28] border border-white/10 rounded px-2 py-1 text-xs text-white outline-none cursor-pointer"
                           title={`Stage layout for ${type === 'lyrics' ? 'song' : 'scripture'} slides`}
                         >
-                          {STAGE_LAYOUTS.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
+                          <optgroup label="Ready-made">
+                            {STAGE_LAYOUTS.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
+                          </optgroup>
+                          {stageLayouts.length > 0 && (
+                            <optgroup label="Your layouts">
+                              {stageLayouts.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
+                            </optgroup>
+                          )}
                         </select>
-                        <span className="block text-[10px] text-neutral-500 leading-snug">{layout.description}</span>
+                        <span className="block text-[10px] text-neutral-500 leading-snug">{layout.description || 'Your own layout, made in the Stage tab.'}</span>
                       </div>
                       <div className="flex-1 min-w-0 aspect-video rounded-lg overflow-hidden border border-white/10 bg-black" data-stage-preview={type}>
                         <FixedStage className="w-full h-full pointer-events-none">
                           <StageScreen
                             layout={layout}
-                            slide={SAMPLE[type].slide}
-                            nextSlide={SAMPLE[type].next}
-                            songTitle="Amazing Grace"
+                            slide={STAGE_SAMPLES[type].slide}
+                            nextSlide={STAGE_SAMPLES[type].next}
+                            songTitle={STAGE_SAMPLES[type].songTitle}
                             background={selected.backgroundColor}
                           />
                         </FixedStage>

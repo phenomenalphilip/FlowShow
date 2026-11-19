@@ -34,8 +34,8 @@ import { detectGroups, groupColors } from './lib/slideGroups';
 import { GroupMenu } from './components/GroupMenu';
 import { TemplateGalleryModal, TemplateGalleryModalProps, InlineTemplateGrid } from './components/TemplateGalleryModal';
 import { StageScreen } from './components/StageScreen';
-import { StageWorkspace } from './components/StageWorkspace';
-import { DEFAULT_LYRICS_STAGE_LAYOUT, DEFAULT_SCRIPTURE_STAGE_LAYOUT, stageLayoutFor } from './lib/stageLayouts';
+import { StageWorkspace, StageLiveData } from './components/StageWorkspace';
+import { DEFAULT_LYRICS_STAGE_LAYOUT, DEFAULT_SCRIPTURE_STAGE_LAYOUT, StageLayout, stageLayoutFor } from './lib/stageLayouts';
 
 export type SlideType = 'lyrics' | 'scripture' | 'blank' | 'media';
 
@@ -158,6 +158,8 @@ export interface OutputSettings {
 export interface GlobalSettings {
   outputs: OutputSettings[];
   styles: PresentationStyle[];
+  /** Stage layouts made in the Stage tab (the ready-made ones aren't stored) */
+  stageLayouts?: StageLayout[];
 }
 
 const DEFAULT_SETTINGS: GlobalSettings = {
@@ -686,8 +688,8 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
             if (!sel) return null;
             if (isStage) return (
               <div className="text-[11px] text-neutral-500 leading-relaxed space-y-0.5 pt-1 border-t border-white/5">
-                <div>Lyrics layout: <span className="text-neutral-300">{stageLayoutFor(sel, { type: 'lyrics' }).name}</span></div>
-                <div>Scripture layout: <span className="text-neutral-300">{stageLayoutFor(sel, { type: 'scripture' }).name}</span></div>
+                <div>Lyrics layout: <span className="text-neutral-300">{stageLayoutFor(sel, { type: 'lyrics' }, local.stageLayouts).name}</span></div>
+                <div>Scripture layout: <span className="text-neutral-300">{stageLayoutFor(sel, { type: 'scripture' }, local.stageLayouts).name}</span></div>
                 <div>Background: <span className="text-neutral-300">{sel.backgroundColor}</span></div>
               </div>
             );
@@ -1034,6 +1036,7 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
                {activeTab === 'style' && (
                   <StylesManager
                     styles={local.styles}
+                    stageLayouts={local.stageLayouts || []}
                     templates={allTemplates}
                     onReloadTemplates={() => getStoredTemplates().then(setAllTemplates)}
                     onAdd={(kind) => {
@@ -1377,7 +1380,6 @@ function ControlPanel() {
   const [selectedCategory, setSelectedCategory] = useState<'all' | 'Presentations' | 'Songs'>('all');
   const [rightInspectorTab, setRightInspectorTab] = useState<'groups' | 'metadata'>('groups');
   const [selectedProjectFolder, setSelectedProjectFolder] = useState<string>('11/18/26');
-  const [slideViewMode, setSlideViewMode] = useState<'grid' | 'list'>('grid');
 
   // Inline template grid
   const [inlineTemplates, setInlineTemplates] = useState<PresentationTemplate[]>(STARTER_TEMPLATES);
@@ -1624,8 +1626,9 @@ function ControlPanel() {
     restoreSongs(next);
     setUndoToast({ text: 'Redone', at: Date.now() });
   };
-  const undoActionsRef = useRef({ undo: undoSongChange, redo: redoSongChange });
-  undoActionsRef.current = { undo: undoSongChange, redo: redoSongChange };
+  const undoActionsRef = useRef({ undo: undoSongChange, redo: redoSongChange, allowed: () => true });
+  // The Stage tab undoes its own layout edits
+  undoActionsRef.current = { undo: undoSongChange, redo: redoSongChange, allowed: () => appMode !== 'stage' };
 
   useEffect(() => {
     const NON_TEXT_INPUTS = new Set(['range', 'checkbox', 'radio', 'color', 'button', 'submit', 'reset', 'file']);
@@ -1639,7 +1642,7 @@ function ControlPanel() {
       const el = e.target as HTMLElement | null;
       const typing = el instanceof HTMLTextAreaElement || !!el?.isContentEditable
         || (el instanceof HTMLInputElement && !NON_TEXT_INPUTS.has(el.type));
-      if (typing) return;
+      if (typing || !undoActionsRef.current.allowed()) return;
       e.preventDefault();
       if (isUndo) undoActionsRef.current.undo(); else undoActionsRef.current.redo();
     };
@@ -3157,20 +3160,27 @@ function ControlPanel() {
 
   // --- FREESHOW-STYLE OUTPUT PREVIEW THUMBNAILS ---
   // What a stage output shows right now (the projector window draws the same)
-  const renderStageScreenFor = (out: OutputSettings) => {
+  const getStageLiveData = (out: OutputSettings): StageLiveData => {
     const locked = !!liveState.lockedOutputs?.[out.id];
     const frozen = liveState.frozenStates?.[out.id];
-    const slide = locked ? frozen?.slide : liveState.slide;
-    const cleared = !!liveState.clearedOutputs?.[out.id] || !!(locked ? frozen?.clearText : liveState.clearText);
+    return {
+      slide: locked ? frozen?.slide : liveState.slide,
+      nextSlide: stageInfo.nextSlide,
+      songTitle: stageInfo.songTitle,
+      hideText: !!liveState.clearedOutputs?.[out.id] || !!(locked ? frozen?.clearText : liveState.clearText),
+    };
+  };
+  const renderStageScreenFor = (out: OutputSettings) => {
+    const live = getStageLiveData(out);
     const style = getStyleForOutput(out, globalSettings);
     return (
       <StageScreen
-        layout={stageLayoutFor(style, slide)}
-        slide={slide}
-        nextSlide={stageInfo.nextSlide}
-        songTitle={stageInfo.songTitle}
+        layout={stageLayoutFor(style, live.slide, globalSettings.stageLayouts)}
+        slide={live.slide}
+        nextSlide={live.nextSlide}
+        songTitle={live.songTitle}
         background={style?.backgroundColor}
-        hideText={cleared}
+        hideText={live.hideText}
       />
     );
   };
@@ -3381,10 +3391,14 @@ function ControlPanel() {
           selectedOutputId={stageOutputId}
           onSelectOutput={setStageOutputId}
           styles={globalSettings.styles.filter(s => styleKind(s) === 'stage')}
+          customLayouts={globalSettings.stageLayouts || []}
           onSetOutputStyle={(outputId, styleId) => setGlobalSettings(prev => ({ ...prev, outputs: prev.outputs.map(o => o.id === outputId ? { ...o, styleId } : o) }))}
-          onUpdateStyle={(style) => setGlobalSettings(prev => ({ ...prev, styles: prev.styles.map(s => s.id === style.id ? style : s) }))}
-          renderScreen={renderStageScreenFor}
-          liveSlideType={liveState.slide?.type}
+          onChangeLayouts={(layouts, style) => setGlobalSettings(prev => ({
+            ...prev,
+            stageLayouts: layouts,
+            styles: style ? prev.styles.map(s => s.id === style.id ? style : s) : prev.styles,
+          }))}
+          getLive={getStageLiveData}
           onAddStageOutput={() => {
             const out = createOutput('hdmi', 'stage', globalSettings.outputs, globalSettings.styles);
             setGlobalSettings(prev => ({ ...prev, outputs: [...prev.outputs, out] }));
@@ -3498,27 +3512,6 @@ function ControlPanel() {
               })}
             </div>
           )}
-        </div>
-
-        {/* Bottom Arrangement Bar */}
-        <div className="h-10 px-4 border-t border-[#262635] flex items-center justify-between shrink-0 bg-[#101015]">
-          <button 
-            onClick={() => {
-              const name = prompt('Arrangement Name:', 'Default Arrangement');
-              if (name) alert(`Created arrangement: ${name}`);
-            }}
-            className="text-xs text-neutral-400 hover:text-white px-3 py-1 rounded-full bg-white/5 hover:bg-white/10 border border-white/5 transition-colors flex items-center gap-1.5 font-medium"
-          >
-            <Plus size={12} className="text-pink-400" />
-            New arrangement
-          </button>
-          <div className="flex items-center gap-2 text-neutral-400">
-            <button onClick={handlePrevSlide} className="p-1 hover:text-white hover:bg-white/5 rounded transition-colors" title="Previous Slide"><ChevronLeft size={16} /></button>
-            <button onClick={handleNextSlide} className="p-1 hover:text-white hover:bg-white/5 rounded transition-colors" title="Next Slide"><ChevronRight size={16} /></button>
-            <div className="w-px h-3.5 bg-white/10 mx-1" />
-            <button className="p-1 hover:text-white transition-colors" title="Slide Timer"><Clock size={14} /></button>
-            <button onClick={() => setSlideViewMode(prev => prev === 'grid' ? 'list' : 'grid')} className="p-1 hover:text-white transition-colors" title="Toggle Grid/List"><Grid size={14} /></button>
-          </div>
         </div>
       </div>
     );
@@ -4756,7 +4749,7 @@ function ProjectorView() {
         <FixedStage className="w-full h-full relative">
           {isStageOutput(outputConfig) ? (
             <StageScreen
-              layout={stageLayoutFor(stageStyle, displaySlide)}
+              layout={stageLayoutFor(stageStyle, displaySlide, liveState.settings?.stageLayouts)}
               slide={displaySlide}
               nextSlide={liveState.stage?.nextSlide}
               songTitle={liveState.stage?.songTitle}

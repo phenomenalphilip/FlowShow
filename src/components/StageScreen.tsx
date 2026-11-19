@@ -70,6 +70,8 @@ function StageItemView({ item, slide, nextSlide, songTitle }: {
     }
     case 'section':
       return <StageLabel rect={item.rect} style={style}>{slide?.group || (slide ? songTitle : '') || ''}</StageLabel>;
+    case 'song-title':
+      return <StageLabel rect={item.rect} style={style}>{slide ? songTitle || '' : ''}</StageLabel>;
     case 'reference':
       return <StageLabel rect={item.rect} style={style}>{slide?.source || ''}</StageLabel>;
     case 'clock':

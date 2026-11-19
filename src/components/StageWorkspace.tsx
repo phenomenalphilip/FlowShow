@@ -1,8 +1,24 @@
-import React from 'react';
-import { Plus, Tv } from 'lucide-react';
-import type { OutputSettings, PresentationStyle } from '../App';
-import { STAGE_LAYOUTS, stageLayoutFor } from '../lib/stageLayouts';
+import React, { useEffect, useRef, useState } from 'react';
+import { AlignCenter, AlignLeft, AlignRight, Check, Copy, Eye, EyeOff, Pencil, Plus, Trash2, Tv, Type } from 'lucide-react';
+import type { OutputSettings, PresentationStyle, SlideDefinition } from '../App';
+import {
+  STAGE_ITEM_KINDS, STAGE_LAYOUTS, STAGE_SAMPLES, StageItem, StageItemKind, StageLayout, StageRect,
+  allStageLayouts, isReadyMadeStageLayout, stageLayoutFor,
+} from '../lib/stageLayouts';
 import { FixedStage } from './FixedStage';
+import { StageScreen } from './StageScreen';
+import { DesignBox, InlineTextEditor } from './DesignCanvas';
+import { FONT_OPTIONS } from './TemplateEditor';
+import { Phase, WEIGHTS, selectCls, segBtn, smallBtn, GroupLabel, Divider, SizeStepper, ColorField } from './DesignControls';
+
+/** What a stage output shows right now */
+export interface StageLiveData {
+  slide: SlideDefinition | null | undefined;
+  nextSlide: SlideDefinition | null;
+  songTitle?: string;
+  /** The slide text is cleared on this screen */
+  hideText: boolean;
+}
 
 interface StageWorkspaceProps {
   /** Every stage output */
@@ -11,22 +27,186 @@ interface StageWorkspaceProps {
   onSelectOutput: (id: string) => void;
   /** Stage styles only */
   styles: PresentationStyle[];
+  /** Layouts people made (the ready-made ones come from the library) */
+  customLayouts: StageLayout[];
   onSetOutputStyle: (outputId: string, styleId: string | undefined) => void;
-  onUpdateStyle: (style: PresentationStyle) => void;
-  /** Draws what the output shows right now, inside a FixedStage */
-  renderScreen: (output: OutputSettings) => React.ReactNode;
-  /** Type of the live slide ('lyrics', 'scripture'…), or undefined when nothing is live */
-  liveSlideType?: string;
+  /** Save the layouts, and a changed style if given, as one change */
+  onChangeLayouts: (layouts: StageLayout[], style?: PresentationStyle) => void;
+  getLive: (output: OutputSettings) => StageLiveData;
   onAddStageOutput: () => void;
 }
 
-const selectCls = 'bg-[#1e1e28] border border-white/10 rounded px-2 py-1 text-xs text-white outline-none cursor-pointer focus:border-pink-500 disabled:opacity-40 disabled:cursor-not-allowed';
+type Slot = 'lyrics' | 'scripture';
+type Snapshot = { layouts: StageLayout[]; style?: PresentationStyle };
 
-/** The Stage tab: what each stage screen shows right now, and which layouts its Stage style uses */
+const UNDO_MERGE_MS = 500;
+const UNDO_LIMIT = 100;
+const NON_TEXT_INPUTS = new Set(['range', 'checkbox', 'radio', 'color', 'button', 'submit', 'reset', 'file']);
+const ADDABLE: StageItemKind[] = ['current-slide', 'next-slide', 'section', 'song-title', 'reference', 'clock', 'text'];
+
+const parseNum = (v: unknown, fallback: number) => {
+  const n = parseFloat(String(v ?? ''));
+  return Number.isFinite(n) ? n : fallback;
+};
+const itemName = (item: StageItem) => item.kind === 'text' && item.text?.trim()
+  ? (item.text.trim().length > 14 ? `${item.text.trim().slice(0, 13)}…` : item.text.trim())
+  : STAGE_ITEM_KINDS[item.kind].label;
+const hasWords = (item: StageItem) => item.kind === 'text' || item.kind === 'next-slide';
+
+/** The Stage tab: design the layouts a stage screen uses, on a canvas showing that screen */
 export function StageWorkspace({
-  outputs, selectedOutputId, onSelectOutput, styles, onSetOutputStyle, onUpdateStyle, renderScreen, liveSlideType, onAddStageOutput,
+  outputs, selectedOutputId, onSelectOutput, styles, customLayouts, onSetOutputStyle, onChangeLayouts, getLive, onAddStageOutput,
 }: StageWorkspaceProps) {
   const output = outputs.find(o => o.id === selectedOutputId) || outputs[0];
+  const style = output ? styles.find(s => s.id === output.styleId) : undefined;
+  const firstLive = output ? getLive(output).slide : null;
+
+  // Which of the style's two layouts is being designed
+  const [slot, setSlot] = useState<Slot>(firstLive?.type === 'scripture' ? 'scripture' : 'lyrics');
+  const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
+  // An unfinished change (mid-drag, colour being picked): canvas only, never on the stage screens
+  const [draft, setDraft] = useState<StageLayout | null>(null);
+  const [editingWordsOf, setEditingWordsOf] = useState<string | null>(null);
+  const [showGuides, setShowGuides] = useState(true);
+  const [addMenuOpen, setAddMenuOpen] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const addMenuRef = useRef<HTMLDivElement>(null);
+  const history = useRef<{ past: Snapshot[]; future: Snapshot[]; lastAt: number }>({ past: [], future: [], lastAt: 0 });
+
+  const slotField = slot === 'lyrics' ? 'lyricsStageLayoutId' : 'scriptureStageLayoutId';
+  const layout = stageLayoutFor(style, { type: slot }, customLayouts);
+  const shown = draft ?? layout;
+  const readyMade = isReadyMadeStageLayout(layout.id);
+  const canEdit = !!style;
+  const selectedItem = shown.items.find(i => i.id === selectedItemId);
+  const editingItem = shown.items.find(i => i.id === editingWordsOf);
+
+  useEffect(() => { setSelectedItemId(null); setDraft(null); setEditingWordsOf(null); }, [output?.id, slot]);
+  useEffect(() => {
+    if (!notice) return;
+    const t = setTimeout(() => setNotice(null), 3000);
+    return () => clearTimeout(t);
+  }, [notice]);
+  useEffect(() => {
+    if (!addMenuOpen) return;
+    const close = (e: PointerEvent) => { if (!addMenuRef.current?.contains(e.target as Node)) setAddMenuOpen(false); };
+    window.addEventListener('pointerdown', close, true);
+    return () => window.removeEventListener('pointerdown', close, true);
+  }, [addMenuOpen]);
+
+  // ─── Saving, with undo ───
+  const latest = useRef({ customLayouts, style, onChangeLayouts });
+  latest.current = { customLayouts, style, onChangeLayouts };
+
+  const commit = (layouts: StageLayout[], nextStyle?: PresentationStyle) => {
+    const h = history.current;
+    const now = Date.now();
+    if (h.past.length === 0 || now - h.lastAt > UNDO_MERGE_MS) {
+      h.past.push({ layouts: customLayouts, style });
+      if (h.past.length > UNDO_LIMIT) h.past.shift();
+    }
+    h.lastAt = now;
+    h.future = [];
+    onChangeLayouts(layouts, nextStyle);
+  };
+
+  useEffect(() => {
+    const step = (undo: boolean) => {
+      const h = history.current;
+      const snap = (undo ? h.past : h.future).pop();
+      if (!snap) { setNotice(undo ? 'Nothing to undo' : 'Nothing to redo'); return; }
+      const now = latest.current;
+      (undo ? h.future : h.past).push({ layouts: now.customLayouts, style: now.style });
+      h.lastAt = 0;
+      setDraft(null);
+      now.onChangeLayouts(snap.layouts, snap.style);
+      setNotice(undo ? 'Undone' : 'Redone');
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+      const key = e.key.toLowerCase();
+      const isUndo = key === 'z' && !e.shiftKey;
+      const isRedo = key === 'y' || (key === 'z' && e.shiftKey);
+      if (!isUndo && !isRedo) return;
+      // While typing, Ctrl+Z undoes the typing instead
+      const el = e.target as HTMLElement | null;
+      if (el instanceof HTMLTextAreaElement || el?.isContentEditable || (el instanceof HTMLInputElement && !NON_TEXT_INPUTS.has(el.type))) return;
+      e.preventDefault();
+      step(isUndo);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  const uniqueName = (base: string) => {
+    const names = new Set(allStageLayouts(customLayouts).map(l => l.name));
+    if (!names.has(base)) return base;
+    let n = 2;
+    while (names.has(`${base} ${n}`)) n++;
+    return `${base} ${n}`;
+  };
+
+  // Every layout edit goes through here. A ready-made layout is never changed: the first edit saves your own copy.
+  const change = (fn: (l: StageLayout) => StageLayout, phase: Phase = 'commit') => {
+    if (!style) return;
+    if (phase === 'draft') { setDraft(fn(draft ?? layout)); return; }
+    setDraft(null);
+    const next = fn(layout);
+    if (readyMade) {
+      const copy: StageLayout = { ...next, id: `stage-${Date.now().toString(36)}`, name: uniqueName(`${layout.name} (my copy)`), description: undefined };
+      commit([...customLayouts, copy], { ...style, [slotField]: copy.id });
+      setNotice(`Saved as your own layout "${copy.name}". The ready-made one is unchanged.`);
+      return;
+    }
+    commit(customLayouts.map(l => l.id === layout.id ? next : l));
+  };
+  const changeItem = (id: string, fn: (item: StageItem) => StageItem, phase: Phase = 'commit') =>
+    change(l => ({ ...l, items: l.items.map(i => i.id === id ? fn(i) : i) }), phase);
+  const setRect = (id: string, rect: StageRect, phase: Phase) => changeItem(id, i => ({ ...i, rect }), phase);
+  const setItemStyle = (patch: React.CSSProperties, phase: Phase = 'commit') => {
+    if (selectedItem) changeItem(selectedItem.id, i => ({ ...i, style: { ...(i.style || {}), ...patch } }), phase);
+  };
+
+  const addItem = (kind: StageItemKind) => {
+    setAddMenuOpen(false);
+    const id = `${kind}-${Date.now().toString(36)}`;
+    const start = STAGE_ITEM_KINDS[kind].start;
+    change(l => ({ ...l, items: [...l.items, { id, kind, ...start, rect: { ...start.rect }, style: { ...(start.style || {}) } }] }));
+    setSelectedItemId(id);
+    if (kind === 'text') setEditingWordsOf(id);
+  };
+  const removeItem = () => {
+    if (!selectedItem) return;
+    const id = selectedItem.id;
+    change(l => ({ ...l, items: l.items.filter(i => i.id !== id) }));
+    setSelectedItemId(null);
+  };
+  const saveWords = (id: string, text: string) => {
+    setEditingWordsOf(null);
+    changeItem(id, i => ({ ...i, text }));
+  };
+
+  // ─── Layout choices ───
+  const chooseLayout = (id: string) => {
+    if (!style || id === layout.id) return;
+    commit(customLayouts, { ...style, [slotField]: id });
+    setSelectedItemId(null);
+  };
+  const duplicateLayout = () => {
+    if (!style) return;
+    const copy: StageLayout = { ...layout, id: `stage-${Date.now().toString(36)}`, name: uniqueName(`${layout.name} (copy)`), description: undefined };
+    commit([...customLayouts, copy], { ...style, [slotField]: copy.id });
+    setNotice(`Copied to "${copy.name}"`);
+  };
+  const renameLayout = () => {
+    const name = window.prompt('Name for this stage layout', layout.name)?.trim();
+    if (name && name !== layout.name) commit(customLayouts.map(l => l.id === layout.id ? { ...l, name } : l));
+  };
+  const deleteLayout = () => {
+    if (!style || !window.confirm(`Delete the stage layout "${layout.name}"? Stage styles using it go back to a ready-made layout. Ctrl+Z brings it back.`)) return;
+    commit(customLayouts.filter(l => l.id !== layout.id), { ...style, [slotField]: undefined });
+    setNotice(`Deleted "${layout.name}"`);
+  };
 
   if (!output) {
     return (
@@ -44,16 +224,20 @@ export function StageWorkspace({
     );
   }
 
-  const style = styles.find(s => s.id === output.styleId);
-  const showing = stageLayoutFor(style, { type: liveSlideType });
-  const setLayout = (field: 'lyricsStageLayoutId' | 'scriptureStageLayoutId', id: string) => {
-    if (style) onUpdateStyle({ ...style, [field]: id });
-  };
+  // The canvas shows the live slide when it fits this layout, otherwise sample words
+  const live = getLive(output);
+  const liveFits = !!live.slide && !live.hideText && (live.slide.type === 'scripture') === (slot === 'scripture');
+  const sample = STAGE_SAMPLES[slot];
+  const data = liveFits
+    ? { slide: live.slide, nextSlide: live.nextSlide, songTitle: live.songTitle }
+    : { slide: sample.slide, nextSlide: sample.next, songTitle: sample.songTitle };
+  const g = selectedItem?.style || {};
+  const colorValue = /^#[0-9a-f]{6}$/i.test(String(g.color || '')) ? String(g.color) : '#ffffff';
 
   return (
     <div className="flex-1 min-w-0 flex flex-col bg-[#07070a] select-none">
-      {/* HEADER: which stage screen, its Stage style and the layouts that style uses */}
-      <div className="h-11 px-3 border-b border-[#262635] flex items-center gap-3 shrink-0 bg-[#101015] overflow-x-auto">
+      {/* HEADER: which stage screen and its Stage style */}
+      <div className="h-11 px-3 border-b border-[#262635] flex items-center gap-3 shrink-0 bg-[#101015]">
         <div className="flex gap-1 p-0.5 bg-black/40 rounded-lg shrink-0">
           {outputs.map(o => (
             <button
@@ -74,42 +258,187 @@ export function StageWorkspace({
           <select
             value={style?.id || ''}
             onChange={(e) => onSetOutputStyle(output.id, e.target.value || undefined)}
-            className={`${selectCls} max-w-[160px]`}
+            className={`${selectCls} max-w-[170px]`}
           >
             <option value="">(None — ready-made layouts)</option>
             {styles.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
         </label>
-        {(['lyrics', 'scripture'] as const).map(type => (
-          <label key={type} className="flex items-center gap-2 shrink-0">
-            <span className="text-[10px] uppercase font-bold tracking-wider text-neutral-500">{type === 'lyrics' ? 'Lyrics' : 'Scripture'}</span>
-            <select
-              value={stageLayoutFor(style, { type }).id}
-              disabled={!style}
-              onChange={(e) => setLayout(type === 'lyrics' ? 'lyricsStageLayoutId' : 'scriptureStageLayoutId', e.target.value)}
-              className={`${selectCls} max-w-[190px]`}
-              title={style ? `Stage layout for ${type === 'lyrics' ? 'song' : 'scripture'} slides (changes the style "${style.name}")` : 'Pick a Stage style first'}
-            >
-              {STAGE_LAYOUTS.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
-            </select>
-          </label>
-        ))}
+        <div className="ml-auto flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={() => setShowGuides(v => !v)}
+            className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-semibold transition-colors ${showGuides ? 'text-white bg-white/10' : 'text-neutral-500 hover:text-white'}`}
+            title="Show or hide the item outlines"
+          >
+            {showGuides ? <Eye size={13} /> : <EyeOff size={13} />} Guides
+          </button>
+        </div>
       </div>
 
-      {/* CANVAS: exactly what the stage screen shows right now */}
-      <div className="flex-1 min-h-0 p-3" data-stage-canvas>
+      {!canEdit && (
+        <div className="mx-3 mt-2 px-3 py-1.5 rounded-lg border text-xs shrink-0 bg-blue-500/10 border-blue-500/20 text-blue-200">
+          {output.name} uses the ready-made layouts. Pick a Stage style above to design its layouts.
+        </div>
+      )}
+
+      {/* TOOLBAR */}
+      <fieldset disabled={!canEdit} className={`min-w-0 border-0 p-0 m-0 shrink-0 ${canEdit ? '' : 'opacity-40'}`}>
+        <div className="px-3 py-2 space-y-2 border-b border-[#262635] bg-[#0d0d12]">
+          {/* Row 1: which layout */}
+          <div className="flex flex-wrap items-center gap-2">
+            <GroupLabel fixed>Layout</GroupLabel>
+            <div className="flex rounded overflow-hidden" title="This style has one layout for song slides and one for scripture">
+              <button type="button" onClick={() => setSlot('lyrics')} className={segBtn(slot === 'lyrics')}>For lyrics</button>
+              <button type="button" onClick={() => setSlot('scripture')} className={segBtn(slot === 'scripture')}>For scripture</button>
+            </div>
+            <select value={layout.id} onChange={(e) => chooseLayout(e.target.value)} className={`${selectCls} max-w-[220px]`} title={`The layout this style uses for ${slot === 'lyrics' ? 'song' : 'scripture'} slides`}>
+              <optgroup label="Ready-made">
+                {STAGE_LAYOUTS.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
+              </optgroup>
+              {customLayouts.length > 0 && (
+                <optgroup label="Your layouts">
+                  {customLayouts.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
+                </optgroup>
+              )}
+            </select>
+            <button type="button" onClick={duplicateLayout} className={`${smallBtn} bg-white/5 text-neutral-200 hover:bg-white/10 flex items-center gap-1`} title="Make a copy of this layout to change">
+              <Copy size={11} /> Copy
+            </button>
+            {!readyMade && (
+              <>
+                <button type="button" onClick={renameLayout} className={`${smallBtn} bg-white/5 text-neutral-200 hover:bg-white/10 flex items-center gap-1`}>
+                  <Pencil size={11} /> Rename
+                </button>
+                <button type="button" onClick={deleteLayout} className={`${smallBtn} bg-white/5 text-red-300 hover:bg-red-500/20 flex items-center gap-1`}>
+                  <Trash2 size={11} /> Delete
+                </button>
+              </>
+            )}
+            {readyMade && canEdit && <span className="text-[11px] text-neutral-500">Ready-made: your first change saves your own copy</span>}
+          </div>
+
+          {/* Row 2: the items on the screen */}
+          <div className="flex flex-wrap items-center gap-2">
+            <GroupLabel fixed>Items</GroupLabel>
+            <div className="flex flex-wrap gap-1">
+              {shown.items.map(item => (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => setSelectedItemId(item.id)}
+                  className={`${smallBtn} ${item.id === selectedItemId ? 'bg-pink-600 text-white' : 'bg-[#1e1e28] text-neutral-300 hover:text-white'}`}
+                >
+                  {itemName(item)}
+                </button>
+              ))}
+            </div>
+            <div className="relative" ref={addMenuRef}>
+              <button type="button" onClick={() => setAddMenuOpen(v => !v)} className={`${smallBtn} bg-white/5 text-neutral-200 hover:bg-white/10 flex items-center gap-1`}>
+                <Plus size={11} /> Add
+              </button>
+              {addMenuOpen && (
+                <div className="absolute left-0 top-full mt-1 z-40 w-60 py-1 rounded-lg border border-white/10 bg-[#18181b] shadow-2xl" data-stage-add-menu>
+                  {ADDABLE.map(kind => (
+                    <button key={kind} type="button" onClick={() => addItem(kind)} className="w-full px-3 py-1.5 text-left hover:bg-white/5 transition-colors">
+                      <span className="block text-xs font-semibold text-white">{STAGE_ITEM_KINDS[kind].label}</span>
+                      <span className="block text-[10px] text-neutral-500">{STAGE_ITEM_KINDS[kind].hint}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+            <Divider />
+            {selectedItem && hasWords(selectedItem) && (
+              <button type="button" onClick={() => setEditingWordsOf(selectedItem.id)} className={`${smallBtn} bg-white/5 text-neutral-200 hover:bg-white/10 flex items-center gap-1`} title={selectedItem.kind === 'next-slide' ? 'Change the label above the next slide' : 'Change the words'}>
+                <Type size={11} /> {selectedItem.kind === 'next-slide' ? 'Edit label' : 'Edit words'}
+              </button>
+            )}
+            <button type="button" disabled={!selectedItem} onClick={removeItem} className={`${smallBtn} bg-white/5 text-red-300 hover:bg-red-500/20 flex items-center gap-1`} title={selectedItem ? 'Take this item off the layout' : 'Click an item first'}>
+              <Trash2 size={11} /> Remove
+            </button>
+          </div>
+
+          {/* Row 3: how the selected item's text looks */}
+          <fieldset disabled={!selectedItem} className={`min-w-0 border-0 p-0 m-0 flex flex-wrap items-center gap-2 ${selectedItem ? '' : 'opacity-40'}`}>
+            <GroupLabel fixed>Text</GroupLabel>
+            <select value={String(g.fontFamily || 'Inter, sans-serif')} onChange={(e) => setItemStyle({ fontFamily: e.target.value })} className={`${selectCls} w-36`} title="Font">
+              {!FONT_OPTIONS.some(f => f.value === (g.fontFamily || 'Inter, sans-serif')) && <option value={String(g.fontFamily || 'Inter, sans-serif')}>{String(g.fontFamily || 'Inter')}</option>}
+              {FONT_OPTIONS.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
+            </select>
+            <SizeStepper value={parseNum(g.fontSize, 60)} onChange={(v) => setItemStyle({ fontSize: `${v}px` })} />
+            <select value={String(g.fontWeight || '700')} onChange={(e) => setItemStyle({ fontWeight: e.target.value })} className={selectCls} title="Weight">
+              {WEIGHTS.map(w => <option key={w} value={w}>Weight {w}</option>)}
+            </select>
+            <ColorField value={colorValue} onChange={(v, phase) => setItemStyle({ color: v }, phase)} />
+            <div className="flex rounded overflow-hidden" title="Line up the text in its box">
+              {([['left', AlignLeft], ['center', AlignCenter], ['right', AlignRight]] as const).map(([a, Icon]) => (
+                <button key={a} type="button" onClick={() => setItemStyle({ textAlign: a })} className={segBtn((g.textAlign || 'left') === a)}>
+                  <Icon size={13} />
+                </button>
+              ))}
+            </div>
+            <button type="button" onClick={() => setItemStyle({ textTransform: g.textTransform === 'uppercase' ? 'none' : 'uppercase' })} className={`${segBtn(g.textTransform === 'uppercase')} rounded`} title="Capitals">AA</button>
+            {!selectedItem && <span className="text-[11px] text-neutral-500">Click an item on the screen to change it</span>}
+          </fieldset>
+        </div>
+      </fieldset>
+
+      {/* CANVAS: the stage screen with this layout; click empty space to deselect */}
+      <div className="flex-1 min-h-0 p-3" data-stage-canvas onPointerDown={() => setSelectedItemId(null)}>
         <FixedStage className="w-full h-full">
-          <div className="absolute inset-0 bg-black" />
-          {renderScreen(output)}
-          <div className="absolute inset-0 pointer-events-none z-30" style={{ boxShadow: 'inset 0 0 0 2px rgba(255,255,255,0.1)' }} />
+          {(scale: number) => (
+            <>
+              <div className="absolute inset-0 bg-black" />
+              <StageScreen
+                layout={shown}
+                slide={data.slide}
+                nextSlide={data.nextSlide}
+                songTitle={data.songTitle}
+                background={style?.backgroundColor}
+              />
+              {showGuides && canEdit && shown.items.map(item => (
+                <React.Fragment key={item.id}>
+                  {editingWordsOf !== item.id && (
+                    <DesignBox
+                      rect={item.rect}
+                      scale={scale}
+                      movable
+                      selected={item.id === selectedItemId}
+                      label={`${STAGE_ITEM_KINDS[item.kind].label} · drag to move${hasWords(item) ? ' · double-click to edit' : ''}`}
+                      onSelect={() => setSelectedItemId(item.id)}
+                      onChange={(r) => setRect(item.id, r, 'draft')}
+                      onChangeEnd={(r) => setRect(item.id, r, 'commit')}
+                      onDoubleClick={() => { if (hasWords(item)) setEditingWordsOf(item.id); }}
+                    />
+                  )}
+                </React.Fragment>
+              ))}
+              {editingItem && (
+                <InlineTextEditor
+                  rect={editingItem.rect}
+                  scale={scale}
+                  initialText={editingItem.text ?? (editingItem.kind === 'next-slide' ? 'Next' : '')}
+                  placeholder={editingItem.kind === 'next-slide' ? 'Label above the next slide' : 'Type the words…'}
+                  hint={editingItem.kind === 'next-slide' ? 'Label above the next slide' : 'Words on the stage screen'}
+                  onSave={(text) => saveWords(editingItem.id, text)}
+                  onCancel={() => setEditingWordsOf(null)}
+                />
+              )}
+              <div className="absolute inset-0 pointer-events-none z-30" style={{ boxShadow: `inset 0 0 0 ${2 / Math.max(scale, 0.0001)}px rgba(255,255,255,0.1)` }} />
+            </>
+          )}
         </FixedStage>
       </div>
 
-      {/* FOOTER: what's on the canvas */}
+      {/* FOOTER: where the words come from, and who sees changes */}
       <div className="h-9 px-3 border-t border-[#262635] bg-[#0b0b10] flex items-center gap-2 shrink-0 text-[11px] text-neutral-500 whitespace-nowrap overflow-hidden">
-        <span className="text-white font-semibold">{output.name}</span>
-        <span>· {liveSlideType ? `showing the ${liveSlideType === 'scripture' ? 'scripture' : 'lyrics'} layout "${showing.name}"` : 'nothing is live yet'}</span>
-        <span className="truncate">· {style ? `layout changes apply to every stage screen using "${style.name}"` : 'uses the ready-made layouts'}</span>
+        <span className="text-white font-semibold">{layout.name}</span>
+        <span className="truncate">
+          · {liveFits ? `live: what ${output.name} shows now` : `sample ${slot === 'lyrics' ? 'song' : 'scripture'} words (no ${slot === 'lyrics' ? 'song' : 'scripture'} slide is showing)`}
+          {style ? ` · changes reach every stage screen using "${style.name}" when you let go` : ''}
+        </span>
+        {notice && <span className="ml-auto text-emerald-400 flex items-center gap-1 shrink-0"><Check size={12} /> {notice}</span>}
       </div>
     </div>
   );
