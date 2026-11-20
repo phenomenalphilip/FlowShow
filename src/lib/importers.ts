@@ -20,8 +20,31 @@ export interface ImportResult {
   problems: string[];
 }
 
-export const IMPORT_ACCEPT = '.show,.pro,.pro6,.proBundle,.docx,.txt,.zip';
-export const IMPORT_FORMATS = 'FreeShow (.show), ProPresenter 6 and 7 (.pro6, .pro, .proBundle), Word (.docx), text (.txt), or a .zip of these';
+export const IMPORT_ACCEPT = '.show,.pro,.pro6,.proBundle,.docx,.txt,.cho,.chopro,.chordpro,.crd,.xml,.csv,.zip';
+export const IMPORT_FORMATS = 'FreeShow (.show), ProPresenter 6 and 7 (.pro6, .pro, .proBundle), Word (.docx), text (.txt), ChordPro, OpenLyrics, OpenSong, CSV, or a .zip of these';
+
+/** The importable song formats, one per button in the Import window (accept = the file types its picker shows) */
+export const IMPORT_SOURCES = {
+  freeshow: { label: 'FreeShow', accept: '.show,.zip', hint: '.show files' },
+  propresenter: { label: 'ProPresenter', accept: '.pro,.pro6,.proBundle,.zip', hint: 'ProPresenter 6 and 7' },
+  word: { label: 'Word', accept: '.docx', hint: 'a heading above each song' },
+  text: { label: 'Text file', accept: '.txt', hint: 'one song per file' },
+  chordpro: { label: 'ChordPro', accept: '.cho,.chopro,.chordpro,.crd,.txt', hint: 'chords are left out' },
+  openlyrics: { label: 'OpenLP / OpenLyrics', accept: '.xml,.zip', hint: 'OpenLyrics .xml' },
+  opensong: { label: 'OpenSong', accept: '', hint: 'song files' },
+  csv: { label: 'CSV', accept: '.csv', hint: 'title and lyrics columns' },
+} as const;
+export type ImportSource = keyof typeof IMPORT_SOURCES;
+
+/** Words typed or pasted (Clipboard): one show, groups from labels or worked out from the words */
+export function showFromText(title: string, text: string): ImportedShow {
+  return { title: title.trim() || 'Pasted song', file: 'Clipboard', slides: lyricsToSections(text, 2) };
+}
+
+/** Does this .xml look like a song (OpenLyrics / OpenSong) rather than a Bible? */
+export function isSongXml(head: string): boolean {
+  return /<song[\s>]/i.test(head) && !/<(bible|XMLBIBLE|testament|BIBLEBOOK)[\s>]/i.test(head);
+}
 
 const baseName = (name: string) => name.replace(/^.*[\\/]/, '').replace(/\.[^.]+$/, '').trim() || 'Untitled';
 const ext = (name: string) => (name.match(/\.([^.\\/]+)$/)?.[1] || '').toLowerCase();
@@ -48,13 +71,24 @@ async function importOne(name: string, bytes: Uint8Array): Promise<ImportedShow[
     case 'pro6': return [fromProPresenter6(name, utf8(bytes))];
     case 'pro': return [fromProPresenter7(name, bytes)];
     case 'docx': return fromWord(name, await readZip(bytes));
-    case 'txt': return [fromText(name, decodeText(bytes))];
+    case 'txt': {
+      const text = decodeText(bytes);
+      return [/^\s*\{\s*(title|t)\s*:/im.test(text) ? fromChordPro(name, text) : fromText(name, text)];
+    }
+    case 'cho': case 'chopro': case 'chordpro': case 'crd': return [fromChordPro(name, decodeText(bytes))];
+    case 'csv': return fromCsv(name, decodeText(bytes));
+    case 'xml': case '': {
+      const xml = decodeText(bytes);
+      if (/openlyrics/i.test(xml.slice(0, 2000))) return [fromOpenLyrics(name, xml)];
+      if (/<song[\s>]/i.test(xml.slice(0, 2000)) && /<lyrics/i.test(xml)) return [fromOpenSong(name, xml)];
+      throw new Error(ext(name) === 'xml' ? 'not an OpenLyrics or OpenSong song' : 'not a supported file');
+    }
     case 'probundle':
     case 'zip': {
       const entries = await readZip(bytes);
       const shows: ImportedShow[] = [];
       for (const [path, data] of entries) {
-        if (/(^|\/)(__MACOSX|\.)/.test(path) || !/\.(show|pro6?|docx|txt)$/i.test(path)) continue;
+        if (/(^|\/)(__MACOSX|\.)/.test(path) || !/\.(show|pro6?|docx|txt|cho|chopro|chordpro|crd|xml|csv)$/i.test(path)) continue;
         try { shows.push(...await importOne(path, data)); } catch { /* skip files inside that can't be read */ }
       }
       if (!shows.length) throw new Error('no songs inside');
@@ -77,6 +111,139 @@ function decodeText(bytes: Uint8Array): string {
 // ─── Text ───
 function fromText(name: string, text: string): ImportedShow {
   return { title: baseName(name), file: name, slides: lyricsToSections(text, 2) };
+}
+
+// ─── ChordPro: {directives}, [chords] inside the words, sections marked with {start_of_chorus} / {comment: Verse 1} ───
+function fromChordPro(name: string, text: string): ImportedShow {
+  let title = '', artist = '';
+  const out: string[] = [];
+  for (const raw of text.replace(/\r\n?/g, '\n').split('\n')) {
+    const line = raw.trim();
+    if (line.startsWith('#')) continue;
+    const d = line.match(/^\{\s*([a-z_]+)\s*(?::\s*(.*?))?\s*\}$/i);
+    if (d) {
+      const key = d[1].toLowerCase(), val = (d[2] || '').trim();
+      if (key === 'title' || key === 't') title = val;
+      else if (key === 'artist' || key === 'subtitle' || key === 'st' || key === 'composer') artist = artist || val;
+      else if (key === 'soc' || key === 'start_of_chorus') out.push('', val || 'Chorus');
+      else if (key === 'sov' || key === 'start_of_verse') out.push('', val || 'Verse');
+      else if (key === 'sob' || key === 'start_of_bridge') out.push('', val || 'Bridge');
+      else if (key === 'chorus') out.push('', 'Chorus', '');
+      else if (key === 'comment' || key === 'c' || key === 'ci' || key === 'comment_italic') { if (val && val.length <= 30) out.push('', val); }
+      else if (/^(end_of_|eo)/.test(key)) out.push('');
+      continue;
+    }
+    // Leave out the chords; a line that was only chords goes away
+    const words = line.replace(/\[[^\]]*\]/g, '').replace(/\s{2,}/g, ' ').trim();
+    if (line && !words) continue;
+    out.push(words);
+  }
+  return { title: title || baseName(name), artist: artist || undefined, file: name, slides: lyricsToSections(out.join('\n'), 2) };
+}
+
+// ─── OpenLyrics (OpenLP and others): <verse name="v1"><lines>…<br/>…</lines></verse>, sung in <verseOrder> ───
+function fromOpenLyrics(name: string, xml: string): ImportedShow {
+  const doc = new DOMParser().parseFromString(xml, 'application/xml');
+  if (doc.getElementsByTagName('parsererror').length) throw new Error('not a readable OpenLyrics file');
+  const byTag = (el: Document | Element, tag: string) => Array.from(el.getElementsByTagNameNS('*', tag));
+  const title = byTag(doc, 'title')[0]?.textContent?.trim();
+  const artist = byTag(doc, 'author')[0]?.textContent?.trim();
+  const verses = new Map<string, string[]>();
+  byTag(doc, 'verse').forEach(v => {
+    const id = (v.getAttribute('name') || '').toLowerCase();
+    const parts = byTag(v, 'lines').map(l => {
+      // <br/> starts a new line; chords stay as their words, comments are left out
+      const clone = l.cloneNode(true) as Element;
+      Array.from(clone.getElementsByTagNameNS('*', 'br')).forEach(br => br.replaceWith('\n'));
+      Array.from(clone.getElementsByTagNameNS('*', 'comment')).forEach(c => c.remove());
+      return (clone.textContent || '').split('\n').map(x => x.trim()).filter(Boolean).join('\n');
+    }).filter(Boolean);
+    if (parts.length) verses.set(id, parts);
+  });
+  const order = (byTag(doc, 'verseOrder')[0]?.textContent || '').toLowerCase().split(/\s+/).filter(id => verses.has(id));
+  const slides: { text: string; group?: string }[] = [];
+  (order.length ? order : [...verses.keys()]).forEach(id => verses.get(id)!.forEach(text => slides.push({ text, group: groupFromCode(id) })));
+  return { title: title || baseName(name), artist: artist || undefined, file: name, slides: splitLong(slides) };
+}
+
+// ─── OpenSong: <lyrics> with [V1] section marks; lines starting with "." are chords, ";" comments ───
+function fromOpenSong(name: string, xml: string): ImportedShow {
+  const doc = new DOMParser().parseFromString(xml, 'application/xml');
+  if (doc.getElementsByTagName('parsererror').length) throw new Error('not a readable OpenSong file');
+  const get = (tag: string) => doc.getElementsByTagName(tag)[0]?.textContent?.trim() || '';
+  const sections = new Map<string, string[]>();
+  let current = '';
+  get('lyrics').replace(/\r\n?/g, '\n').split('\n').forEach(line => {
+    const mark = line.match(/^\s*\[([^\]]+)\]/);
+    if (mark) { current = mark[1].trim().toLowerCase(); if (!sections.has(current)) sections.set(current, []); return; }
+    if (/^[.;]/.test(line)) return;
+    // A leading digit numbers verse lines on shared music; | and _ mark slide breaks / spacing
+    const words = line.replace(/^\s?\d?\s?/, '').replace(/[|_]/g, ' ').replace(/\s{2,}/g, ' ').trim();
+    if (!sections.has(current)) sections.set(current, []);
+    sections.get(current)!.push(words);
+  });
+  const order = get('presentation').toLowerCase().split(/\s+/).filter(id => sections.has(id));
+  const slides: { text: string; group?: string }[] = [];
+  (order.length ? order : [...sections.keys()]).forEach(id => {
+    sections.get(id)!.join('\n').split(/\n\s*\n/).map(p => p.trim()).filter(Boolean)
+      .forEach(text => slides.push({ text, group: id ? groupFromCode(id) : undefined }));
+  });
+  return { title: get('title') || baseName(name), artist: get('author') || undefined, file: name, slides: splitLong(slides) };
+}
+
+/** v1 → Verse 1, c → Chorus, b → Bridge, p → Pre-chorus, t → Tag, e → Ending, i → Intro */
+function groupFromCode(code: string): string | undefined {
+  const m = code.match(/^([a-z]+)\s*(\d*)/i);
+  if (!m) return undefined;
+  const names: Record<string, string> = { v: 'Verse', c: 'Chorus', b: 'Bridge', p: 'Pre-chorus', t: 'Tag', e: 'Ending', o: 'Outro', i: 'Intro' };
+  const word = names[m[1][0].toLowerCase()] || m[1];
+  return m[2] ? `${word} ${m[2]}` : word;
+}
+
+/** Long sections become slides of 2 lines, keeping their group */
+function splitLong(slides: { text: string; group?: string }[]): { text: string; group?: string }[] {
+  return slides.flatMap(s => {
+    const lines = s.text.split('\n');
+    if (lines.length <= 2) return [s];
+    const out: { text: string; group?: string }[] = [];
+    for (let i = 0; i < lines.length; i += 2) out.push({ text: lines.slice(i, i + 2).join('\n'), group: s.group });
+    return out;
+  });
+}
+
+// ─── CSV: a header row naming the columns (title, lyrics/words/text, author/artist); one song per row ───
+function fromCsv(name: string, text: string): ImportedShow[] {
+  const rows = parseCsv(text);
+  if (rows.length < 2) throw new Error('no rows under the header');
+  const head = rows[0].map(h => h.trim().toLowerCase());
+  const col = (...names: string[]) => head.findIndex(h => names.some(n => h === n || h.includes(n)));
+  const ti = col('title', 'name', 'song'), li = col('lyrics', 'words', 'text', 'content'), ai = col('author', 'artist');
+  if (li < 0) throw new Error('needs a column called "lyrics" (or "words" / "text") and one called "title"');
+  return rows.slice(1).filter(r => r[li]?.trim()).map((r, i) => ({
+    title: (ti >= 0 && r[ti]?.trim()) || `${baseName(name)} ${i + 1}`,
+    artist: ai >= 0 ? r[ai]?.trim() || undefined : undefined,
+    file: name,
+    slides: lyricsToSections(r[li].replace(/\\n/g, '\n'), 2),
+  }));
+}
+
+function parseCsv(text: string): string[][] {
+  const first = text.split('\n')[0];
+  const delim = (first.match(/;/g)?.length || 0) > (first.match(/,/g)?.length || 0) ? ';' : ',';
+  const rows: string[][] = []; let row: string[] = []; let cell = ''; let quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quoted) {
+      if (ch === '"' && text[i + 1] === '"') { cell += '"'; i++; }
+      else if (ch === '"') quoted = false;
+      else cell += ch;
+    } else if (ch === '"') quoted = true;
+    else if (ch === delim) { row.push(cell); cell = ''; }
+    else if (ch === '\n' || ch === '\r') { if (ch === '\r' && text[i + 1] === '\n') i++; row.push(cell); rows.push(row); row = []; cell = ''; }
+    else cell += ch;
+  }
+  if (cell || row.length) { row.push(cell); rows.push(row); }
+  return rows.filter(r => r.some(c => c.trim()));
 }
 
 // ─── FreeShow (.show): [id, show] JSON; the first layout gives the order, slides keep their groups ───

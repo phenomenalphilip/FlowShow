@@ -1,6 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import { DRAG_MEDIA } from './ProjectsPanel';
 import { get, set } from 'idb-keyval';
-import { FolderPlus, Image as ImageIcon, Video, Trash, Folder, ChevronRight, ArrowUp } from 'lucide-react';
+import { FolderPlus, Image as ImageIcon, Video, Trash, Folder, ChevronRight, ArrowUp, Plus } from 'lucide-react';
 
 const MOCK_MEDIA = [
   { id: 'm1', url: 'https://images.unsplash.com/photo-1518005020951-eccb494ad742?q=80&w=1000&auto=format&fit=crop', name: 'Blue Abstract', type: 'image' },
@@ -14,7 +15,31 @@ export type MediaItem = {
   url: string;
   type: 'image' | 'video';
   path?: string;
+  /** Where it is in an added folder, so a setlist can find it again after a restart */
+  ref?: MediaRef;
 };
+
+/** A file in one of the added folders: the folder's name and the folders and file name inside it */
+export type MediaRef = { folder: string; path: string[] };
+
+/**
+ * The file a MediaRef points at, as a URL to show. Asks for permission to read the folder again when needed
+ * (call it from a click). Null if the folder or file is gone or permission is refused.
+ */
+export async function resolveMediaRef(ref: MediaRef): Promise<string | null> {
+  try {
+    const handles = ((await get('media_folders')) || []) as any[];
+    const root = handles.find(h => h.name === ref.folder);
+    if (!root) return null;
+    if (await root.queryPermission({ mode: 'read' }) !== 'granted' && await root.requestPermission({ mode: 'read' }) !== 'granted') return null;
+    let dir = root;
+    for (const name of ref.path.slice(0, -1)) dir = await dir.getDirectoryHandle(name);
+    const file = await (await dir.getFileHandle(ref.path[ref.path.length - 1])).getFile();
+    return getCachedObjectURL(`${ref.folder}/${ref.path.join('/')}${file.lastModified}`, file);
+  } catch {
+    return null;
+  }
+}
 
 type VirtualDir = {
   name: string;
@@ -93,7 +118,8 @@ export function MediaLibrary({ onSelectBackground }: { onSelectBackground: (url:
        }
    };
 
-   const loadDirectoryLevel = async (handle: any, virtualDir?: VirtualDir) => {
+   // `at`: the added folder's name and the folders inside it, for native folders (so files can be found again)
+   const loadDirectoryLevel = async (handle: any, virtualDir?: VirtualDir, at?: { folder: string; dirs: string[] }) => {
        setIsLoadingDir(true);
        const items: DisplayItem[] = [];
 
@@ -115,7 +141,8 @@ export function MediaLibrary({ onSelectBackground }: { onSelectBackground: (url:
                                        id: entry.name + file.lastModified,
                                        name: entry.name,
                                        type: type as 'image'|'video',
-                                       url: getCachedObjectURL(entry.name + file.lastModified, file)
+                                       url: getCachedObjectURL(entry.name + file.lastModified, file),
+                                       ref: at ? { folder: at.folder, path: [...at.dirs, entry.name] } : undefined,
                                    }
                                });
                            }
@@ -164,7 +191,7 @@ export function MediaLibrary({ onSelectBackground }: { onSelectBackground: (url:
            const nativeFolder = topLevelFolders.find(f => f.name === sourceId);
            if (nativeFolder) {
                setPathStack([{ name: nativeFolder.name, handle: nativeFolder }]);
-               loadDirectoryLevel(nativeFolder);
+               loadDirectoryLevel(nativeFolder, undefined, { folder: nativeFolder.name, dirs: [] });
                return;
            }
            const virtualFolder = fallbackSources.find(f => f.name === sourceId);
@@ -180,7 +207,7 @@ export function MediaLibrary({ onSelectBackground }: { onSelectBackground: (url:
        if (item.kind !== 'directory') return;
        const newStack = [...pathStack, { name: item.name, handle: item.handle, virtualDir: item.virtualDir }];
        setPathStack(newStack);
-       loadDirectoryLevel(item.handle, item.virtualDir);
+       loadDirectoryLevel(item.handle, item.virtualDir, item.handle ? { folder: activeSourceId, dirs: newStack.slice(1).map(p => p.name) } : undefined);
    }
 
    const goUp = () => {
@@ -191,7 +218,7 @@ export function MediaLibrary({ onSelectBackground }: { onSelectBackground: (url:
        if (activeSourceId === 'demo') {
            // Not applicable
        } else {
-           loadDirectoryLevel(parent.handle, parent.virtualDir);
+           loadDirectoryLevel(parent.handle, parent.virtualDir, parent.handle ? { folder: activeSourceId, dirs: newStack.slice(1).map(p => p.name) } : undefined);
        }
    };
 
@@ -205,10 +232,24 @@ export function MediaLibrary({ onSelectBackground }: { onSelectBackground: (url:
          const newFolders = [...topLevelFolders.filter(f => f.name !== handle.name), handle];
          setTopLevelFolders(newFolders);
          await set('media_folders', newFolders);
-         selectSource(handle.name);
-      } catch (err) {
-         console.log('User cancelled or error', err);
+         // Open it now (the folder list above has not updated yet)
+         setActiveSourceId(handle.name);
+         setPathStack([{ name: handle.name, handle }]);
+         loadDirectoryLevel(handle, undefined, { folder: handle.name, dirs: [] });
+      } catch (err: any) {
+         if (err?.name === 'AbortError') return; // cancelled
+         console.warn('Folder picker not available here; using the folder chooser instead', err);
+         fallbackInputRef.current?.click();
       }
+   };
+   const fallbackInputRef = useRef<HTMLInputElement>(null);
+   // Clicking a folder that needs permission again asks for it, then opens the folder
+   const openFolder = async (handle: any) => {
+      if (unauthorizedFolders.includes(handle)) {
+          if (await handle.requestPermission({ mode: 'read' }) !== 'granted') return;
+          setUnauthorizedFolders(prev => prev.filter(h => h !== handle));
+      }
+      selectSource(handle.name);
    };
    
    const handleFallbackFolderSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -245,8 +286,13 @@ export function MediaLibrary({ onSelectBackground }: { onSelectBackground: (url:
       setFallbackSources(prev => [...prev, ...newSources]);
       
       if (newSources.length > 0) {
-          selectSource(newSources[0].name);
+          // Open it now (the folder list above has not updated yet)
+          const first = newSources[0];
+          setActiveSourceId(first.name);
+          setPathStack([{ name: first.name, virtualDir: first.root }]);
+          loadDirectoryLevel(null, first.root);
       }
+      e.target.value = '';
    };
 
    let isIframe = false;
@@ -287,13 +333,39 @@ export function MediaLibrary({ onSelectBackground }: { onSelectBackground: (url:
                 <div>
                    <div className="text-[10px] font-bold text-neutral-500 uppercase tracking-widest mb-2 px-2 flex justify-between items-center">
                        <span>Local Folders</span>
+                       <button
+                          type="button"
+                          onClick={() => canUseFileAccessApi ? handleAddFolder() : fallbackInputRef.current?.click()}
+                          className="w-5 h-5 rounded-full bg-blue-600/20 hover:bg-blue-600/40 text-blue-300 hover:text-white flex items-center justify-center transition-colors"
+                          title="Add a folder of pictures and videos from your computer"
+                          data-add-media-folder
+                       >
+                          <Plus size={12} />
+                       </button>
                    </div>
+                   {topLevelFolders.length === 0 && fallbackSources.length === 0 && (
+                       <button
+                          type="button"
+                          onClick={() => canUseFileAccessApi ? handleAddFolder() : fallbackInputRef.current?.click()}
+                          className="w-full text-left px-3 py-2 rounded-lg text-xs text-neutral-400 hover:text-white hover:bg-white/5 border border-dashed border-white/10 leading-snug"
+                       >
+                          Add a folder from your computer to use its pictures and videos.
+                       </button>
+                   )}
+                   <input
+                       ref={fallbackInputRef}
+                       type="file"
+                       {...({ webkitdirectory: "true", directory: "true" } as any)}
+                       multiple
+                       className="hidden"
+                       onChange={handleFallbackFolderSelect}
+                   />
                    
                    {topLevelFolders.map(f => (
                        <div key={f.name} className={`group flex items-center justify-between px-3 py-2.5 rounded-lg text-sm border transition-all cursor-pointer mb-1
                            ${activeSourceId === f.name ? 'bg-blue-600/20 text-blue-400 border-blue-500/30' : 'text-neutral-300 hover:bg-white/5 hover:text-white border-transparent'}
                        `}>
-                           <div className="flex items-center gap-2 overflow-hidden flex-1" onClick={() => selectSource(f.name)}>
+                           <div className="flex items-center gap-2 overflow-hidden flex-1" onClick={() => openFolder(f)} title={unauthorizedFolders.includes(f) ? 'Click to allow FlowShow to read this folder again' : undefined}>
                                {unauthorizedFolders.includes(f) ? (
                                    <div className="w-2 h-2 rounded-full bg-orange-500 shrink-0 shadow-[0_0_8px_rgba(249,115,22,0.6)]" title="Needs Permission" />
                                ) : <Folder size={16} className="shrink-0 text-blue-400" />}
@@ -329,12 +401,12 @@ export function MediaLibrary({ onSelectBackground }: { onSelectBackground: (url:
                         className="flex items-center justify-center w-full gap-2 px-4 py-2.5 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-sm text-white font-medium transition-all shadow-sm"
                     >
                         <FolderPlus size={16} />
-                        Add Native Folder
+                        Add folder from computer
                     </button>
                   ) : (
                     <label className="flex items-center justify-center w-full gap-2 px-4 py-2.5 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border border-blue-500/30 rounded-lg text-sm font-medium transition-all cursor-pointer shadow-sm relative overflow-hidden">
                         <FolderPlus size={16} />
-                        Add Local Folder
+                        Add folder from computer
                         <input 
                             type="file" 
                             {...({ webkitdirectory: "true", directory: "true" } as any)}
@@ -422,6 +494,8 @@ function MediaCard({ media, onSelect }: { media: MediaItem, onSelect: () => void
    return (
       <div 
          onClick={onSelect}
+         draggable
+         onDragStart={(e) => { e.dataTransfer.setData(DRAG_MEDIA, JSON.stringify({ name: media.name, url: media.url, type: media.type, ref: media.ref })); e.dataTransfer.effectAllowed = 'copy'; }}
          className="relative aspect-video rounded-xl overflow-hidden cursor-pointer group border border-white/5 hover:border-blue-500 hover:shadow-[0_0_20px_rgba(59,130,246,0.3)] bg-[#121214] transition-all shadow-[0_4px_12px_rgba(0,0,0,0.2)]"
          title={media.name}
       >

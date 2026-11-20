@@ -14,7 +14,7 @@ import { FixedStage } from './FixedStage';
 import { DesignBox, InlineTextEditor, Rect, getPlacement, placeAcross, placeDown, resizeBox } from './DesignCanvas';
 import {
   Phase, WEIGHTS, selectCls, segBtn, smallBtn, GroupLabel, Divider, SizeStepper, NumField, ColorField, MiniSlider,
-  DesignFor, DesignForSwitch, DesignStatus, StatusBadges, Notice, MotionOptions, ExitSelect, FontSelect, TextPositionSwitch,
+  DesignFor, DesignForSwitch, DesignStatus, StatusBadges, Notice, MotionOptions, MotionLayers, ExitSelect, FontSelect, TextPositionSwitch,
 } from './DesignControls';
 
 export interface OutputTemplateInfo {
@@ -746,6 +746,7 @@ export function LiveDesignWorkspace({
             ) : anim ? (
               <MiniSlider label="Duration" min={0.1} max={10} step={0.05} value={anim.duration || 0.6} format={(v) => `${v.toFixed(2)}s`} onChange={(v, phase) => setAnim({ duration: v }, phase)} />
             ) : null}
+            <MotionLayers anim={anim} onChange={(patch, phase) => setAnim(patch, phase)} />
             {anim && anim.type !== 'ticker' && (
               <>
                 <Divider />

@@ -6,7 +6,7 @@
  * altered file is refused. Installing gives each template a stable id from the package, so installing a newer
  * version of the same package updates its templates instead of adding copies.
  */
-import { PresentationTemplate, getTemplateById, saveTemplate } from './templates';
+import { PresentationTemplate, getTemplateById, getCachedTemplates, saveTemplate } from './templates';
 import { FONT_OPTIONS, primaryFont } from './fonts';
 import { StoredFont, installFonts } from './fontStore';
 
@@ -104,8 +104,17 @@ function cleanTemplate(t: any): PresentationTemplate | null {
   if (!t || typeof t !== 'object' || typeof t.id !== 'string' || typeof t.name !== 'string' || !t.styles || !t.animation?.type) return null;
   const lines: Record<number, any> = {};
   Object.entries(t.styles.lines || {}).forEach(([k, v]) => { const n = Number(k); if (Number.isInteger(n) && n >= 0 && n < 50) lines[n] = cleanStyle(v); });
-  const anim: any = {};
-  Object.entries(t.animation).forEach(([k, v]) => { if (k === 'exit' && v && typeof v === 'object') anim.exit = { type: String((v as any).type), duration: Number((v as any).duration) || undefined }; else if (SAFE_VALUE(v) || typeof v === 'boolean') anim[k] = v; });
+  // Motion settings: plain values only; stacked motions (layers) are cleaned the same way, one level deep
+  const cleanAnim = (src: any, depth = 0): any => {
+    const anim: any = {};
+    Object.entries(src || {}).forEach(([k, v]) => {
+      if (k === 'exit' && v && typeof v === 'object') anim.exit = { type: String((v as any).type), duration: Number((v as any).duration) || undefined };
+      else if (k === 'layers' && depth === 0 && Array.isArray(v)) { const ls = v.slice(0, 3).filter((l: any) => l && typeof l === 'object' && typeof l.type === 'string').map((l: any) => cleanAnim(l, 1)); if (ls.length) anim.layers = ls; }
+      else if (SAFE_VALUE(v) || typeof v === 'boolean') anim[k] = v;
+    });
+    return anim;
+  };
+  const anim = cleanAnim(t.animation);
   const vAlign = (v: unknown) => (v === 'top' || v === 'middle' || v === 'bottom' ? v : undefined);
   return {
     id: t.id.slice(0, 80),
@@ -152,16 +161,52 @@ export async function readPackage(file: File): Promise<TemplatePackage> {
 /** The id an installed template gets: the same for every version of the same package */
 export const installedId = (pkg: PackageInfo, originalId: string) => `pkg_${pkg.id.replace(/[^\w-]/g, '')}_${originalId.replace(/[^\w-]/g, '')}`;
 
-/** Install a package: templates (new or updated) and any fonts it carries. Returns how many were new/updated. */
-export async function installPackage(pkg: TemplatePackage): Promise<{ added: number; updated: number; fonts: number }> {
-  let added = 0, updated = 0;
+/**
+ * The template already on this computer that a package template is a version of, if any:
+ * the same template from this package, the template itself (it was made or ready-made here),
+ * or the same template installed before from another package by the same author.
+ */
+export function existingTemplateFor(pkg: TemplatePackage, t: PresentationTemplate): PresentationTemplate | undefined {
+  return getTemplateById(installedId(pkg.package, t.id))
+    || getTemplateById(t.id)
+    || getCachedTemplates().find(x => {
+      const origin = (x as PresentationTemplate & { origin?: TemplateOrigin }).origin;
+      return origin?.originalId === t.id && origin.author === pkg.package.author;
+    });
+}
+
+/** Key order and missing values don't matter: two templates look the same if their name, styles and motion match */
+const canonical = (v: unknown): unknown => Array.isArray(v) ? v.map(canonical)
+  : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v as Record<string, unknown>).filter(([, x]) => x !== undefined && !(x && typeof x === 'object' && !Array.isArray(x) && Object.keys(x).length === 0)).sort(([a], [b]) => a.localeCompare(b)).map(([k, x]) => [k, canonical(x)]))
+  : v;
+const sameTemplate = (a: PresentationTemplate, b: PresentationTemplate) =>
+  JSON.stringify(canonical({ name: a.name, styles: a.styles, animation: a.animation })) === JSON.stringify(canonical({ name: b.name, styles: b.styles, animation: b.animation }));
+
+/** What installing would do to each template: add it, update the one already here, or nothing (it's the same) */
+export const installAction = (pkg: TemplatePackage, t: PresentationTemplate): 'add' | 'update' | 'same' => {
+  const here = existingTemplateFor(pkg, t);
+  return !here ? 'add' : sameTemplate(here, t) ? 'same' : 'update';
+};
+
+/**
+ * Install a package and any fonts it carries. A template already on this computer is updated in place (keeping
+ * its id, so screens and styles using it show the new version); an identical one is left alone; only new ones are added.
+ */
+export async function installPackage(pkg: TemplatePackage): Promise<{ added: number; updated: number; unchanged: number; fonts: number }> {
+  let added = 0, updated = 0, unchanged = 0;
   for (const t of pkg.templates) {
-    const id = installedId(pkg.package, t.id);
-    if (getTemplateById(id)) updated++; else added++;
+    const here = existingTemplateFor(pkg, t);
+    if (here && sameTemplate(here, t)) { unchanged++; continue; }
     const origin: TemplateOrigin = { packageId: pkg.package.id, packageName: pkg.package.name, author: pkg.package.author, version: pkg.package.version, originalId: t.id };
-    await saveTemplate({ ...t, id, isCustom: true, badge: t.badge || pkg.package.name.slice(0, 14), origin } as PresentationTemplate);
+    if (here) {
+      updated++;
+      await saveTemplate({ ...here, ...t, id: here.id, isCustom: here.isCustom, origin: (here as any).origin || origin } as PresentationTemplate);
+    } else {
+      added++;
+      await saveTemplate({ ...t, id: installedId(pkg.package, t.id), isCustom: true, badge: t.badge || pkg.package.name.slice(0, 14), origin } as PresentationTemplate);
+    }
   }
   const fonts: StoredFont[] = pkg.fonts.filter(f => f.file).map(f => ({ family: f.family, fileName: f.file!.name, type: f.file!.type, data: f.file!.data }));
   await installFonts(fonts);
-  return { added, updated, fonts: fonts.length };
+  return { added, updated, unchanged, fonts: fonts.length };
 }

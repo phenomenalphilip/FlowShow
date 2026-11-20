@@ -4,9 +4,17 @@
   "description": "enables the default permissions",
   "windows": [
     "main",
-    "projector"
+    "projector",
+    "projector-*"
   ],
   "permissions": [
-    "core:default"
+    "core:default",
+    "core:window:allow-set-fullscreen",
+    "core:window:allow-set-position",
+    "core:window:allow-set-size",
+    "core:window:allow-show",
+    "core:window:allow-available-monitors",
+    "core:window:allow-primary-monitor",
+    "core:webview:allow-create-webview-window"
   ]
 }

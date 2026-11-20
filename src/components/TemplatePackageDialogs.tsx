@@ -1,10 +1,9 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { X, Download, Upload, Check, AlertTriangle, Package, Type } from 'lucide-react';
 import { PresentationTemplate } from '../lib/templates';
 import {
-  PACKAGE_EXTENSION, TemplatePackage, buildPackage, fontsUsedBy, installPackage, isFlowShowFont, readPackage, installedId,
+  PACKAGE_EXTENSION, TemplatePackage, buildPackage, fontsUsedBy, installPackage, isFlowShowFont, readPackage, installAction,
 } from '../lib/templatePackages';
-import { getTemplateById } from '../lib/templates';
 import { FixedStage } from './FixedStage';
 import { SmartTextLayout } from './SmartTextLayout';
 
@@ -45,9 +44,11 @@ function Thumb({ t }: { t: PresentationTemplate }) {
 }
 
 /** Save templates as a package file other FlowShow users can install */
-export function ExportTemplatesDialog({ templates, onClose }: { templates: PresentationTemplate[]; onClose: () => void }) {
-  const [chosen, setChosen] = useState<Set<string>>(() => new Set(templates.filter(t => t.isCustom).map(t => t.id)));
-  const [info, setInfo] = useState({ name: '', author: '', version: '1.0', description: '', license: '', website: '' });
+export function ExportTemplatesDialog({ templates, initialIds, onClose }: { templates: PresentationTemplate[]; initialIds?: string[]; onClose: () => void }) {
+  // Starts with the template right-clicked, or else your own templates
+  const [chosen, setChosen] = useState<Set<string>>(() => new Set(initialIds ?? templates.filter(t => t.isCustom).map(t => t.id)));
+  const first = initialIds?.length === 1 ? templates.find(t => t.id === initialIds[0]) : undefined;
+  const [info, setInfo] = useState({ name: first?.name || '', author: '', version: '1.0', description: first?.description || '', license: '', website: '' });
   const [fontFiles, setFontFiles] = useState<{ family: string; file: File }[]>([]);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -123,37 +124,44 @@ export function ExportTemplatesDialog({ templates, onClose }: { templates: Prese
 }
 
 /** Install a template package: shows what's in it first */
-export function ImportTemplatesDialog({ onClose, onInstalled }: { onClose: () => void; onInstalled?: () => void }) {
+/** Install a template package: shows what's in it first. initialFile: a package already chosen (File → Import) */
+export function ImportTemplatesDialog({ onClose, onInstalled, initialFile }: { onClose: () => void; onInstalled?: () => void; initialFile?: File }) {
   const [pkg, setPkg] = useState<TemplatePackage | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const open = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = '';
-    if (!file) return;
+  const readFile = async (file: File) => {
     setProblem(null); setDone(null); setPkg(null);
     try { setPkg(await readPackage(file)); } catch (err) { setProblem(err instanceof Error ? err.message : String(err)); }
   };
+  const open = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (file) await readFile(file);
+  };
+  useEffect(() => { if (initialFile) void readFile(initialFile); }, [initialFile]);
   const install = async () => {
     if (!pkg) return;
     setBusy(true);
     try {
       const r = await installPackage(pkg);
-      setDone(`Installed "${pkg.package.name}": ${r.added} new, ${r.updated} updated${r.fonts ? `, ${r.fonts} font${r.fonts === 1 ? '' : 's'}` : ''}.`);
+      setDone(`Installed "${pkg.package.name}": ${r.added} new, ${r.updated} updated${r.unchanged ? `, ${r.unchanged} already up to date` : ''}${r.fonts ? `, ${r.fonts} font${r.fonts === 1 ? '' : 's'}` : ''}.`);
       onInstalled?.();
     } catch (err) {
       setProblem(`Couldn't install: ${err instanceof Error ? err.message : String(err)}`);
     } finally { setBusy(false); }
   };
-  const updating = pkg ? pkg.templates.filter(t => getTemplateById(installedId(pkg.package, t.id))).length : 0;
+  const actions = pkg ? pkg.templates.map(t => installAction(pkg, t)) : [];
+  const updating = actions.filter(a => a !== 'add').length;
+  const nothingToDo = !!pkg && actions.every(a => a === 'same');
 
   return (
     <Shell title="Import templates" onClose={onClose} footer={<>
       {done && <span className="mr-auto self-center text-xs text-emerald-300 flex items-center gap-1" data-import-message><Check size={13} /> {done}</span>}
       <button onClick={onClose} className="px-5 py-2 rounded-lg text-sm text-neutral-300 hover:text-white hover:bg-white/5">Close</button>
-      {pkg && !done && <button onClick={install} disabled={busy} className="px-6 py-2 rounded-lg text-sm font-bold bg-pink-600 hover:bg-pink-500 text-white flex items-center gap-2 disabled:opacity-50"><Download size={15} /> {updating ? 'Install / update' : 'Install'}</button>}
+      {pkg && !done && nothingToDo && <span className="mr-auto self-center text-xs text-neutral-400">Every template in this package is already installed and up to date.</span>}
+      {pkg && !done && !nothingToDo && <button onClick={install} disabled={busy} className="px-6 py-2 rounded-lg text-sm font-bold bg-pink-600 hover:bg-pink-500 text-white flex items-center gap-2 disabled:opacity-50"><Download size={15} /> {updating ? 'Install / update' : 'Install'}</button>}
     </>}>
       <label className="w-full py-3 rounded-lg flex items-center justify-center gap-2 text-sm font-bold bg-white/5 hover:bg-white/10 text-white cursor-pointer border border-white/10">
         <Upload size={16} /> Choose a template package ({PACKAGE_EXTENSION})…
@@ -172,7 +180,7 @@ export function ImportTemplatesDialog({ onClose, onInstalled }: { onClose: () =>
             {pkg.templates.map(t => (
               <div key={t.id}>
                 <Thumb t={t} />
-                <div className="text-[10px] text-neutral-200 mt-1 truncate">{t.name}{getTemplateById(installedId(pkg.package, t.id)) ? ' · update' : ''}</div>
+                <div className="text-[10px] text-neutral-200 mt-1 truncate">{t.name}{actions[pkg.templates.indexOf(t)] === 'update' ? ' · update' : actions[pkg.templates.indexOf(t)] === 'same' ? ' · already installed' : ''}</div>
               </div>
             ))}
           </div>

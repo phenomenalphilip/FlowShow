@@ -59,3 +59,52 @@ export async function closeProjector(): Promise<void> {
     console.error("Failed to close projector window:", e);
   }
 }
+
+/**
+ * Open (or move) an output window full screen on the monitor with this name: the screen plugged into HDMI,
+ * DisplayPort or any other port. Falls back to the first screen that isn't the operator's own screen.
+ */
+export async function openOutputOnMonitor(label: string, url: string, title: string, monitorName: string): Promise<void> {
+  const monitors = await availableMonitors();
+  const { primaryMonitor } = await import('@tauri-apps/api/window');
+  const primary = await primaryMonitor();
+  const target = monitors.find(m => m.name === monitorName)
+    ?? monitors.find(m => m.name !== primary?.name)
+    ?? monitors[0];
+  if (!target) throw new Error('no screens found');
+  const { x, y } = target.position;
+  const { width, height } = target.size;
+  const scale = target.scaleFactor || 1;
+
+  const existing = await WebviewWindow.getByLabel(label);
+  if (existing) {
+    // Already open: put it back on its screen, full screen, in front
+    const { PhysicalPosition, PhysicalSize } = await import('@tauri-apps/api/dpi');
+    await existing.setFullscreen(false);
+    await existing.setPosition(new PhysicalPosition(x, y));
+    await existing.setSize(new PhysicalSize(width, height));
+    await existing.setFullscreen(true);
+    await existing.show();
+    return;
+  }
+  const win = new WebviewWindow(label, {
+    url,
+    title: `FlowShow - ${title}`,
+    // Window positions are in logical pixels
+    x: x / scale,
+    y: y / scale,
+    width: width / scale,
+    height: height / scale,
+    fullscreen: true,
+    decorations: false,
+    resizable: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    focus: false,
+    backgroundColor: '#000000',
+  } as any);
+  await new Promise<void>((resolve, reject) => {
+    win.once('tauri://created', () => resolve());
+    win.once('tauri://error', (e) => reject(new Error(String((e as any)?.payload ?? 'the window could not be created'))));
+  });
+}

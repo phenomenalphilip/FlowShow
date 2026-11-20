@@ -63,6 +63,40 @@ export interface AnimationConfig {
   karaokeColor?: string;
   /** How the words leave when the next slide comes in */
   exit?: { type: ExitType; duration?: number };
+  /** Up to 3 more motions that run at the same time as this one (see stackedMotions) */
+  layers?: AnimationConfig[];
+}
+
+/** Most motions that can run together on one text box */
+export const MAX_MOTIONS = 4;
+/** Motions that animate each word; one of these at a time */
+export const WORD_MOTIONS: AnimationType[] = ['flicker', 'bounce', 'karaoke'];
+/** Motions that move the whole text through the screen; one of these at a time */
+export const TRAVEL_MOTIONS: AnimationType[] = ['ticker', 'vertical-scroll', 'scroll-in'];
+
+/** Which family a motion belongs to: one word effect, one travel (Ticker / Vertical Scroll / Scroll In) and one
+ *  Word Stack can run at once; line entrances all combine */
+export const motionFamily = (type: AnimationType): 'word' | 'travel' | 'stack' | 'entrance' =>
+  WORD_MOTIONS.includes(type) ? 'word' : TRAVEL_MOTIONS.includes(type) ? 'travel' : type === 'word-stack' ? 'stack' : 'entrance';
+
+/** Would these two motions fight each other? (the same one twice, two of a kind, or a one-line Ticker with a Word Stack column) */
+export function motionsClash(a: AnimationType, b: AnimationType): boolean {
+  if (a === b) return true;
+  const fa = motionFamily(a);
+  if (fa !== 'entrance' && fa === motionFamily(b)) return true;
+  return (a === 'ticker' && b === 'word-stack') || (a === 'word-stack' && b === 'ticker');
+}
+
+/** All the motions running on a box: the main one plus the layers that don't clash with it (at most MAX_MOTIONS) */
+export function stackedMotions(anim?: AnimationConfig): AnimationConfig[] {
+  if (!anim?.type) return [];
+  const out: AnimationConfig[] = [anim];
+  for (const l of anim.layers || []) {
+    if (out.length >= MAX_MOTIONS) break;
+    if (!l?.type || out.some(o => motionsClash(o.type, l.type))) continue;
+    out.push(l);
+  }
+  return out;
 }
 
 /** Used when a slide or text box picks a motion but nothing underneath it has one */

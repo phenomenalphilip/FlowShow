@@ -9,7 +9,7 @@ import { FixedStage } from './FixedStage';
 import { DesignBox, Rect, getPlacement, placeAcross, placeDown, resizeBox } from './DesignCanvas';
 import {
   Phase, WEIGHTS, selectCls, segBtn, smallBtn, GroupLabel, Divider, SizeStepper, NumField, ColorField, MiniSlider,
-  DesignFor, DesignForSwitch, DesignStatus, StatusBadges, Notice, MotionOptions, ExitSelect, TextPositionSwitch, FontSelect,
+  DesignFor, DesignForSwitch, DesignStatus, StatusBadges, Notice, MotionOptions, MotionLayers, ExitSelect, TextPositionSwitch, FontSelect,
 } from './DesignControls';
 
 /** Where a screen's scripture template is kept: in its style (shared by the screens on that style), or on the screen */
@@ -419,6 +419,7 @@ export function ScriptureDesignWorkspace({
                 onChange={(v, phase) => setAnim({ duration: v }, phase)}
               />
             )}
+            <MotionLayers anim={anim} onChange={(patch, phase) => setAnim(patch, phase)} />
             {anim?.type !== 'ticker' && (
               <>
                 <Divider />

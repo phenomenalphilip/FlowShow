@@ -8,20 +8,19 @@ interface ImportShowsModalProps {
   onClose: () => void;
   /** Add the imported shows to the library, as Songs or Declarations */
   onImport: (shows: ImportedShow[], category: ShowCategory) => void;
+  /** Files already chosen (File → Import): choose Songs or Declarations, then Import */
+  pendingFiles?: File[];
 }
 
 /** Import songs (or a whole song library) from FreeShow, ProPresenter, Word or text files */
-export function ImportShowsModal({ isOpen, onClose, onImport }: ImportShowsModalProps) {
+export function ImportShowsModal({ isOpen, onClose, onImport, pendingFiles }: ImportShowsModalProps) {
   const [category, setCategory] = useState<ShowCategory>('Songs');
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState<{ shows: ImportedShow[]; problems: string[] } | null>(null);
   if (!isOpen) return null;
 
   const close = () => { setDone(null); setBusy(false); onClose(); };
-  const pick = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const input = e.target;
-    const files: File[] = Array.from((input.files || []) as FileList);
-    input.value = '';
+  const importFiles = async (files: File[]) => {
     if (!files.length) return;
     setBusy(true);
     setDone(null);
@@ -33,6 +32,12 @@ export function ImportShowsModal({ isOpen, onClose, onImport }: ImportShowsModal
     } finally {
       setBusy(false);
     }
+  };
+
+  const pick = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files: File[] = Array.from((e.target.files || []) as FileList);
+    e.target.value = '';
+    void importFiles(files);
   };
 
   return (
@@ -58,6 +63,12 @@ export function ImportShowsModal({ isOpen, onClose, onImport }: ImportShowsModal
             Choose one or more files: {IMPORT_FORMATS}. A Word document with a heading above each song imports every song in it.
             Groups (Verse 1, Chorus…) are kept, or worked out from the words.
           </p>
+          {pendingFiles && pendingFiles.length > 0 && !done && (
+            <button type="button" disabled={busy} onClick={() => importFiles(pendingFiles)} className="w-full py-3 rounded-lg flex items-center justify-center gap-2 text-sm font-bold bg-pink-600 hover:bg-pink-500 text-white disabled:opacity-50" data-import-pending>
+              {busy ? <Activity size={16} className="animate-spin" /> : <Upload size={16} />}
+              Import {pendingFiles.length === 1 ? `“${pendingFiles[0].name}”` : `${pendingFiles.length} files`}
+            </button>
+          )}
           <label className={`w-full py-3 rounded-lg flex items-center justify-center gap-2 text-sm font-bold transition-colors ${busy ? 'bg-pink-600/40 text-white/70 cursor-wait' : 'bg-pink-600 hover:bg-pink-500 text-white cursor-pointer'}`}>
             {busy ? <Activity size={16} className="animate-spin" /> : <Upload size={16} />}
             {busy ? 'Importing…' : 'Choose files…'}

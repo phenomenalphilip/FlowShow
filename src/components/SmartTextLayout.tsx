@@ -1,7 +1,7 @@
 import React, { useMemo, useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { tokenize, Token } from '../lib/TokenEngine';
-import { AnimationConfig, TextPosition, getScrollPositions } from '../lib/templates';
+import { AnimationConfig, TextPosition, getScrollPositions, motionFamily, stackedMotions } from '../lib/templates';
 
 /** The canvas every screen is drawn on (FixedStage) */
 const CANVAS_W = 1920;
@@ -79,10 +79,19 @@ export function SmartTextLayout({
      });
   }, [text, lines, styleOverrides]);
 
-  const isKaraoke = animation?.type === 'karaoke';
-  const perWordEffect = animation?.type === 'flicker' || animation?.type === 'bounce' || isKaraoke;
-  const isScrollIn = animation?.type === 'scroll-in';
-  const isTicker = animation?.type === 'ticker';
+  // Up to four motions run together: line entrances combine, plus one word effect, one travel
+  // (Ticker / Vertical Scroll / Scroll In) and Word Stack. Each takes its settings from its own motion.
+  const motions = stackedMotions(animation);
+  const wordAnim = motions.find(m => motionFamily(m.type) === 'word');
+  const scrollInAnim = motions.find(m => m.type === 'scroll-in');
+  const scrollAnim = motions.find(m => m.type === 'vertical-scroll');
+  const tickerAnim = motions.find(m => m.type === 'ticker');
+  const stackAnim = motions.find(m => m.type === 'word-stack');
+  const entranceAnims = motions.filter(m => motionFamily(m.type) === 'entrance');
+  const isKaraoke = wordAnim?.type === 'karaoke';
+  const perWordEffect = !!wordAnim;
+  const isScrollIn = !!scrollInAnim;
+  const isTicker = !!tickerAnim;
   const totalWords = useMemo(
     () => renderedLines.reduce((n, line) => n + line.filter(t => (t.wordIndex ?? -1) >= 0).length, 0),
     [renderedLines]
@@ -92,7 +101,7 @@ export function SmartTextLayout({
     [renderedLines]
   );
 
-  const isWordStack = animation?.type === 'word-stack';
+  const isWordStack = !!stackAnim;
   // Word stack: one word per row, punctuation kept with its word (opening marks join the next word)
   const stackWords = useMemo(() => {
     if (!isWordStack) return [];
@@ -127,20 +136,20 @@ export function SmartTextLayout({
   // Ticker: the width of its line (canvas px), measured once it is drawn
   const [tickerWidth, setTickerWidth] = useState<number | null>(null);
   useEffect(() => {
-    if (animation?.type !== 'ticker' || !blockEl) return;
+    if (!isTicker || !blockEl) return;
     const w = blockEl.scrollWidth;
     if (w && w !== tickerWidth) setTickerWidth(w);
-  }, [animation?.type, blockEl, text, fitStyleKey]);
+  }, [isTicker, blockEl, text, fitStyleKey]);
   // Vertical-scroll geometry in unscaled canvas px: where the text centre sits at y=0, and the screen height
   const [scrollGeom, setScrollGeom] = useState<{ naturalCenter: number; screenH: number } | null>(null);
   const posToPx = (pos: number) => scrollGeom ? (pos / 100) * scrollGeom.screenH - scrollGeom.naturalCenter : null;
-  const scrollPositions = getScrollPositions(animation);
+  const scrollPositions = getScrollPositions(scrollAnim);
   const scrollPxStart = posToPx(scrollPositions.start);
   const scrollPxEnd = posToPx(scrollPositions.end);
   const parkedPx = scrollPreviewPos !== undefined ? posToPx(scrollPreviewPos) : null;
 
   useEffect(() => {
-    if (animation?.type !== 'vertical-scroll') return;
+    if (!scrollAnim) return;
     if (!containerRef.current || !textContainerRef.current) return;
 
     const compute = () => {
@@ -161,14 +170,14 @@ export function SmartTextLayout({
     };
 
     requestAnimationFrame(compute);
-  }, [animation?.type, text, lines, styleOverrides?.layout, blockEl]);
+  }, [!!scrollAnim, text, lines, styleOverrides?.layout, blockEl]);
 
   // Smart FitText behavior
   useEffect(() => {
     if (!containerRef.current || !textContainerRef.current) return;
 
     // For vertical-scroll and the ticker: allow text to remain large and flow without height compression
-    if (animation?.type === 'vertical-scroll' || animation?.type === 'ticker') {
+    if (scrollAnim || isTicker) {
       setScale(1);
       return;
     }
@@ -196,11 +205,11 @@ export function SmartTextLayout({
        
        setScale(newScale);
     });
-  }, [text, source, type, fitStyleKey, animation?.type, blockEl]);
+  }, [text, source, type, fitStyleKey, !!scrollAnim, isTicker, blockEl]);
 
   const align = (styleOverrides?.global?.textAlign as string) || 'center';
   // Top / middle / bottom of the box (scrolling text always runs through the middle)
-  const vAlign: TextPosition = animation?.type === 'vertical-scroll' ? 'middle' : (styleOverrides?.verticalAlign || 'middle');
+  const vAlign: TextPosition = scrollAnim ? 'middle' : (styleOverrides?.verticalAlign || 'middle');
   const vOrigin = vAlign === 'top' ? 'top' : vAlign === 'bottom' ? 'bottom' : 'center';
   const justifyClass = vAlign === 'top' ? 'justify-start' : vAlign === 'bottom' ? 'justify-end' : 'justify-center';
 
@@ -232,12 +241,12 @@ export function SmartTextLayout({
   const posClass = useAbsolute ? 'absolute' : 'relative w-full h-full';
   const shouldRenderSeparateSource = source && useAbsolute && styleOverrides?.sourceLayout;
 
-  const isScroll = animation?.type === 'vertical-scroll';
+  const isScroll = !!scrollAnim;
 
   // Animation variants generator for each line
-  const getLineMotion = (lineIdx: number) => {
-    // Scrolling and Scroll In move the whole block; Flicker, Bounce and Karaoke animate each word or letter instead of lines
-    if (isScroll || isScrollIn || perWordEffect) {
+  const getLineMotion = (lineIdx: number): { initial: any; animate: any; transition: any } => {
+    // Scrolling, Scroll In, Ticker and the word effects on their own leave the lines still; entrances run on top of them
+    if (!entranceAnims.length && (isScroll || isScrollIn || isTicker || perWordEffect)) {
       return {
         initial: { opacity: 1 },
         animate: { opacity: 1 },
@@ -252,7 +261,32 @@ export function SmartTextLayout({
         transition: { duration: 0.25 }
       };
     }
+    if (entranceAnims.length <= 1) return lineMotionFor(entranceAnims[0] || animation, lineIdx);
+    return combineLineMotions(entranceAnims.map(a => lineMotionFor(a, lineIdx)));
+  };
 
+  // Several entrances at once: moves add up, sizes multiply, filters stack, and each value keeps its own timing
+  const combineLineMotions = (parts: { initial: any; animate: any; transition: any }[]) => {
+    const initial: any = {}, animate: any = {}, transition: any = {};
+    const filtersFrom: string[] = [], filtersTo: string[] = [];
+    for (const p of parts) {
+      for (const key of Object.keys({ ...p.initial, ...p.animate })) {
+        const from = p.initial?.[key], to = p.animate?.[key];
+        if (key === 'filter') { if (from) filtersFrom.push(from); if (to) filtersTo.push(to); }
+        else if (key === 'x' || key === 'y') { initial[key] = (initial[key] ?? 0) + (from ?? 0); animate[key] = (animate[key] ?? 0) + (to ?? 0); }
+        else if (key === 'scale') { initial[key] = (initial[key] ?? 1) * (from ?? 1); animate[key] = (animate[key] ?? 1) * (to ?? 1); }
+        else if (key === 'opacity') { initial[key] = Math.min(initial[key] ?? 1, from ?? 1); animate[key] = to ?? 1; }
+        else { initial[key] = from; animate[key] = to; }
+        // The first motion to move a value sets its timing
+        if (!transition[key]) transition[key] = p.transition;
+      }
+    }
+    if (filtersFrom.length) { initial.filter = filtersFrom.join(' '); animate.filter = filtersTo.join(' '); }
+    transition.default = parts[0].transition;
+    return { initial, animate, transition };
+  };
+
+  const lineMotionFor = (animation: AnimationConfig, lineIdx: number): { initial: any; animate: any; transition: any } => {
     const duration = animation.duration || 0.5;
     const delay = (animation.stagger ?? 0.06) * lineIdx;
 
@@ -350,8 +384,8 @@ export function SmartTextLayout({
     transition: { repeat: Infinity, duration: 3.8, ease: 'easeInOut' as const }
   } : undefined;
 
-  const isLoop = animation?.scrollLoop !== false;
-  const scrollDuration = animation?.duration || 12;
+  const isLoop = scrollAnim?.scrollLoop !== false;
+  const scrollDuration = scrollAnim?.duration || 12;
   const yStart = scrollPxStart ?? 0;
   const yEnd   = scrollPxEnd ?? 0;
   const scrollReady = scrollPxStart !== null && scrollPxEnd !== null;
@@ -369,7 +403,7 @@ export function SmartTextLayout({
       transition: {
         repeat: Infinity,
         duration: scrollDuration,
-        ease: (animation?.easing === 'easeOut' || animation?.easing === 'easeInOut') ? animation.easing : 'linear',
+        ease: (scrollAnim?.easing === 'easeOut' || scrollAnim?.easing === 'easeInOut') ? scrollAnim.easing : 'linear',
         repeatType: 'loop' as const
       }
     } : {
@@ -377,7 +411,7 @@ export function SmartTextLayout({
       animate: { y: yEnd },
       transition: {
         duration: scrollDuration,
-        ease: (animation?.easing === 'easeOut' || animation?.easing === 'easeInOut') ? animation.easing : 'linear'
+        ease: (scrollAnim?.easing === 'easeOut' || scrollAnim?.easing === 'easeInOut') ? scrollAnim.easing : 'linear'
       }
     }
   ) : {
@@ -427,8 +461,8 @@ export function SmartTextLayout({
 
   // ─── Flicker / Bounce / Karaoke: each word animates on its own (Flicker and Bounce: each letter, when the slide is a single word) ───
   const letterMode = perWordEffect && !isKaraoke && totalWords === 1;
-  const effectGap = animation?.stagger ?? (animation?.type === 'bounce' ? 0.12 : isKaraoke ? 0.5 : 0.08);
-  const effectDuration = animation?.duration || (animation?.type === 'bounce' ? 0.8 : 0.9);
+  const effectGap = wordAnim?.stagger ?? (wordAnim?.type === 'bounce' ? 0.12 : isKaraoke ? 0.5 : 0.08);
+  const effectDuration = wordAnim?.duration || (wordAnim?.type === 'bounce' ? 0.8 : 0.9);
 
   // Karaoke: a coloured copy of the word is uncovered from left to right, one word after another at the chosen pace
   const renderKaraokeWord = (token: Token, unit: number) => (
@@ -436,7 +470,7 @@ export function SmartTextLayout({
       {renderToken(token, token.id)}
       <motion.span
         aria-hidden
-        style={{ ...token.computedStyles, position: 'absolute', left: 0, top: 0, whiteSpace: 'pre', pointerEvents: 'none', color: animation?.karaokeColor || '#38bdf8' }}
+        style={{ ...token.computedStyles, position: 'absolute', left: 0, top: 0, whiteSpace: 'pre', pointerEvents: 'none', color: wordAnim?.karaokeColor || '#38bdf8' }}
         initial={{ clipPath: 'inset(0 100% 0 0)' }}
         animate={{ clipPath: 'inset(0 0% 0 0)' }}
         transition={{ delay: 0.3 + unit * effectGap, duration: Math.max(0.12, effectGap * 0.9), ease: 'linear' }}
@@ -448,11 +482,11 @@ export function SmartTextLayout({
 
   const renderEffectUnit = (unit: number, count: number, key: string, child: React.ReactNode) => {
     // Flicker lights words in a scattered (but repeatable) order; Bounce goes in reading order
-    const delay = animation?.type === 'flicker'
+    const delay = wordAnim?.type === 'flicker'
       ? 0.05 + pseudoRandom(unit + 1) * effectGap * Math.max(1, count)
       : 0.05 + unit * effectGap;
-    const keepGoing = !!animation?.effectLoop;
-    if (animation?.type === 'flicker') {
+    const keepGoing = !!wordAnim?.effectLoop;
+    if (wordAnim?.type === 'flicker') {
       return (
         <motion.span
           key={key}
@@ -524,8 +558,8 @@ export function SmartTextLayout({
   const letterCursor = { n: 0 };
 
   // Word stack timing: stagger = time between words, duration = length of each pop
-  const wordGap = animation?.stagger ?? 0.35;
-  const popDuration = animation?.duration ?? 0.35;
+  const wordGap = stackAnim?.stagger ?? 0.35;
+  const popDuration = stackAnim?.duration ?? 0.35;
   const popOrigin = align === 'right' ? 'right center' : align === 'center' ? 'center center' : 'left center';
 
   // ─── Exit: how the words leave when the next slide comes in ───
@@ -561,8 +595,9 @@ export function SmartTextLayout({
     const setSize = parseFloat(String(styleOverrides?.global?.fontSize ?? ''));
     // The template's size, kept inside the box's height (80px when the template doesn't set one)
     const fontPx = Math.min(Number.isFinite(setSize) ? setSize : 80, boxH * 0.85);
-    const speed = Math.max(20, animation?.tickerSpeed || 260);
-    const leftward = (animation?.tickerDirection || 'left') === 'left';
+    const speed = Math.max(20, tickerAnim?.tickerSpeed || 260);
+    const leftward = (tickerAnim?.tickerDirection || 'left') === 'left';
+    const tickerEntrance = entranceAnims.length ? getLineMotion(0) : null;
     const textW = tickerWidth ?? 0;
     const from = leftward ? boxW : -textW;
     const to = leftward ? -textW : boxW;
@@ -579,15 +614,22 @@ export function SmartTextLayout({
           style={{ ...baseTextStyle, textAlign: 'left', fontSize: `${fontPx}px`, opacity: tickerWidth === null ? 0 : 1 }}
           initial={{ x: from }}
           animate={{ x: to }}
-          transition={{ duration: (textW + boxW) / speed, ease: 'linear', repeat: animation?.scrollLoop === false ? 0 : Infinity, repeatType: 'loop' }}
+          transition={{ duration: (textW + boxW) / speed, ease: 'linear', repeat: tickerAnim?.scrollLoop === false ? 0 : Infinity, repeatType: 'loop' }}
         >
-          {renderedLines.map((lineTokens, lineIdx) => (
-            <React.Fragment key={`t-${lineIdx}`}>
-              {lineIdx > 0 && <span style={{ padding: '0 0.8em', opacity: 0.6 }}>•</span>}
-              {lineTokens.map((token: Token) => renderToken(token, token.id))}
-            </React.Fragment>
-          ))}
-          {source && !shouldRenderSeparateSource && <span style={{ paddingLeft: '0.8em', opacity: 0.75 }}>· {source}</span>}
+          <motion.span
+            style={{ display: 'inline-block' }}
+            initial={tickerEntrance?.initial ?? false}
+            animate={tickerEntrance?.animate}
+            transition={tickerEntrance?.transition}
+          >
+            {renderedLines.map((lineTokens, lineIdx) => (
+              <React.Fragment key={`t-${lineIdx}`}>
+                {lineIdx > 0 && <span style={{ padding: '0 0.8em', opacity: 0.6 }}>•</span>}
+                {perWordEffect ? renderEffectLine(lineTokens, letterCursor) : lineTokens.map((token: Token) => renderToken(token, token.id))}
+              </React.Fragment>
+            ))}
+            {source && !shouldRenderSeparateSource && <span style={{ paddingLeft: '0.8em', opacity: 0.75 }}>· {source}</span>}
+          </motion.span>
         </motion.div>
       </div>
     );
@@ -602,19 +644,26 @@ export function SmartTextLayout({
       className={`font-display font-bold text-white uppercase ${align === 'justify' ? 'w-full block' : 'inline-block'} select-none`}
       style={baseTextStyle}
     >
-      {isWordStack ? stackWords.map((w, i) => (
+      {isWordStack ? stackWords.map((w, i) => {
         // Earlier words stay; later words wait their turn (they keep their space so nothing shifts)
-        <motion.div
-          key={w.id}
-          initial={{ opacity: 0, scale: 0.35, y: 18 }}
-          animate={{ opacity: 1, scale: 1, y: 0 }}
-          transition={{ duration: popDuration, delay: 0.08 + i * wordGap, ease: [0.34, 1.56, 0.64, 1] }}
-          className="block"
-          style={{ transformOrigin: popOrigin }}
-        >
-          {w.tokens.map((token, ti) => renderToken(token, `${w.id}-${ti}`))}
-        </motion.div>
-      )) : renderedLines.map((lineTokens, lineIdx) => {
+        const popDelay = 0.08 + i * wordGap;
+        const pop = { initial: { opacity: 0, scale: 0.35, y: 18 }, animate: { opacity: 1, scale: 1, y: 0 }, transition: { duration: popDuration, delay: popDelay, ease: [0.34, 1.56, 0.64, 1] } };
+        const m = entranceAnims.length
+          ? combineLineMotions([pop, ...entranceAnims.map(a => { const e = lineMotionFor(a, 0); return { ...e, transition: { ...e.transition, delay: popDelay } }; })])
+          : pop;
+        return (
+          <motion.div
+            key={w.id}
+            initial={m.initial}
+            animate={m.animate}
+            transition={m.transition}
+            className="block"
+            style={{ transformOrigin: popOrigin }}
+          >
+            {perWordEffect ? renderEffectLine(w.tokens, letterCursor) : w.tokens.map((token, ti) => renderToken(token, `${w.id}-${ti}`))}
+          </motion.div>
+        );
+      }) : renderedLines.map((lineTokens, lineIdx) => {
          const lineStyle = styleOverrides?.lines?.[lineIdx] || {};
          const isLineSelected = selectedLineIndices?.includes(lineIdx);
          const isLineClickable = !!onLineClick || !!onLineMouseDown;
@@ -680,7 +729,7 @@ export function SmartTextLayout({
   );
 
   // Scroll In: the box's words start just off the chosen edge of the screen and glide into place
-  const fromEdge = animation?.fromEdge || 'bottom';
+  const fromEdge = scrollInAnim?.fromEdge || 'bottom';
   const scrollInFrom = fromEdge === 'top' ? { x: 0, y: -(box.y + box.height) * CANVAS_H - 60 }
     : fromEdge === 'bottom' ? { x: 0, y: (1 - box.y) * CANVAS_H + 60 }
     : fromEdge === 'left' ? { x: -(box.x + box.width) * CANVAS_W - 60, y: 0 }
@@ -699,7 +748,7 @@ export function SmartTextLayout({
             initial={scrollInFrom}
             animate={{ x: 0, y: 0 }}
             exit={exitMotion}
-            transition={{ duration: animation?.duration || 0.9, ease: [0.16, 1, 0.3, 1] }}
+            transition={{ duration: scrollInAnim?.duration || 0.9, ease: [0.16, 1, 0.3, 1] }}
             className={align === 'justify' ? 'w-full' : ''}
             style={{ display: 'flex', flexDirection: 'column', alignItems }}
           >

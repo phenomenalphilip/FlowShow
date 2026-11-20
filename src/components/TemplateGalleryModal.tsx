@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   X, Sparkles, Check, Layers, Monitor, Pencil, Plus,
-  ArrowRight, Radio, Tv, Music, Type, Copy, Trash
+  ArrowRight, Radio, Tv, Music, Type, Copy, Trash, Download
 } from 'lucide-react';
 import {
   STARTER_TEMPLATES,
@@ -677,6 +677,8 @@ export function InlineTemplateGrid({
   const [editingTemplate, setEditingTemplate] = useState<PresentationTemplate | null>(null);
   const [appliedId, setAppliedId] = useState<string | null>(null);
   const [packageDialog, setPackageDialog] = useState<'import' | 'export' | null>(null);
+  // Templates the export dialog starts with (right-click → Export…); null = your own templates
+  const [exportIds, setExportIds] = useState<string[] | null>(null);
 
   // Right-click context menu
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; template: PresentationTemplate } | null>(null);
@@ -798,7 +800,7 @@ export function InlineTemplateGrid({
         <button type="button" onClick={() => setPackageDialog('import')} className="shrink-0 px-2 py-0.5 rounded text-[11px] font-semibold text-neutral-300 hover:text-white hover:bg-white/5" title="Install a template package (.fstemplates)">Import</button>
         <button type="button" onClick={() => setPackageDialog('export')} className="shrink-0 px-2 py-0.5 rounded text-[11px] font-semibold text-neutral-300 hover:text-white hover:bg-white/5" title="Save templates as a package other FlowShow users can install">Export</button>
       </div>
-      {packageDialog === 'export' && <ExportTemplatesDialog templates={templates} onClose={() => setPackageDialog(null)} />}
+      {packageDialog === 'export' && <ExportTemplatesDialog templates={templates} initialIds={exportIds ?? undefined} onClose={() => { setPackageDialog(null); setExportIds(null); }} />}
       {packageDialog === 'import' && <ImportTemplatesDialog onClose={() => setPackageDialog(null)} onInstalled={() => onLoadTemplates()} />}
 
       {/* Grid */}
@@ -910,6 +912,13 @@ export function InlineTemplateGrid({
             }}
           >
             <Copy size={12} className="text-neutral-400" /> Save as Copy
+          </button>
+          <button
+            className="w-full text-left px-3 py-2 hover:bg-white/5 text-neutral-200 hover:text-white flex items-center gap-2 transition-colors"
+            onClick={() => { setExportIds([ctxMenu.template.id]); setPackageDialog('export'); setCtxMenu(null); }}
+            title="Save this template as a package other FlowShow users can install"
+          >
+            <Download size={12} className="text-neutral-400" /> Export…
           </button>
           {(ctxMenu.template.isCustom) && (
             <>

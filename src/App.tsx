@@ -11,7 +11,8 @@ import {
 } from 'lucide-react';
 import { ndiService, NdiSource, NdiOutputChannel } from './lib/ndi';
 import { SetlistManager } from './components/SetlistManager';
-import { ServiceSetlist, SetlistItem, loadCurrentSetlist, saveCurrentSetlist, DEFAULT_SAMPLE_SETLIST } from './lib/setlist';
+import { ServiceSetlist, SetlistItem, DEFAULT_SAMPLE_SETLIST, ProjectsState, loadProjects, saveProjects } from './lib/setlist';
+import { ProjectsPanel, DRAG_SONG, DRAG_MEDIA, DRAG_SCRIPTURE } from './components/ProjectsPanel';
 
 function formatTime(seconds: number) {
   if (isNaN(seconds) || !isFinite(seconds)) return "0:00";
@@ -20,13 +21,20 @@ function formatTime(seconds: number) {
   return `${m}:${s < 10 ? '0' : ''}${s}`;
 }
 
-import { MediaLibrary } from './components/MediaLibrary';
+import { MediaLibrary, resolveMediaRef } from './components/MediaLibrary';
 import { AudioModule } from './components/AudioModule';
 import { AddSongModal } from './components/AddSongModal';
 import { ImportShowsModal } from './components/ImportShowsModal';
 import { loadInstalledFonts } from './lib/fontStore';
 import { ProfileRecord, loadProfiles, saveProfiles, buildProfileFile, readProfileFile, PROFILE_EXTENSION } from './lib/profiles';
 import { ProfilesPanel, ProfilesApi } from './components/ProfilesPanel';
+import { ProfileMenu } from './components/ProfileMenu';
+import { TopMenu, ExportDialog, ExportChoice, ShortcutsDialog, QuickStartDialog, AboutDialog, DocumentationDialog } from './components/AppMenus';
+import { ExportTemplatesDialog, ImportTemplatesDialog } from './components/TemplatePackageDialogs';
+import { BACKUP_EXTENSION, buildBackup, restoreBackup, downloadBlob } from './lib/backup';
+import { IMPORT_ACCEPT, ImportedShow, isSongXml, showFromText } from './lib/importers';
+import { ImportChooser, ImportKind } from './components/ImportChooser';
+import { getMonitors, isTauri, openOutputOnMonitor } from './lib/tauriScreen';
 import { get, set } from 'idb-keyval';
 import { SmartTextLayout } from './components/SmartTextLayout';
 import { FixedStage } from './components/FixedStage';
@@ -597,8 +605,9 @@ const normaliseSettings = (val: any): GlobalSettings => {
 import { OutputStyleEditor, OutputStyleConfig } from './components/OutputStyleEditor';
 import { StylesManager } from './components/StylesManager';
 
-function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogglePresenting, onToggleLockOutput, profilesApi, profileId }: any) {
+function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogglePresenting, onToggleLockOutput, profilesApi, profileId, openTab }: any) {
   const [activeTab, setActiveTab] = useState('outputs');
+  useEffect(() => { if (isOpen && openTab) setActiveTab(openTab); }, [isOpen, openTab]);
   const [activeOutputId, setActiveOutputId] = useState(settings.outputs[0]?.id || 'main');
   const [local, setLocal] = useState<GlobalSettings>(settings);
   const [allTemplates, setAllTemplates] = useState<PresentationTemplate[]>(STARTER_TEMPLATES);
@@ -658,6 +667,12 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
 
   const detectScreens = async () => {
     try {
+        if (isTauri()) {
+            const monitors = await getMonitors();
+            setDetectedScreens(monitors.map((m, i) => ({ label: m.name || `Display ${i + 1}`, width: m.size.width, height: m.size.height })));
+            if (!monitors.length) alert('No screens were found.');
+            return;
+        }
         if ('getScreenDetails' in window) {
             const details = await (window as any).getScreenDetails();
             setDetectedScreens(details.screens);
@@ -882,8 +897,9 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
                 className="bg-[#09090B] border border-white/10 rounded-lg text-sm px-3 py-2.5 text-white outline-none focus:border-blue-500 w-full"
               >
                 <option value="">-- No Display Selected --</option>
+                {activeOutput.displayId && !detectedScreens.some(s => s.label === activeOutput.displayId) && <option value={activeOutput.displayId}>{activeOutput.displayId}</option>}
                 {detectedScreens.map((s, i) => (
-                  <option key={s.label || i} value={s.label}>{s.label || `Display ${i + 1}`}</option>
+                  <option key={s.label || i} value={s.label}>{s.label || `Display ${i + 1}`}{s.width ? ` (${s.width}×${s.height})` : ''}</option>
                 ))}
               </select>
               {detectedScreens.length > 0 && (
@@ -1515,8 +1531,132 @@ function ControlPanel() {
     },
   };
 
-  // The song importer (Shows tab → Import)
+  // Settings opened on a particular tab (null = where it was)
+  const [settingsOpenTab, setSettingsOpenTab] = useState<string | null>(null);
+
+  // The + menu in the Projects panel (new show, project, folder, project template, import)
+  const [createMenuOpen, setCreateMenuOpen] = useState(false);
+  const [createMenuAt, setCreateMenuAt] = useState({ x: 0, y: 0 });
+  useEffect(() => {
+    if (!createMenuOpen) return;
+    const onPointer = (e: PointerEvent) => { if (!(e.target instanceof Element && e.target.closest('[data-create-menu]'))) setCreateMenuOpen(false); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); setCreateMenuOpen(false); } };
+    window.addEventListener('pointerdown', onPointer, true);
+    window.addEventListener('keydown', onKey, true);
+    return () => { window.removeEventListener('pointerdown', onPointer, true); window.removeEventListener('keydown', onKey, true); };
+  }, [createMenuOpen]);
+
+  // The song importer (+ → Import)
   const [isImportOpen, setIsImportOpen] = useState(false);
+  // Song files chosen with File → Import, waiting for Songs / Declarations to be picked
+  const [pendingShowFiles, setPendingShowFiles] = useState<File[] | undefined>(undefined);
+  // File → Import: the list of what can be imported
+  const [importChooserOpen, setImportChooserOpen] = useState(false);
+
+  // ─── Top menus: File, View, Help ───
+  const [appDialog, setAppDialog] = useState<'export' | 'shortcuts' | 'quickstart' | 'about' | 'docs' | null>(null);
+  const [templateExport, setTemplateExport] = useState<'one' | 'all' | null>(null);
+  const [templateImportFile, setTemplateImportFile] = useState<File | null>(null);
+  const fileImportRef = useRef<HTMLInputElement>(null);
+  // Focus mode: only the slides, big (no side panels, no lower section)
+  const [focusMode, setFocusMode] = useState(false);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'f') { e.preventDefault(); setFocusMode(v => !v); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+  const toggleFullscreen = async () => {
+    try {
+      if ('__TAURI_INTERNALS__' in window) {
+        const { getCurrentWindow } = await import('@tauri-apps/api/window');
+        const w = getCurrentWindow();
+        await w.setFullscreen(!(await w.isFullscreen()));
+      } else if (document.fullscreenElement) await document.exitFullscreen();
+      else await document.documentElement.requestFullscreen();
+    } catch (err) {
+      setUndoToast({ text: `Full screen isn't available here: ${err instanceof Error ? err.message : String(err)}`, at: Date.now(), kind: 'error' });
+    }
+  };
+  const toast = (text: string, error = false) => setUndoToast({ text, at: Date.now(), kind: error ? 'error' : 'info', noUndo: true });
+
+  // FlowShow's own song files (one song or all of them, with their designs and groups)
+  const SONGS_EXTENSION = '.flowshow-songs';
+  const exportSongs = (songs: PresentationItem[], name: string) => {
+    downloadBlob(new Blob([JSON.stringify({ format: 'flowshow-songs', formatVersion: 1, exportedAt: new Date().toISOString(), songs }, null, 1)], { type: 'application/json' }), `${name}${SONGS_EXTENSION}`);
+  };
+  const importSongsFile = async (file: File) => {
+    let data: any;
+    try { data = JSON.parse(await file.text()); } catch { data = null; }
+    if (data?.format !== 'flowshow-songs' || !Array.isArray(data.songs)) { toast(`“${file.name}” isn't a FlowShow songs file`, true); return; }
+    const incoming = (data.songs as PresentationItem[]).filter(sg => sg?.id && Array.isArray(sg.slides));
+    // A song already here (same id) is updated; others are added
+    const updated = incoming.filter(sg => songsList.some(x => x.id === sg.id)).length;
+    setSongsList(prev => [...prev.map(x => incoming.find(sg => sg.id === x.id) || x), ...incoming.filter(sg => !prev.some(x => x.id === sg.id))]);
+    toast(`Songs imported: ${incoming.length - updated} new, ${updated} updated`);
+  };
+
+  const runExport = async (choice: ExportChoice) => {
+    const song = songsList[activeItemIndex];
+    if (choice === 'song' && song) exportSongs([song], song.title);
+    else if (choice === 'songs') exportSongs(songsList, 'FlowShow songs');
+    else if (choice === 'template') setTemplateExport('one');
+    else if (choice === 'templates') setTemplateExport('all');
+    else if (choice === 'profile') profilesApi.onExport(activeProfileId, globalSettings);
+    else if (choice === 'database') {
+      toast('Preparing the backup…');
+      downloadBlob(await buildBackup(), `FlowShow backup ${new Date().toISOString().slice(0, 10)}${BACKUP_EXTENSION}`);
+    }
+  };
+
+  // File → Import: works out what each file is
+  const importAnyFiles = async (files: File[]) => {
+    const showFiles: File[] = [];
+    for (const file of files) {
+      const ext = file.name.toLowerCase().match(/\.[^.]+$/)?.[0] || '';
+      if (ext === '.fstemplates') setTemplateImportFile(file);
+      else if (ext === '.flowshow-profile') toast((await profilesApi.onImport(file)).replace('Click "Switch to" to use it.', 'Choose it in the Profile menu to use it.'));
+      else if (ext === BACKUP_EXTENSION) {
+        if (!window.confirm(`Restore the backup "${file.name}"? Everything in FlowShow now (songs, projects, settings, profiles, templates, Bibles) is replaced by the backup. Export a backup first if you might need what's here.`)) continue;
+        try { await restoreBackup(file); window.location.reload(); } catch (err) { toast(err instanceof Error ? err.message : String(err), true); }
+      }
+      else if (ext === SONGS_EXTENSION) await importSongsFile(file);
+      else if (ext === '.xml') {
+        // A song in OpenLyrics / OpenSong XML, or a Bible
+        if (isSongXml(await file.slice(0, 4000).text())) showFiles.push(file);
+        else await importBibleFile(file);
+      }
+      else showFiles.push(file);
+    }
+    if (showFiles.length) { setPendingShowFiles(showFiles); setIsImportOpen(true); }
+  };
+  // A choice in the Import window: song files ask Songs or Declarations; FlowShow files and Bibles go straight in
+  const importChosenFiles = async (kind: ImportKind, files: File[]) => {
+    if (kind === 'flowshow') await importAnyFiles(files);
+    else if (kind === 'bible') { for (const file of files) await importBibleFile(file); }
+    else { setPendingShowFiles(files); setIsImportOpen(true); }
+  };
+  // Imported shows join the library as Songs or Declarations
+  const addImportedShows = (shows: ImportedShow[], category: 'Songs' | 'Declarations') => {
+    const now = Date.now();
+    const declaration = category === 'Declarations';
+    const items = shows.map((sh, i) => ({
+      id: `song-${now}-${i}`,
+      title: sh.title,
+      category,
+      createdAt: new Date().toISOString(),
+      slides: sh.slides.map((slide, k) => ({
+        id: `s-${now}-${i}-${k}`,
+        text: slide.text,
+        type: 'lyrics' as SlideType,
+        ...(slide.group ? { group: slide.group } : {}),
+        ...(declaration ? { declaration: true } : {}),
+      })),
+    }));
+    setSongsList(prev => [...prev, ...items]);
+    setUndoToast({ text: `Imported ${items.length} ${items.length === 1 ? 'show' : 'shows'}`, at: Date.now(), kind: 'info' });
+  };
   // Design mode designs the song slides, or how scripture looks on the screen
   const [designFor, setDesignFor] = useState<DesignFor>('lyrics');
   // Open Design mode on a slide, or (null) on whatever is on air: a Bible verse on air opens the scripture design
@@ -1588,7 +1728,10 @@ function ControlPanel() {
   };
 
   const [activeItemIndex, setActiveItemIndex] = useState(0);
-  const [serviceSetlist, setServiceSetlist] = useState<ServiceSetlist>(DEFAULT_SAMPLE_SETLIST);
+  // ─── Projects: one setlist per service, grouped in folders; serviceSetlist is the open one ───
+  const [projectsState, setProjectsState] = useState<ProjectsState>({ projects: [DEFAULT_SAMPLE_SETLIST], activeId: DEFAULT_SAMPLE_SETLIST.id, folders: [] });
+  const serviceSetlist: ServiceSetlist = projectsState.projects.find(p => p.id === projectsState.activeId) || projectsState.projects[0];
+  const projectsLoadedRef = useRef(false);
   const [activeSetlistItemId, setActiveSetlistItemId] = useState<string | null>(null);
   const [setlistViewMode, setSetlistViewMode] = useState<'slides' | 'manager'>('slides');
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
@@ -1627,18 +1770,83 @@ function ControlPanel() {
   };
 
   useEffect(() => {
-    loadCurrentSetlist().then(sl => {
-      if (sl && sl.items && sl.items.length > 0) {
-        setServiceSetlist(sl);
-        const firstPlayable = sl.items.find(i => i.type !== 'header');
-        if (firstPlayable) setActiveSetlistItemId(firstPlayable.id);
-      }
+    loadProjects().then(state => {
+      projectsLoadedRef.current = true;
+      setProjectsState(state);
+      const open = state.projects.find(p => p.id === state.activeId);
+      const firstPlayable = open?.items.find(i => i.type !== 'header');
+      if (firstPlayable) setActiveSetlistItemId(firstPlayable.id);
     });
   }, []);
+  useEffect(() => { if (projectsLoadedRef.current) void saveProjects(projectsState); }, [projectsState]);
 
-  const handleUpdateSetlist = (newSetlist: ServiceSetlist) => {
-    setServiceSetlist(newSetlist);
-    saveCurrentSetlist(newSetlist);
+  const handleUpdateSetlist = (newSetlist: ServiceSetlist) =>
+    setProjectsState(prev => ({ ...prev, projects: prev.projects.map(p => p.id === newSetlist.id ? newSetlist : p) }));
+
+  // A setlist's songs follow the library: edits to a song show in every project that has it
+  useEffect(() => {
+    setProjectsState(prev => {
+      let changed = false;
+      const projects = prev.projects.map(p => {
+        let itemsChanged = false;
+        const items = p.items.map(item => {
+          const song = item.songId ? songsList.find(sg => sg.id === item.songId) : undefined;
+          if (!song || item.slides === song.slides) return item;
+          itemsChanged = true;
+          return { ...item, title: song.title, slides: song.slides };
+        });
+        if (!itemsChanged) return p;
+        changed = true;
+        return { ...p, items };
+      });
+      return changed ? { ...prev, projects } : prev;
+    });
+  }, [songsList]);
+
+  const openProject = (id: string) => {
+    setProjectsState(prev => ({ ...prev, activeId: id }));
+    const project = projectsState.projects.find(p => p.id === id);
+    setActiveSetlistItemId(project?.items.find(i => i.type !== 'header')?.id ?? null);
+    setSetlistViewMode('manager');
+    setActiveTab('setlist');
+  };
+  // Clicking a setlist item: its slides (the first goes live), or its media as the background
+  const openSetlistItem = (projectId: string, item: SetlistItem) => {
+    setProjectsState(prev => prev.activeId === projectId ? prev : { ...prev, activeId: projectId });
+    setActiveTab('setlist');
+    setActiveSetlistItemId(item.id);
+    if (item.type === 'media' && item.mediaRef) {
+      // A file from an added folder: find it there again (its earlier link only lasted that session)
+      const ref = item.mediaRef;
+      resolveMediaRef(ref).then(url => {
+        if (url) setGlobalBackground(url, item.mediaType || 'image');
+        else setUndoToast({ text: `Couldn't open "${item.title}": the folder "${ref.folder}" isn't added, or the file was moved`, at: Date.now(), kind: 'error' });
+      });
+      return;
+    }
+    if (item.type === 'media' && item.backgroundUrl) {
+      setGlobalBackground(item.backgroundUrl, item.mediaType || 'image');
+      return;
+    }
+    if (item.slides && item.slides.length > 0) {
+      setSetlistViewMode('slides');
+      setPreviewSlide(item.slides[0]);
+      goLive(item.slides[0]);
+    }
+  };
+  const newProject = (folder?: string) => {
+    const date = new Date().toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+    const name = window.prompt('Name for the new project (one service)', `Service ${date}`)?.trim();
+    if (!name) return;
+    const project: ServiceSetlist = { id: `project-${Date.now().toString(36)}`, name, date, items: [], folder };
+    setProjectsState(prev => ({ ...prev, projects: [...prev.projects, project], activeId: project.id }));
+    setActiveSetlistItemId(null);
+    setSetlistViewMode('manager');
+    setActiveTab('setlist');
+  };
+  const newFolder = () => {
+    const name = window.prompt('Name for the new folder (for example Sunday Services, Youth)')?.trim();
+    if (name) setProjectsState(prev => prev.folders.includes(name) ? prev : { ...prev, folders: [...prev.folders, name] });
   };
 
   const handleAddSongToSetlist = (song: typeof songsList[0]) => {
@@ -2255,14 +2463,14 @@ function ControlPanel() {
         console.warn('Could not query window management params', err);
     }
 
-    if ('__TAURI_INTERNALS__' in window || '__TAURI__' in window) {
+    if (isTauri()) {
       try {
-        const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow');
-        const existing = await WebviewWindow.getByLabel(label);
-        if (existing) { await existing.setFocus(); return; }
-        new WebviewWindow(label, { url: url, title: `Live Display - ${outputId.toUpperCase()}`, width: 1280, height: 720, transparent: true });
+        await openOutputOnMonitor(label, url, config.name || outputId, config.displayId);
         return;
-      } catch (err) { console.warn('Failed to open Tauri native window', err); }
+      } catch (err) {
+        alert(`Couldn't open ${config.name || outputId} on "${config.displayId}": ${err instanceof Error ? err.message : String(err)}`);
+        return;
+      }
     }
     
     window.open(url, `FlowShow_${outputId}`, wFeatures);
@@ -2502,7 +2710,10 @@ function ControlPanel() {
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const input = e.target;
     const file = input.files?.[0];
-    if (!file) return;
+    input.value = '';
+    if (file) await importBibleFile(file);
+  };
+  const importBibleFile = async (file: File) => {
     setIsUploading(true);
     try {
       const bible = await parseBibleXml(file);
@@ -2520,7 +2731,6 @@ function ControlPanel() {
       setUndoToast({ text, at: Date.now(), kind: 'error' });
     } finally {
       setIsUploading(false);
-      input.value = '';
     }
   };
 
@@ -2642,7 +2852,7 @@ function ControlPanel() {
             {filteredSongs.map((song) => {
               const originalIndex = songsList.findIndex(s => s.id === song.id);
               return (
-                 <div key={song.id} onContextMenu={(e) => handleContextMenu(e, 'song', song.id)} onClick={() => setActiveItemIndex(originalIndex)} className={`group px-4 py-3 cursor-pointer border-b border-white/5 flex items-center justify-between transition-colors ${activeItemIndex === originalIndex ? 'bg-blue-600/10 border-l-2 border-l-blue-500 text-white' : 'hover:bg-white/5 border-l-2 border-l-transparent text-neutral-400'}`}>
+                 <div key={song.id} draggable onDragStart={(e) => { e.dataTransfer.setData(DRAG_SONG, song.id); e.dataTransfer.effectAllowed = 'copy'; }} onContextMenu={(e) => handleContextMenu(e, 'song', song.id)} onClick={() => setActiveItemIndex(originalIndex)} className={`group px-4 py-3 cursor-pointer border-b border-white/5 flex items-center justify-between transition-colors ${activeItemIndex === originalIndex ? 'bg-blue-600/10 border-l-2 border-l-blue-500 text-white' : 'hover:bg-white/5 border-l-2 border-l-transparent text-neutral-400'}`}>
                    <div className="flex items-center gap-3 min-w-0">
                      <FileText size={14} className={activeItemIndex === originalIndex ? "text-blue-500" : "text-neutral-500 transition-colors group-hover:text-neutral-400"} />
                      <span className="text-sm font-medium truncate">{song.title}</span>
@@ -2881,7 +3091,7 @@ function ControlPanel() {
                            <div
                               key={`${slide.id}-${idx}`}
                               onClick={() => handleJumpToVerse(slide, false)}
-                              onDoubleClick={() => handleJumpToVerse(slide, true)}
+                              onDoubleClick={() => handleJumpToVerse(slide, true)} draggable onDragStart={(e) => { e.dataTransfer.setData(DRAG_SCRIPTURE, JSON.stringify(slide)); e.dataTransfer.effectAllowed = 'copy'; }}
                               className={verseCard(isLive, isPreview)}
                            >
                               <span className={`${verseLabel(isLive || isPreview)} w-24`}>{slide.source}</span>
@@ -2905,7 +3115,7 @@ function ControlPanel() {
                            <div
                               key={slide.id}
                               onClick={() => handleJumpToVerse(slide, false)}
-                              onDoubleClick={() => handleJumpToVerse(slide, true)}
+                              onDoubleClick={() => handleJumpToVerse(slide, true)} draggable onDragStart={(e) => { e.dataTransfer.setData(DRAG_SCRIPTURE, JSON.stringify(slide)); e.dataTransfer.effectAllowed = 'copy'; }}
                               className={verseCard(isLive, isPreview)}
                            >
                               <span className={`${verseLabel(isLive || isPreview)} w-24`}>{slide.source}</span>
@@ -2940,7 +3150,7 @@ function ControlPanel() {
                             <div
                                key={`${vIdx}-${verse.v}`}
                                onClick={() => handleVerseClick(slide, vIdx)}
-                               onDoubleClick={() => handleVerseDoubleClick(slide, vIdx)}
+                               onDoubleClick={() => handleVerseDoubleClick(slide, vIdx)} draggable onDragStart={(e) => { e.dataTransfer.setData(DRAG_SCRIPTURE, JSON.stringify(slide)); e.dataTransfer.effectAllowed = 'copy'; }}
                                className={verseCard(isLive, isPreview, isNextLogical)}
                             >
                                <span className={`${verseLabel(isLive || isPreview)} w-6`}>{verse.v}</span>
@@ -3460,103 +3670,96 @@ function ControlPanel() {
         {/* Header */}
         <div className="h-10 px-3 border-b border-[#262635] flex items-center justify-between shrink-0">
           <span className="text-xs font-bold text-white tracking-wide">Projects</span>
-          <button className="text-neutral-400 hover:text-white p-1 rounded transition-colors"><MoreHorizontal size={14} /></button>
+          <div className="relative" data-create-menu>
+            <button
+              onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); setCreateMenuAt({ x: r.left, y: r.bottom + 6 }); setCreateMenuOpen(v => !v); }}
+              className={`w-6 h-6 rounded-full flex items-center justify-center transition-colors ${createMenuOpen ? 'bg-pink-500 text-white' : 'bg-pink-600 hover:bg-pink-500 text-white'}`}
+              title="New show, project, folder, project template, or import"
+            >
+              <Plus size={14} />
+            </button>
+            {createMenuOpen && (
+              // Fixed to the window, so the sidebar's edge doesn't cut it off
+              <div className="fixed z-[160] w-48 py-1 rounded-lg border border-white/10 bg-[#18181b] shadow-2xl" style={{ left: createMenuAt.x, top: createMenuAt.y }}>
+                {[
+                  { label: 'New show', Icon: Music, run: () => setIsAddSongModalOpen(true) },
+                  { label: 'Project', Icon: FileText, run: () => newProject() },
+                  { label: 'Folder', Icon: Folder, run: newFolder },
+                  { label: 'Project template', Icon: LayoutTemplate, run: () => setIsTemplateGalleryOpen(true) },
+                  { label: 'Import', Icon: Upload, run: () => setImportChooserOpen(true) },
+                ].map(({ label, Icon, run }) => (
+                  <button key={label} onClick={() => { setCreateMenuOpen(false); run(); }} className="w-full px-3 py-1.5 flex items-center gap-2 text-left text-xs text-neutral-200 hover:bg-white/10 transition-colors">
+                    <Icon size={13} className="text-neutral-400" /> {label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Tree Section */}
         <div className="flex-1 overflow-y-auto custom-scrollbar p-2 space-y-1">
-          <div className="text-[10px] uppercase font-bold text-neutral-500 px-2 pt-1 pb-0.5">Unlabeled</div>
-          
-          {/* Active Project Folder */}
-          <div 
-            onClick={() => setActiveTab('setlist')}
-            className={`flex items-center gap-2 px-2.5 py-1.5 rounded-lg cursor-pointer transition-all ${
-              activeTab === 'setlist' 
-                ? 'bg-pink-500/15 border-l-2 border-pink-500 text-pink-300 font-semibold shadow-sm' 
-                : 'hover:bg-white/5 text-neutral-400 border-l-2 border-transparent'
-            }`}
-          >
-            <Folder size={14} className={activeTab === 'setlist' ? 'text-pink-400' : 'text-neutral-500'} />
-            <span className="text-xs truncate">{selectedProjectFolder}</span>
-          </div>
-
-          {/* Items in Project / Setlist */}
-          <div className="pl-4 space-y-0.5 pt-1">
-            {serviceSetlist.items.map((item) => {
-              if (item.type === 'header') {
-                return (
-                  <div key={item.id} className="pt-2 pb-0.5 px-2 text-[10px] font-bold uppercase tracking-wider text-neutral-500 flex items-center gap-1.5">
-                    <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: item.headerColor || '#ec4899' }} />
-                    <span className="truncate">{item.title}</span>
-                  </div>
-                );
-              }
-              const isItemActive = activeSetlistItemId === item.id && activeTab === 'setlist';
-              return (
-                <div 
-                  key={item.id}
-                  onClick={() => {
-                    setActiveTab('setlist');
-                    setActiveSetlistItemId(item.id);
-                    if (item.slides && item.slides.length > 0) {
-                      setPreviewSlide(item.slides[0]);
-                      goLive(item.slides[0]);
-                    }
-                  }}
-                  className={`flex items-center gap-2 px-2 py-1 rounded cursor-pointer text-xs transition-colors ${
-                    isItemActive ? 'bg-pink-500/20 text-white font-medium' : 'text-neutral-400 hover:text-white hover:bg-white/5'
-                  }`}
-                >
-                  <FileText size={12} className={isItemActive ? 'text-pink-400' : 'text-neutral-500'} />
-                  <span className="truncate">{item.title}</span>
-                </div>
-              );
-            })}
-          </div>
+          <ProjectsPanel
+            state={projectsState}
+            onChange={setProjectsState}
+            setlistOpen={activeTab === 'setlist'}
+            activeItemId={activeSetlistItemId}
+            onOpenProject={openProject}
+            onOpenItem={openSetlistItem}
+            getSong={(id) => songsList.find(s => s.id === id)}
+            onNewProject={newProject}
+          />
         </div>
 
-        {/* Action Buttons Stack */}
-        <div className="p-3 border-t border-[#262635] space-y-1.5 relative shrink-0">
-          <button 
-            onClick={() => setActiveTab('setlist')}
-            className="w-full py-1.5 px-3 bg-[#181822] hover:bg-[#222230] text-neutral-300 text-xs rounded-full flex items-center gap-2 border border-white/5 transition-colors font-medium"
-          >
-            <FileText size={13} className="text-pink-400" />
-            Project
-          </button>
-          <button 
-            onClick={() => {
-              const name = prompt('New Folder Name:');
-              if (name && name.trim()) setSelectedProjectFolder(name.trim());
-            }}
-            className="w-full py-1.5 px-3 bg-[#181822] hover:bg-[#222230] text-neutral-300 text-xs rounded-full flex items-center gap-2 border border-white/5 transition-colors font-medium"
-          >
-            <Folder size={13} className="text-neutral-400" />
-            Folder
-          </button>
-          <button 
-            onClick={() => setIsTemplateGalleryOpen(true)}
-            className="w-full py-1.5 px-3 bg-[#181822] hover:bg-[#222230] text-neutral-300 text-xs rounded-full flex items-center gap-2 border border-white/5 transition-colors font-medium"
-          >
-            <LayoutTemplate size={13} className="text-neutral-400" />
-            Project template
-          </button>
-          <button 
-            onClick={() => setIsImportOpen(true)}
-            className="w-full py-1.5 px-3 bg-[#181822] hover:bg-[#222230] text-neutral-300 text-xs rounded-full flex items-center gap-2 border border-white/5 transition-colors font-medium"
-          >
-            <Upload size={13} className="text-neutral-400" />
-            Import
-          </button>
+      </div>
+    );
+  };
 
-          {/* Round Pink Plus Button */}
-          <button 
-            onClick={() => setIsAddSongModalOpen(true)}
-            className="absolute bottom-3 right-3 w-8 h-8 rounded-full bg-pink-600 hover:bg-pink-500 text-white flex items-center justify-center shadow-lg shadow-pink-600/30 transition-all hover:scale-105"
-            title="Create New Item"
-          >
-            <Plus size={16} />
-          </button>
+  // --- FOCUS MODE: only the slides, big. A project shows all its items' slides one after another. ---
+  const renderFocusView = () => {
+    const fromProject = activeTab === 'setlist';
+    const sections: { title: string; slides: SlideDefinition[]; header?: boolean; color?: string }[] = fromProject
+      ? serviceSetlist.items.map(it => it.type === 'header' ? { title: it.title, slides: [], header: true, color: it.headerColor } : { title: it.title, slides: it.slides || [] })
+      : [{ title: songsList[activeItemIndex]?.title || '', slides: songsList[activeItemIndex]?.slides || [] }];
+    const main = globalSettings.outputs.find(o => o.id === 'main') || globalSettings.outputs[0];
+    return (
+      <div className="flex-1 min-w-0 flex flex-col bg-black" data-focus-view>
+        <div className="h-9 px-4 flex items-center gap-3 shrink-0">
+          <span className="text-xs font-bold text-white">{fromProject ? serviceSetlist.name : sections[0].title}</span>
+          <span className="text-[11px] text-neutral-500">Focus mode · click a slide to show it</span>
+          <button onClick={() => setFocusMode(false)} className="ml-auto px-2.5 py-1 rounded text-[11px] font-semibold text-neutral-300 hover:text-white bg-white/5 hover:bg-white/10" title="Ctrl+Shift+F">Leave focus mode</button>
+        </div>
+        <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar px-4 pb-6 space-y-4">
+          {sections.map((sec, si) => sec.header ? (
+            <div key={si} className="pt-2 text-xs font-bold uppercase tracking-wider flex items-center gap-2" style={{ color: sec.color || '#ec4899' }}>
+              <span className="w-2 h-2 rounded-full" style={{ backgroundColor: sec.color || '#ec4899' }} />{sec.title}
+            </div>
+          ) : sec.slides.length === 0 ? null : (
+            <div key={si}>
+              {fromProject && <div className="text-[11px] font-semibold text-neutral-400 mb-1.5">{sec.title}</div>}
+              <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))' }}>
+                {sec.slides.map((slide, i) => {
+                  const live = liveState.slide?.id === slide.id;
+                  return (
+                    <button
+                      key={slide.id}
+                      type="button"
+                      disabled={slide.disabled}
+                      onClick={() => { setPreviewSlide(slide); goLive(slide); }}
+                      className={`relative aspect-video rounded-lg overflow-hidden bg-[#09090b] text-left ring-2 ${live ? 'ring-red-500' : 'ring-transparent hover:ring-white/30'} disabled:opacity-40`}
+                      data-focus-slide
+                    >
+                      <FixedStage className="w-full h-full pointer-events-none">
+                        <SmartTextLayout text={slide.text} source={slide.source} type={slide.type} styleOverrides={applyGlobalStyles(slide, main, globalSettings)} className="w-full h-full" />
+                      </FixedStage>
+                      <span className="absolute top-1.5 left-1.5 text-[10px] font-bold text-neutral-300 bg-black/70 px-1.5 rounded">{i + 1}</span>
+                      {slide.group && <span className="absolute bottom-1.5 left-1.5 text-[10px] font-bold uppercase text-white/80 bg-black/70 px-1.5 rounded">{slide.group}</span>}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
         </div>
       </div>
     );
@@ -4487,6 +4690,9 @@ function ControlPanel() {
                   return (
                     <div
                       key={song.id}
+                      draggable
+                      onDragStart={(e) => { e.dataTransfer.setData(DRAG_SONG, song.id); e.dataTransfer.effectAllowed = 'copy'; }}
+                      title="Drag into a project to add it to the setlist"
                       onContextMenu={(e) => handleContextMenu(e, 'song', song.id)}
                       onClick={() => {
                         setActiveItemIndex(origIdx);
@@ -4522,15 +4728,7 @@ function ControlPanel() {
               </div>
 
               {/* Bottom Actions Bar */}
-              <div className="h-10 px-4 border-t border-[#262635] flex items-center justify-between shrink-0 bg-[#101015]">
-                <button 
-                  onClick={() => setIsImportOpen(true)}
-                  title="Import songs from FreeShow, ProPresenter, Word or text files"
-                  className="py-1.5 px-3 bg-[#181822] hover:bg-[#222230] text-neutral-300 text-xs rounded-full flex items-center gap-1.5 border border-white/5 transition-colors font-medium"
-                >
-                  <Upload size={13} className="text-neutral-400" />
-                  Import
-                </button>
+              <div className="h-10 px-4 border-t border-[#262635] flex items-center justify-end shrink-0 bg-[#101015]">
 
                 <button 
                   onClick={() => setIsAddSongModalOpen(true)}
@@ -4698,11 +4896,12 @@ function ControlPanel() {
       )}
       <SettingsModal
         isOpen={isSettingsModalOpen}
-        onClose={() => setIsSettingsModalOpen(false)} 
+        onClose={() => { setIsSettingsModalOpen(false); setSettingsOpenTab(null); }} 
         settings={globalSettings} 
         onSave={setGlobalSettings}
         profilesApi={profilesApi}
         profileId={activeProfileId}
+        openTab={settingsOpenTab}
         isPresenting={liveState.isPresenting}
         onTogglePresenting={togglePresenting}
         onToggleLockOutput={toggleLockOutput}
@@ -4713,10 +4912,48 @@ function ControlPanel() {
         {/* Left: Menu & Brand Logo */}
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2 text-xs text-neutral-400">
-            <span className="hover:text-white cursor-pointer px-1">File</span>
-            <span className="hover:text-white cursor-pointer px-1">Edit</span>
-            <span className="hover:text-white cursor-pointer px-1">View</span>
-            <span className="hover:text-white cursor-pointer px-1">Help</span>
+            <TopMenu label="File" entries={[
+              { label: 'Import…', onClick: () => setImportChooserOpen(true), hint: 'Songs from FlowShow and other programs, documents, the clipboard, templates, profiles, a backup, or a Bible' },
+              { label: 'Export…', onClick: () => setAppDialog('export') },
+            ]} />
+            <input
+              ref={fileImportRef}
+              type="file"
+              multiple
+              className="hidden"
+              accept={`${IMPORT_ACCEPT},.flowshow-songs,.fstemplates,.flowshow-profile,${BACKUP_EXTENSION},.xml,.json`}
+              onChange={(e) => { const files: File[] = Array.from((e.target.files || []) as FileList); e.target.value = ''; void importAnyFiles(files); }}
+              data-file-import
+            />
+            <TopMenu label="View" entries={[
+              { label: 'Full screen', shortcut: 'F11', onClick: toggleFullscreen },
+              { label: focusMode ? 'Leave focus mode' : 'Focus mode', shortcut: 'Ctrl+Shift+F', onClick: () => setFocusMode(v => !v) },
+            ]} />
+            <TopMenu label="Help" entries={[
+              { label: 'Shortcuts', onClick: () => setAppDialog('shortcuts') },
+              { label: 'Documentation', onClick: () => setAppDialog('docs') },
+              { label: 'Quick start guide', onClick: () => setAppDialog('quickstart') },
+              'divider',
+              { label: 'About FlowShow', onClick: () => setAppDialog('about') },
+            ]} />
+            <ProfileMenu
+              profiles={profiles}
+              activeId={activeProfileId}
+              onSwitch={(id) => switchProfile(id, globalSettings)}
+              onDuplicate={() => {
+                const current = profiles.find(p => p.id === activeProfileId);
+                const name = window.prompt('Name for the copy (it becomes the profile in use, ready to change)', `${current?.name || 'Main'} (copy)`)?.trim();
+                if (name) { profilesApi.onCreate(name, true, globalSettings); setUndoToast({ text: `Profile "${name}" in use (a copy of "${current?.name || 'Main'}")`, at: Date.now(), kind: 'info', noUndo: true }); }
+              }}
+              onNew={() => {
+                const name = window.prompt('Name for the new profile (FlowShow\u2019s starting setup)', 'New venue')?.trim();
+                if (name) profilesApi.onCreate(name, false, globalSettings);
+              }}
+              onExport={() => profilesApi.onExport(activeProfileId, globalSettings)}
+              onImport={(file) => profilesApi.onImport(file).then(msg => msg.replace('Click "Switch to" to use it.', 'Choose it in the Profile menu to use it.'))}
+              onManage={() => { setSettingsOpenTab('profiles'); setIsSettingsModalOpen(true); }}
+              onMessage={(text) => setUndoToast({ text, at: Date.now(), kind: text.startsWith('Imported') ? 'info' : 'error', noUndo: true })}
+            />
           </div>
           <span className="font-black text-pink-500 tracking-wider text-base ml-2">FlowShow</span>
         </div>
@@ -4797,13 +5034,16 @@ function ControlPanel() {
 
       {/* TOP SECTION: 3-COLUMN WORKSPACE (Projects | Slide Grid | Output Monitors) */}
       <div className="flex-1 min-h-0 flex overflow-hidden">
-        {renderProjectsSidebar()}
-        {renderCenterSlideArea()}
-        {renderRightOutputsPanel()}
+        {/* Focus mode keeps the output monitors, so you still see what is being sent */}
+        {focusMode ? (<>{renderFocusView()}{renderRightOutputsPanel()}</>) : (<>
+          {renderProjectsSidebar()}
+          {renderCenterSlideArea()}
+          {renderRightOutputsPanel()}
+        </>)}
       </div>
 
       {/* DRAG HANDLE DIVIDER */}
-      <div
+      {!focusMode && <div
         onMouseDown={handleDividerMouseDown}
         className="group relative h-[5px] shrink-0 bg-[#1a1a24] hover:bg-pink-500/40 transition-colors duration-150 cursor-row-resize select-none z-10"
         title={bottomPanelCollapsed ? 'Click to expand panel' : 'Drag to resize · Click to collapse'}
@@ -4816,11 +5056,11 @@ function ControlPanel() {
           <span className="w-1 h-1 rounded-full bg-pink-400" />
           <span className="w-1 h-1 rounded-full bg-pink-400" />
         </div>
-      </div>
+      </div>}
 
-      {/* BOTTOM SECTION: HORIZONTAL LIBRARY & BROWSER */}
+      {/* BOTTOM SECTION: HORIZONTAL LIBRARY & BROWSER (hidden in focus mode) */}
       <div
-        style={{ height: bottomPanelCollapsed ? 0 : bottomPanelHeight }}
+        style={{ height: bottomPanelCollapsed || focusMode ? 0 : bottomPanelHeight }}
         className="shrink-0 overflow-hidden transition-[height] duration-200 ease-in-out"
       >
         {renderBottomBrowser()}
@@ -4862,29 +5102,35 @@ function ControlPanel() {
         </div>
       )}
 
+      {appDialog === 'export' && (
+        <ExportDialog
+          onClose={() => setAppDialog(null)}
+          onChoose={(c) => { void runExport(c); }}
+          songTitle={songsList[activeItemIndex]?.title}
+          songCount={songsList.length}
+          templateCount={inlineTemplates.length}
+          profileName={profiles.find(p => p.id === activeProfileId)?.name || 'Main'}
+        />
+      )}
+      {appDialog === 'shortcuts' && <ShortcutsDialog onClose={() => setAppDialog(null)} />}
+      {appDialog === 'quickstart' && <QuickStartDialog onClose={() => setAppDialog(null)} />}
+      {appDialog === 'about' && <AboutDialog onClose={() => setAppDialog(null)} />}
+      {appDialog === 'docs' && <DocumentationDialog onClose={() => setAppDialog(null)} />}
+      {templateExport && <ExportTemplatesDialog templates={inlineTemplates} initialIds={templateExport === 'all' ? inlineTemplates.map(t => t.id) : []} onClose={() => setTemplateExport(null)} />}
+      {templateImportFile && <ImportTemplatesDialog initialFile={templateImportFile} onClose={() => setTemplateImportFile(null)} onInstalled={() => getStoredTemplates().then(setInlineTemplates)} />}
       <ImportShowsModal
         isOpen={isImportOpen}
-        onClose={() => setIsImportOpen(false)}
-        onImport={(shows, category) => {
-          const now = Date.now();
-          const declaration = category === 'Declarations';
-          const items = shows.map((s, i) => ({
-            id: `song-${now}-${i}`,
-            title: s.title,
-            category,
-            createdAt: new Date().toISOString(),
-            slides: s.slides.map((slide, k) => ({
-              id: `s-${now}-${i}-${k}`,
-              text: slide.text,
-              type: 'lyrics' as SlideType,
-              ...(slide.group ? { group: slide.group } : {}),
-              ...(declaration ? { declaration: true } : {}),
-            })),
-          }));
-          setSongsList(prev => [...prev, ...items]);
-          setUndoToast({ text: `Imported ${items.length} ${items.length === 1 ? 'show' : 'shows'}`, at: Date.now(), kind: 'info' });
-        }}
+        pendingFiles={pendingShowFiles}
+        onClose={() => { setIsImportOpen(false); setPendingShowFiles(undefined); }}
+        onImport={addImportedShows}
       />
+      {importChooserOpen && (
+        <ImportChooser
+          onClose={() => setImportChooserOpen(false)}
+          onFiles={(kind, files) => void importChosenFiles(kind, files)}
+          onPaste={(title, text, category) => addImportedShows([showFromText(title, text)], category)}
+        />
+      )}
       <AddSongModal
         isOpen={isAddSongModalOpen}
         onClose={() => setIsAddSongModalOpen(false)}
