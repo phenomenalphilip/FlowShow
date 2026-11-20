@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { askConfirm, askText } from '../lib/appDialogs';
 import { Check, Copy, Download, Pencil, Plus, Trash, Upload, ArrowRightLeft } from 'lucide-react';
 import type { ProfileRecord } from '../lib/profiles';
 import { PROFILE_EXTENSION } from '../lib/profiles';
@@ -22,16 +23,16 @@ const btn = 'px-2.5 py-1.5 rounded-lg text-xs font-semibold flex items-center ga
 /** Settings → Profiles: a whole screen setup per venue, switch between them, export and import them */
 export function ProfilesPanel({ profiles, activeId, onSwitch, onCreate, onRename, onDuplicate, onDelete, onExport, onImport }: ProfilesApi) {
   const [message, setMessage] = useState<string | null>(null);
-  const create = (copyCurrent: boolean) => {
-    const name = window.prompt(copyCurrent ? 'Name for the new profile (a copy of this setup)' : 'Name for the new profile (FlowShow’s starting setup)', 'New venue')?.trim();
+  const create = async (copyCurrent: boolean) => {
+    const name = await askText(copyCurrent ? 'Name for the new profile (a copy of this setup)' : 'Name for the new profile (FlowShow’s starting setup)', 'New venue', { okLabel: 'Create' });
     if (name) { onCreate(name, copyCurrent); setMessage(`Made "${name}" and switched to it. Your other profiles are unchanged.`); }
   };
-  const rename = (p: ProfileRecord) => {
-    const name = window.prompt('Profile name', p.name)?.trim();
+  const rename = async (p: ProfileRecord) => {
+    const name = await askText('Profile name', p.name, { okLabel: 'Rename' });
     if (name && name !== p.name) onRename(p.id, name);
   };
-  const remove = (p: ProfileRecord) => {
-    if (window.confirm(`Delete the profile "${p.name}"? Its screens and styles are removed. Songs and templates stay.`)) onDelete(p.id);
+  const remove = async (p: ProfileRecord) => {
+    if (await askConfirm(`Delete the profile "${p.name}"? Its screens and styles are removed. Songs and templates stay.`, { okLabel: 'Delete', danger: true })) onDelete(p.id);
   };
   const importFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -70,7 +71,7 @@ export function ProfilesPanel({ profiles, activeId, onSwitch, onCreate, onRename
                 </div>
                 <div className="text-[11px] text-neutral-500">{screens != null ? `${screens} output${screens === 1 ? '' : 's'} · ` : ''}changed {new Date(p.updatedAt).toLocaleString()}</div>
               </div>
-              {!active && <button type="button" onClick={() => { onSwitch(p.id); setMessage(`Switched to "${p.name}".`); }} className={`${btn} bg-blue-600 hover:bg-blue-500 text-white`}><ArrowRightLeft size={13} /> Switch to</button>}
+              {!active && <button type="button" onClick={() => { onSwitch(p.id); setMessage(`Switched to "${p.name}".`); }} className={`${btn} bg-pink-600 hover:bg-pink-500 text-white`}><ArrowRightLeft size={13} /> Switch to</button>}
               <button type="button" onClick={() => rename(p)} className={`${btn} bg-white/5 hover:bg-white/10 text-neutral-300`} title="Rename"><Pencil size={13} /></button>
               <button type="button" onClick={() => onDuplicate(p.id)} className={`${btn} bg-white/5 hover:bg-white/10 text-neutral-300`} title="Duplicate"><Copy size={13} /></button>
               <button type="button" onClick={() => onExport(p.id)} className={`${btn} bg-white/5 hover:bg-white/10 text-neutral-300`} title="Export to a file (with the templates it uses)"><Download size={13} /></button>

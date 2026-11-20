@@ -94,7 +94,7 @@ export function StylesManager({ styles, stageLayouts, templates, onAdd, onUpdate
       onClick={() => { setSelectedId(s.id); setEditingName(false); }}
       className={`w-full text-left px-3 py-2.5 text-xs font-medium transition-all flex items-center gap-2 group ${
         selected?.id === s.id
-          ? 'bg-blue-600/20 text-white border-r-2 border-blue-500'
+          ? 'bg-pink-600/20 text-white border-r-2 border-pink-500'
           : 'text-neutral-400 hover:text-white hover:bg-white/5'
       }`}
     >
@@ -128,7 +128,7 @@ export function StylesManager({ styles, stageLayouts, templates, onAdd, onUpdate
           <span className="text-[10px] font-bold uppercase tracking-widest text-neutral-500">Styles</span>
           <button
             onClick={() => setChoosingKind(v => !v)}
-            className="w-6 h-6 rounded bg-blue-600/20 hover:bg-blue-600 text-blue-400 hover:text-white flex items-center justify-center transition-all"
+            className="w-6 h-6 rounded bg-pink-600/20 hover:bg-pink-600 text-pink-400 hover:text-white flex items-center justify-center transition-all"
             title="New style"
           >
             <Plus size={13} />
@@ -140,7 +140,7 @@ export function StylesManager({ styles, stageLayouts, templates, onAdd, onUpdate
                 const { title, hint, Icon } = KIND_INFO[k];
                 return (
                   <button key={k} onClick={() => addStyle(k)} className="w-full px-3 py-2 flex items-start gap-2.5 text-left hover:bg-white/5 transition-colors">
-                    <Icon size={15} className={`mt-0.5 shrink-0 ${k === 'stage' ? 'text-amber-400' : 'text-blue-400'}`} />
+                    <Icon size={15} className={`mt-0.5 shrink-0 ${k === 'stage' ? 'text-amber-400' : 'text-pink-400'}`} />
                     <span>
                       <span className="block text-xs font-semibold text-white">{title}</span>
                       <span className="block text-[10px] text-neutral-500 leading-snug">{hint}</span>
@@ -178,9 +178,9 @@ export function StylesManager({ styles, stageLayouts, templates, onAdd, onUpdate
                     value={nameInput}
                     onChange={e => setNameInput(e.target.value)}
                     onKeyDown={e => { if (e.key === 'Enter') { update({ name: nameInput }); setEditingName(false); } if (e.key === 'Escape') setEditingName(false); }}
-                    className="bg-[#1e1e28] border border-blue-500 rounded px-2 py-1 text-sm text-white outline-none flex-1"
+                    className="bg-[#1e1e28] border border-pink-500 rounded px-2 py-1 text-sm text-white outline-none flex-1"
                   />
-                  <button onClick={() => { update({ name: nameInput }); setEditingName(false); }} className="p-1 hover:text-blue-400"><Check size={14} /></button>
+                  <button onClick={() => { update({ name: nameInput }); setEditingName(false); }} className="p-1 hover:text-pink-400"><Check size={14} /></button>
                   <button onClick={() => setEditingName(false)} className="p-1 hover:text-red-400"><X size={14} /></button>
                 </>
               ) : (
@@ -190,7 +190,7 @@ export function StylesManager({ styles, stageLayouts, templates, onAdd, onUpdate
                 </>
               )}
             </div>
-            <div className={`mt-1 inline-flex items-center gap-1.5 text-[11px] ${kind === 'stage' ? 'text-amber-400' : 'text-blue-400'}`}>
+            <div className={`mt-1 inline-flex items-center gap-1.5 text-[11px] ${kind === 'stage' ? 'text-amber-400' : 'text-pink-400'}`}>
               <KindIcon size={12} /> {KIND_INFO[kind].title}
               <span className="text-neutral-500">· {KIND_INFO[kind].hint}</span>
             </div>
@@ -321,7 +321,7 @@ export function StylesManager({ styles, stageLayouts, templates, onAdd, onUpdate
                     <span className="text-xs text-neutral-300 truncate max-w-[120px]">{templateName(selected.lyricsTemplateId)}</span>
                     <button
                       onClick={() => { setTemplateCategory('all'); setPickingTemplateFor('lyrics'); }}
-                      className="p-1 rounded bg-blue-600/20 hover:bg-blue-600/40 text-blue-400 hover:text-white transition-all"
+                      className="p-1 rounded bg-pink-600/20 hover:bg-pink-600/40 text-pink-400 hover:text-white transition-all"
                       title="Pick lyrics template"
                     >
                       <Sparkles size={12} />
@@ -339,11 +339,11 @@ export function StylesManager({ styles, stageLayouts, templates, onAdd, onUpdate
                       className="text-xs text-neutral-300 truncate max-w-[120px]"
                       title={selected.declarationTemplateId ? 'The slides of Declaration shows use this template' : 'Declarations use the lyrics template until you pick one'}
                     >
-                      {selected.declarationTemplateId ? templateName(selected.declarationTemplateId) : 'Same as lyrics'}
+                      {selected.declarationTemplateId ? templateName(selected.declarationTemplateId) : "Each screen's own"}
                     </span>
                     <button
                       onClick={() => { setTemplateCategory('all'); setPickingTemplateFor('declaration'); }}
-                      className="p-1 rounded bg-blue-600/20 hover:bg-blue-600/40 text-blue-400 hover:text-white transition-all"
+                      className="p-1 rounded bg-pink-600/20 hover:bg-pink-600/40 text-pink-400 hover:text-white transition-all"
                       title="Pick declarations template"
                     >
                       <Sparkles size={12} />
@@ -365,7 +365,7 @@ export function StylesManager({ styles, stageLayouts, templates, onAdd, onUpdate
                     </span>
                     <button
                       onClick={() => { setTemplateCategory('scripture'); setPickingTemplateFor('scripture'); }}
-                      className="p-1 rounded bg-blue-600/20 hover:bg-blue-600/40 text-blue-400 hover:text-white transition-all"
+                      className="p-1 rounded bg-pink-600/20 hover:bg-pink-600/40 text-pink-400 hover:text-white transition-all"
                       title="Pick scripture template"
                     >
                       <Sparkles size={12} />
@@ -416,7 +416,7 @@ function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean
   return (
     <label className="relative inline-flex items-center cursor-pointer">
       <input type="checkbox" checked={checked} onChange={e => onChange(e.target.checked)} className="sr-only peer" />
-      <div className="w-9 h-5 bg-neutral-700 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-600" />
+      <div className="w-9 h-5 bg-neutral-700 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-pink-600" />
     </label>
   );
 }

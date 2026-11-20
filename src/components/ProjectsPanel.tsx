@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { askConfirm, askText } from '../lib/appDialogs';
 import { BookOpen, ChevronDown, ChevronRight, Folder, FolderOpen, Image as ImageIcon, Music, Pencil, Plus, Trash, Video, Heading } from 'lucide-react';
 import { HEADER_COLORS, ProjectsState, ServiceSetlist, SetlistItem } from '../lib/setlist';
 import type { SlideDefinition } from '../App';
@@ -133,9 +134,9 @@ export function ProjectsPanel({ state, onChange, setlistOpen, activeItemId, onOp
   };
 
   // ─── Menu actions ───
-  const askName = (question: string, value = '') => window.prompt(question, value)?.trim() || '';
-  const addHeader = (projectId: string, at?: number) => {
-    const title = askName('Section header (for example Praise & Worship, Declaration, Creed)');
+  const askName = async (question: string, value = '') => (await askText(question, value)) || '';
+  const addHeader = async (projectId: string, at?: number) => {
+    const title = await askName('Section header (for example Praise & Worship, Declaration, Creed)');
     if (!title) return;
     setProject(projectId, p => {
       const color = HEADER_COLORS[p.items.filter(i => i.type === 'header').length % HEADER_COLORS.length];
@@ -145,7 +146,7 @@ export function ProjectsPanel({ state, onChange, setlistOpen, activeItemId, onOp
     });
     setExpanded(prev => new Set(prev).add(projectId));
   };
-  const runMenu = (fn: () => void) => () => { setMenu(null); fn(); };
+  const runMenu = (fn: () => void | Promise<void>) => () => { setMenu(null); void fn(); };
 
   const folders = [UNLABELED, ...state.folders];
   const inFolder = (folder: string) => state.projects.filter(p => (p.folder && state.folders.includes(p.folder) ? p.folder : UNLABELED) === folder);
@@ -176,7 +177,8 @@ export function ProjectsPanel({ state, onChange, setlistOpen, activeItemId, onOp
         };
         return (
           <React.Fragment key={item.id}>
-            {line && <div className="h-0.5 rounded bg-pink-500 mx-1" />}
+            {/* The drop line takes no space, so the rows never move under the pointer */}
+            {line && <div className="relative h-0 !mt-0 pointer-events-none" data-drop-line><div className="absolute inset-x-1 -top-px h-0.5 rounded bg-pink-500" /></div>}
             {item.type === 'header' ? (
               <div {...dragProps} data-setlist-row={item.title} className="pt-2 pb-0.5 px-2 text-[10px] font-bold uppercase tracking-wider text-neutral-500 flex items-center gap-1.5 cursor-grab">
                 <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: item.headerColor || '#ec4899' }} />
@@ -200,7 +202,7 @@ export function ProjectsPanel({ state, onChange, setlistOpen, activeItemId, onOp
           </React.Fragment>
         );
       })}
-      {dropAt?.projectId === project.id && dropAt.index === project.items.length && project.items.length > 0 && <div className="h-0.5 rounded bg-pink-500 mx-1" />}
+      {dropAt?.projectId === project.id && dropAt.index === project.items.length && project.items.length > 0 && <div className="relative h-0 !mt-0 pointer-events-none" data-drop-line><div className="absolute inset-x-1 -top-px h-0.5 rounded bg-pink-500" /></div>}
     </div>
   );
 
@@ -274,7 +276,7 @@ export function ProjectsPanel({ state, onChange, setlistOpen, activeItemId, onOp
             if (!project || !item) return null;
             if (item.type === 'header') return (
               <>
-                <button className={menuItem} onClick={runMenu(() => { const title = askName('Section header', item.title); if (title) setProject(project.id, p => ({ ...p, items: p.items.map(i => i.id === item.id ? { ...i, title } : i) })); })}><Pencil size={13} className="text-neutral-400" /> Rename section</button>
+                <button className={menuItem} onClick={runMenu(async () => { const title = await askName('Section header', item.title); if (title) setProject(project.id, p => ({ ...p, items: p.items.map(i => i.id === item.id ? { ...i, title } : i) })); })}><Pencil size={13} className="text-neutral-400" /> Rename section</button>
                 <button className={menuItem} onClick={runMenu(() => addHeader(project.id, blockOf(project.items, index)[1] + 1))}><Heading size={13} className="text-neutral-400" /> Add section header below…</button>
                 <div className="my-1 border-t border-white/10" />
                 <button className={`${menuItem} text-red-300`} onClick={runMenu(() => setProject(project.id, p => ({ ...p, items: p.items.filter(i => i.id !== item.id) })))}><Trash size={13} /> Remove (keep its items)</button>
@@ -289,12 +291,12 @@ export function ProjectsPanel({ state, onChange, setlistOpen, activeItemId, onOp
               <>
                 <button className={menuItem} onClick={runMenu(() => onOpenProject(project.id))}><FolderOpen size={13} className="text-neutral-400" /> Open</button>
                 <button className={menuItem} onClick={runMenu(() => addHeader(project.id))}><Heading size={13} className="text-neutral-400" /> Add section header…</button>
-                <button className={menuItem} onClick={runMenu(() => { const name = askName('Project name', project.name); if (name) setProject(project.id, p => ({ ...p, name })); })}><Pencil size={13} className="text-neutral-400" /> Rename</button>
+                <button className={menuItem} onClick={runMenu(async () => { const name = await askName('Project name', project.name); if (name) setProject(project.id, p => ({ ...p, name })); })}><Pencil size={13} className="text-neutral-400" /> Rename</button>
                 <div className="my-1 border-t border-white/10" />
                 <button
                   className={`${menuItem} text-red-300`}
-                  onClick={runMenu(() => {
-                    if (!window.confirm(`Delete the project "${project.name}" and its setlist? Songs and media stay in the library.`)) return;
+                  onClick={runMenu(async () => {
+                    if (!(await askConfirm(`Delete the project "${project.name}" and its setlist? Songs and media stay in the library.`, { okLabel: 'Delete', danger: true }))) return;
                     const rest = state.projects.filter(p => p.id !== project.id);
                     const projects = rest.length ? rest : [{ id: `project-${Date.now().toString(36)}`, name: 'New project', date: new Date().toLocaleDateString(), items: [] }];
                     onChange({ ...state, projects, activeId: state.activeId === project.id ? projects[0].id : state.activeId });
@@ -310,8 +312,8 @@ export function ProjectsPanel({ state, onChange, setlistOpen, activeItemId, onOp
               <button className={menuItem} onClick={runMenu(() => onNewProject(menu.folder === UNLABELED ? undefined : menu.folder))}><Plus size={13} className="text-neutral-400" /> New project here</button>
               {menu.folder !== UNLABELED && (
                 <>
-                  <button className={menuItem} onClick={runMenu(() => {
-                    const name = askName('Folder name', menu.folder);
+                  <button className={menuItem} onClick={runMenu(async () => {
+                    const name = await askName('Folder name', menu.folder);
                     if (!name || name === menu.folder || state.folders.includes(name)) return;
                     onChange({ ...state, folders: state.folders.map(f => f === menu.folder ? name : f), projects: state.projects.map(p => p.folder === menu.folder ? { ...p, folder: name } : p) });
                   })}><Pencil size={13} className="text-neutral-400" /> Rename folder</button>

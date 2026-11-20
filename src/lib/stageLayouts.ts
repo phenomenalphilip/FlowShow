@@ -24,7 +24,11 @@ export type StageItemKind =
   | 'reference'
   | 'clock'
   /** Fixed text */
-  | 'text';
+  | 'text'
+  /** A picture or video (always drawn under the words) */
+  | 'media'
+  /** The countdown in use (started in the Timers tab) */
+  | 'timer';
 
 export interface StageItem {
   id: string;
@@ -35,7 +39,17 @@ export interface StageItem {
   text?: string;
   /** Where the words sit in the box when they don't fill it (default: middle) */
   verticalAlign?: TextPosition;
+  /** 'media': the picture or video (kept in the app's database, see lib/stageMedia) */
+  media?: { id: string; type: 'image' | 'video'; name: string; /** Where the file is on this computer (desktop app): nothing is copied */ path?: string };
+  /** 'media': how much it shows, 0–100 (default 100) */
+  opacity?: number;
+  /** 'media': fill the box (cropping) or fit inside it */
+  fit?: 'cover' | 'contain';
 }
+
+/** Media is always drawn under the words; within each group, later items are drawn on top */
+export const stageDrawOrder = (items: StageItem[]): StageItem[] =>
+  [...items.filter(i => i.kind === 'media'), ...items.filter(i => i.kind !== 'media')];
 
 export interface StageLayout {
   id: string;
@@ -69,6 +83,14 @@ export const STAGE_ITEM_KINDS: Record<StageItemKind, { label: string; hint: stri
   clock: {
     label: 'Clock', hint: 'The time',
     start: { rect: { x: 0.7, y: 0.04, width: 0.26, height: 0.07 }, style: { fontSize: '46px', fontWeight: 700, color: '#d4d4d8', textAlign: 'right' } },
+  },
+  timer: {
+    label: 'Timer', hint: 'The countdown started in the Timers tab',
+    start: { rect: { x: 0.3, y: 0.8, width: 0.4, height: 0.14 }, style: { fontSize: '110px', fontWeight: 800, color: '#ffffff', textAlign: 'center' } },
+  },
+  media: {
+    label: 'Picture or video', hint: 'A background, logo or video (always under the words)',
+    start: { rect: { x: 0, y: 0, width: 1, height: 1 }, opacity: 100, fit: 'cover' },
   },
   text: {
     label: 'Text', hint: 'Your own words',

@@ -109,9 +109,12 @@ const SHORTCUTS: [string, [string, string][]][] = [
   ['Presenting', [
     ['Next slide', 'Space · → · ↓ · Page Down'],
     ['Previous slide', '← · ↑ · Page Up'],
-    ['Screens on / off (present)', 'B · F1'],
+    ['Start / stop presenting (screens on / off)', 'Ctrl + O · the Presenting button'],
+    ['Pause / unpause Output 1, 2, 3…', 'Ctrl + 1 · Ctrl + 2 · Ctrl + 3…'],
+    ['Pause / unpause the stage screen', 'Ctrl + ` (the key left of 1)'],
     ['Clear the text', 'C · F2'],
-    ['Clear the background', 'L · F3'],
+    ['Clear the background', 'F1'],
+    ['Clear the overlays (nothing else clears them)', 'F3'],
     ['Clear everything', 'Esc'],
   ]],
   ['Editing', [
@@ -134,7 +137,14 @@ const SHORTCUTS: [string, [string, string][]][] = [
 export function ShortcutsDialog({ onClose }: { onClose: () => void }) {
   return (
     <Dialog title="Keyboard shortcuts" icon={Keyboard} onClose={onClose} wide>
-      <div className="grid grid-cols-2 gap-x-8 gap-y-5">
+      <ShortcutsContent />
+    </Dialog>
+  );
+}
+
+export function ShortcutsContent() {
+  return (
+      <div className="grid grid-cols-2 gap-x-8 gap-y-5" data-shortcuts>
         {SHORTCUTS.map(([section, rows]) => (
           <div key={section}>
             <div className="text-[10px] uppercase font-bold tracking-wider text-neutral-500 mb-1.5">{section}</div>
@@ -147,23 +157,29 @@ export function ShortcutsDialog({ onClose }: { onClose: () => void }) {
           </div>
         ))}
       </div>
-    </Dialog>
   );
 }
 
 export function QuickStartDialog({ onClose }: { onClose: () => void }) {
+  return (
+    <Dialog title="Quick start" icon={Rocket} onClose={onClose} wide>
+      <QuickStartContent />
+    </Dialog>
+  );
+}
+
+export function QuickStartContent() {
   const steps: [string, string][] = [
     ['Set up your screens', 'Settings (the gear, top right) → Outputs: add a screen for the projector, an NDI feed or a stage display, and choose Normal or Stage.'],
     ['Bring in your songs', 'Click + beside Projects → Import, or File → Import, for FreeShow, ProPresenter, Word and text files. Or + → New show to type one. Each show is a Song or a Declaration.'],
     ['Add a Bible', 'Open the Scripture tab → Import Bible (Zefania, OpenSong, Beblia, OSIS or USFX XML).'],
     ['Plan the service', '+ → Project makes a project for the service. Drag songs, media and verses into it, add section headers with a right-click, and drag to reorder.'],
     ['Choose the look', 'Pick templates in the Templates tab, or set them per screen in Settings → Styles. Use Design mode to style lyrics, declarations and scripture live, and the Stage tab for stage screens.'],
-    ['Go live', 'Press B to turn the screens on. Click a slide (or use the arrow keys) to show it; C clears the text, Esc clears everything.'],
+    ['Go live', 'Press Ctrl+O (or the Presenting button, top right) to open the screens. Click a slide (or use the arrow keys) to show it; C clears the text, Esc clears everything. Ctrl+1, Ctrl+2… pause a screen. Ctrl+O again closes them.'],
     ['Take it with you', 'Profile (top bar) keeps a screen setup per venue. File → Export saves songs, templates, profiles or a full backup.'],
   ];
   return (
-    <Dialog title="Quick start" icon={Rocket} onClose={onClose} wide>
-      <ol className="space-y-3">
+      <ol className="space-y-3" data-quick-start>
         {steps.map(([title, text], i) => (
           <li key={title} className="flex gap-3">
             <span className="w-6 h-6 rounded-full bg-pink-600 text-white text-xs font-bold flex items-center justify-center shrink-0">{i + 1}</span>
@@ -174,13 +190,19 @@ export function QuickStartDialog({ onClose }: { onClose: () => void }) {
           </li>
         ))}
       </ol>
-    </Dialog>
   );
 }
 
 export function AboutDialog({ onClose }: { onClose: () => void }) {
   return (
     <Dialog title={`About ${APP_NAME}`} icon={Info} onClose={onClose}>
+      <AboutContent />
+    </Dialog>
+  );
+}
+
+export function AboutContent() {
+  return (
       <div className="space-y-4 text-xs text-neutral-300" data-about>
         <div>
           <div className="text-2xl font-black text-pink-500 tracking-wide">{APP_NAME}</div>
@@ -208,7 +230,6 @@ export function AboutDialog({ onClose }: { onClose: () => void }) {
           licences (for example CCLI for songs) to show them.
         </p>
       </div>
-    </Dialog>
   );
 }
 

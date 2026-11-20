@@ -1,8 +1,8 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "flowshow",
+  "productName": "FlowShow",
   "version": "1.1.0",
-  "identifier": "com.tauri.dev",
+  "identifier": "com.fortchurchmedia.flowshow",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:3000",
@@ -13,10 +13,15 @@
     "windows": [
       {
         "title": "FlowShow",
-        "width": 800,
-        "height": 600,
+        "width": 1600,
+        "height": 950,
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "label": "main",
+        "minWidth": 1100,
+        "minHeight": 700,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows --disable-component-update --disk-cache-size=33554432",
+        "dragDropEnabled": false
       }
     ],
     "security": {
@@ -25,7 +30,9 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": [
+      "nsis"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -35,6 +42,11 @@
     ],
     "android": {
       "debugApplicationIdSuffix": ".debug"
-    }
+    },
+    "publisher": "The Fort Church Media",
+    "copyright": "© 2026 The Fort Church Media",
+    "shortDescription": "Worship presentation software",
+    "longDescription": "FlowShow: lyrics, scripture and declarations on screens, stage displays and NDI, with full live control of how the words look.",
+    "category": "Productivity"
   }
 }

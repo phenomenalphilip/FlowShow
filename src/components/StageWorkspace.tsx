@@ -1,15 +1,19 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { AlignCenter, AlignLeft, AlignRight, Check, Copy, Eye, EyeOff, Pencil, Plus, Trash2, Tv, Type } from 'lucide-react';
+import { askConfirm, askText } from '../lib/appDialogs';
+import { AlignCenter, AlignLeft, AlignRight, ArrowDown, ArrowUp, Check, Copy, Eye, EyeOff, ImagePlus, Pencil, Plus, Trash2, Tv, Type } from 'lucide-react';
 import type { OutputSettings, PresentationStyle, SlideDefinition } from '../App';
 import {
   STAGE_ITEM_KINDS, STAGE_LAYOUTS, STAGE_SAMPLES, StageItem, StageItemKind, StageLayout, StageRect,
-  allStageLayouts, isReadyMadeStageLayout, stageLayoutFor, StageSlot, STAGE_SLOT_FIELD, STAGE_SLOT_LABEL, stageSlotSlide,
+  allStageLayouts, isReadyMadeStageLayout, stageLayoutFor, StageSlot, STAGE_SLOT_FIELD, STAGE_SLOT_LABEL, stageSlotSlide, stageDrawOrder,
 } from '../lib/stageLayouts';
+import { saveStageMedia } from '../lib/stageMedia';
+import { pickMediaFile, isVideoPath, fileNameOf } from '../lib/nativeFiles';
+import { isTauri } from '../lib/tauriScreen';
 import { FixedStage } from './FixedStage';
 import { StageScreen } from './StageScreen';
 import { DesignBox, InlineTextEditor } from './DesignCanvas';
 import { FONT_OPTIONS } from './TemplateEditor';
-import { Phase, WEIGHTS, selectCls, segBtn, smallBtn, GroupLabel, Divider, SizeStepper, ColorField, FontSelect, TextPositionSwitch } from './DesignControls';
+import { Phase, WEIGHTS, selectCls, segBtn, smallBtn, GroupLabel, Divider, SizeStepper, ColorField, FontSelect, TextPositionSwitch, MiniSlider } from './DesignControls';
 
 /** What a stage output shows right now */
 export interface StageLiveData {
@@ -42,13 +46,16 @@ type Snapshot = { layouts: StageLayout[]; style?: PresentationStyle };
 const UNDO_MERGE_MS = 500;
 const UNDO_LIMIT = 100;
 const NON_TEXT_INPUTS = new Set(['range', 'checkbox', 'radio', 'color', 'button', 'submit', 'reset', 'file']);
-const ADDABLE: StageItemKind[] = ['current-slide', 'next-slide', 'section', 'song-title', 'reference', 'clock', 'text'];
+const ADDABLE: StageItemKind[] = ['current-slide', 'next-slide', 'section', 'song-title', 'reference', 'clock', 'timer', 'text', 'media'];
 
 const parseNum = (v: unknown, fallback: number) => {
   const n = parseFloat(String(v ?? ''));
   return Number.isFinite(n) ? n : fallback;
 };
-const itemName = (item: StageItem) => item.kind === 'text' && item.text?.trim()
+const shorten = (t: string) => (t.length > 14 ? `${t.slice(0, 13)}…` : t);
+const itemName = (item: StageItem) => item.kind === 'media' && item.media
+  ? shorten(item.media.name.replace(/\.[^.]+$/, ''))
+  : item.kind === 'text' && item.text?.trim()
   ? (item.text.trim().length > 14 ? `${item.text.trim().slice(0, 13)}…` : item.text.trim())
   : STAGE_ITEM_KINDS[item.kind].label;
 const hasWords = (item: StageItem) => item.kind === 'text' || item.kind === 'next-slide';
@@ -68,7 +75,25 @@ export function StageWorkspace({
   const [draft, setDraft] = useState<StageLayout | null>(null);
   const [editingWordsOf, setEditingWordsOf] = useState<string | null>(null);
   const [showGuides, setShowGuides] = useState(true);
-  const [addMenuOpen, setAddMenuOpen] = useState(false);
+  const [addMenuOpen, setAddMenuOpenRaw] = useState(false);
+  // The Add menu floats above everything (panels below can't cut it off) and scrolls if the window is short
+  const [addMenuPos, setAddMenuPos] = useState<{ left: number; top?: number; bottom?: number; maxHeight: number } | null>(null);
+  const setAddMenuOpen = (v: boolean | ((open: boolean) => boolean)) => setAddMenuOpenRaw(prev => {
+    const open = typeof v === 'function' ? v(prev) : v;
+    const r = addMenuRef.current?.getBoundingClientRect();
+    if (open && r) {
+      const below = window.innerHeight - r.bottom - 12;
+      const above = r.top - 12;
+      // Open downwards when there is room, otherwise upwards (whichever side has more space)
+      setAddMenuPos(below >= 420 || below >= above
+        ? { left: r.left, top: r.bottom + 4, maxHeight: below }
+        : { left: r.left, bottom: window.innerHeight - r.top + 4, maxHeight: above });
+    }
+    return open;
+  });
+  // Choosing a picture or video: for a new media item, or to replace the one picked
+  const mediaInputRef = useRef<HTMLInputElement>(null);
+  const replacingMediaOf = useRef<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const addMenuRef = useRef<HTMLDivElement>(null);
   const history = useRef<{ past: Snapshot[]; future: Snapshot[]; lastAt: number }>({ past: [], future: [], lastAt: 0 });
@@ -167,8 +192,56 @@ export function StageWorkspace({
     if (selectedItem) changeItem(selectedItem.id, i => ({ ...i, style: { ...(i.style || {}), ...patch } }), phase);
   };
 
+  const chooseMedia = (replaceId: string | null) => {
+    replacingMediaOf.current = replaceId;
+    // Desktop app: pick the file where it is (nothing is copied into FlowShow)
+    if (isTauri()) { void pickStageMedia(); return; }
+    mediaInputRef.current?.click();
+  };
+  const pickStageMedia = async () => {
+    const path = await pickMediaFile('media').catch(() => null);
+    const replaceId = replacingMediaOf.current;
+    replacingMediaOf.current = null;
+    if (!path) return;
+    const media = { id: path, type: (isVideoPath(path) ? 'video' : 'image') as 'image' | 'video', name: fileNameOf(path), path };
+    if (replaceId) { changeItem(replaceId, i => ({ ...i, media })); return; }
+    const id = `media-${Date.now().toString(36)}`;
+    const start = STAGE_ITEM_KINDS.media.start;
+    change(l => ({ ...l, items: [...l.items, { id, kind: 'media', ...start, rect: { ...start.rect }, media }] }));
+    setSelectedItemId(id);
+  };
+  const onMediaChosen = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    const media = await saveStageMedia(file);
+    const replaceId = replacingMediaOf.current;
+    replacingMediaOf.current = null;
+    if (replaceId) { changeItem(replaceId, i => ({ ...i, media })); return; }
+    const id = `media-${Date.now().toString(36)}`;
+    const start = STAGE_ITEM_KINDS.media.start;
+    change(l => ({ ...l, items: [...l.items, { id, kind: 'media', ...start, rect: { ...start.rect }, media }] }));
+    setSelectedItemId(id);
+  };
+  // Layers: move the picked item up or down among items of its own kind (media always stays under the words)
+  const moveLayer = (dir: 1 | -1) => {
+    if (!selectedItem) return;
+    const id = selectedItem.id;
+    const isMedia = selectedItem.kind === 'media';
+    change(l => {
+      const items = [...l.items];
+      const group = items.map((it, idx) => ({ it, idx })).filter(x => (x.it.kind === 'media') === isMedia);
+      const at = group.findIndex(x => x.it.id === id);
+      const other = group[at + dir];
+      if (!other) return l;
+      const a = group[at].idx, b = other.idx;
+      [items[a], items[b]] = [items[b], items[a]];
+      return { ...l, items };
+    });
+  };
   const addItem = (kind: StageItemKind) => {
     setAddMenuOpen(false);
+    if (kind === 'media') { chooseMedia(null); return; }
     const id = `${kind}-${Date.now().toString(36)}`;
     const start = STAGE_ITEM_KINDS[kind].start;
     change(l => ({ ...l, items: [...l.items, { id, kind, ...start, rect: { ...start.rect }, style: { ...(start.style || {}) } }] }));
@@ -198,12 +271,12 @@ export function StageWorkspace({
     commit([...customLayouts, copy], { ...style, [slotField]: copy.id });
     setNotice(`Copied to "${copy.name}"`);
   };
-  const renameLayout = () => {
-    const name = window.prompt('Name for this stage layout', layout.name)?.trim();
+  const renameLayout = async () => {
+    const name = await askText('Name for this stage layout', layout.name, { okLabel: 'Rename' });
     if (name && name !== layout.name) commit(customLayouts.map(l => l.id === layout.id ? { ...l, name } : l));
   };
-  const deleteLayout = () => {
-    if (!style || !window.confirm(`Delete the stage layout "${layout.name}"? Stage styles using it go back to a ready-made layout. Ctrl+Z brings it back.`)) return;
+  const deleteLayout = async () => {
+    if (!style || !(await askConfirm(`Delete the stage layout "${layout.name}"? Stage styles using it go back to a ready-made layout. Ctrl+Z brings it back.`, { okLabel: 'Delete', danger: true }))) return;
     commit(customLayouts.filter(l => l.id !== layout.id), { ...style, [slotField]: undefined });
     setNotice(`Deleted "${layout.name}"`);
   };
@@ -290,7 +363,7 @@ export function StageWorkspace({
           <div className="flex flex-wrap items-center gap-2">
             <GroupLabel fixed>Layout</GroupLabel>
             <div className="flex rounded overflow-hidden" title="This style has a layout for song slides, one for declarations and one for scripture">
-              <button type="button" onClick={() => setSlot('lyrics')} className={segBtn(slot === 'lyrics')}>For lyrics</button>
+              <button type="button" onClick={() => setSlot('lyrics')} className={segBtn(slot === 'lyrics')}>For songs</button>
               <button type="button" onClick={() => setSlot('declaration')} className={segBtn(slot === 'declaration')}>For declarations</button>
               <button type="button" onClick={() => setSlot('scripture')} className={segBtn(slot === 'scripture')}>For scripture</button>
             </div>
@@ -340,7 +413,7 @@ export function StageWorkspace({
                 <Plus size={11} /> Add
               </button>
               {addMenuOpen && (
-                <div className="absolute left-0 top-full mt-1 z-40 w-60 py-1 rounded-lg border border-white/10 bg-[#18181b] shadow-2xl" data-stage-add-menu>
+                <div className="fixed z-[200] w-60 py-1 rounded-lg border border-white/10 bg-[#18181b] shadow-2xl overflow-y-auto custom-scrollbar" style={addMenuPos ? { left: addMenuPos.left, top: addMenuPos.top, bottom: addMenuPos.bottom, maxHeight: addMenuPos.maxHeight } : undefined} data-stage-add-menu>
                   {ADDABLE.map(kind => (
                     <button key={kind} type="button" onClick={() => addItem(kind)} className="w-full px-3 py-1.5 text-left hover:bg-white/5 transition-colors">
                       <span className="block text-xs font-semibold text-white">{STAGE_ITEM_KINDS[kind].label}</span>
@@ -356,12 +429,46 @@ export function StageWorkspace({
                 <Type size={11} /> {selectedItem.kind === 'next-slide' ? 'Edit label' : 'Edit words'}
               </button>
             )}
+            {selectedItem && (() => {
+              const group = shown.items.filter(i => (i.kind === 'media') === (selectedItem.kind === 'media'));
+              const at = group.findIndex(i => i.id === selectedItem.id);
+              return (
+                <span className="flex items-center gap-1" data-layer-controls>
+                  <span className="text-[11px] text-neutral-400">Layer</span>
+                  <button type="button" disabled={at >= group.length - 1} onClick={() => moveLayer(1)} className={`${smallBtn} bg-white/5 text-neutral-200 hover:bg-white/10 flex items-center gap-1`} title={selectedItem.kind === 'media' ? 'Bring forward (over other pictures and videos; words always stay on top)' : 'Bring forward'} data-layer-up>
+                    <ArrowUp size={11} /> Forward
+                  </button>
+                  <button type="button" disabled={at <= 0} onClick={() => moveLayer(-1)} className={`${smallBtn} bg-white/5 text-neutral-200 hover:bg-white/10 flex items-center gap-1`} title="Send backward" data-layer-down>
+                    <ArrowDown size={11} /> Backward
+                  </button>
+                </span>
+              );
+            })()}
             <button type="button" disabled={!selectedItem} onClick={removeItem} className={`${smallBtn} bg-white/5 text-red-300 hover:bg-red-500/20 flex items-center gap-1`} title={selectedItem ? 'Take this item off the layout' : 'Click an item first'}>
               <Trash2 size={11} /> Remove
             </button>
           </div>
 
-          {/* Row 3: how the selected item's text looks */}
+          <input ref={mediaInputRef} type="file" accept="image/*,video/*" className="hidden" onChange={onMediaChosen} data-stage-media-input />
+          {/* Row 3 for a picture or video: how much it shows and how it fills its box */}
+          {selectedItem?.kind === 'media' ? (
+            <div className="flex flex-wrap items-center gap-2" data-media-controls>
+              <GroupLabel fixed>Media</GroupLabel>
+              <span className="text-[11px] text-neutral-300 max-w-[200px] truncate" title={selectedItem.media?.name}>{selectedItem.media?.name || 'No file'}</span>
+              <button type="button" onClick={() => chooseMedia(selectedItem.id)} className={`${smallBtn} bg-white/5 text-neutral-200 hover:bg-white/10 flex items-center gap-1`}><ImagePlus size={11} /> Replace…</button>
+              <Divider />
+              <span data-media-opacity>
+                <MiniSlider label="Opacity" min={0} max={100} step={1} value={selectedItem.opacity ?? 100} format={(v) => `${Math.round(v)}%`} onChange={(v, phase) => changeItem(selectedItem.id, i => ({ ...i, opacity: v }), phase)} />
+              </span>
+              <div className="flex rounded overflow-hidden" title="Fill the box (cropping the edges) or fit inside it">
+                <button type="button" onClick={() => changeItem(selectedItem.id, i => ({ ...i, fit: 'cover' }))} className={segBtn((selectedItem.fit || 'cover') === 'cover')}>Fill</button>
+                <button type="button" onClick={() => changeItem(selectedItem.id, i => ({ ...i, fit: 'contain' }))} className={segBtn(selectedItem.fit === 'contain')}>Fit</button>
+              </div>
+              <button type="button" onClick={() => changeItem(selectedItem.id, i => ({ ...i, rect: { x: 0, y: 0, width: 1, height: 1 } }))} className={`${smallBtn} bg-white/5 text-neutral-200 hover:bg-white/10`} title="Make it cover the whole screen">Full screen</button>
+              <span className="text-[11px] text-neutral-500">Pictures and videos are always under the words.</span>
+            </div>
+          ) : (
+          /* Row 3: how the selected item's text looks */
           <fieldset disabled={!selectedItem} className={`min-w-0 border-0 p-0 m-0 flex flex-wrap items-center gap-2 ${selectedItem ? '' : 'opacity-40'}`}>
             <GroupLabel fixed>Text</GroupLabel>
             <FontSelect value={String(g.fontFamily || 'Inter, sans-serif')} onChange={(v) => setItemStyle({ fontFamily: v })} />
@@ -383,6 +490,7 @@ export function StageWorkspace({
             )}
             {!selectedItem && <span className="text-[11px] text-neutral-500">Click an item on the screen to change it</span>}
           </fieldset>
+          )}
         </div>
       </fieldset>
 
@@ -398,8 +506,9 @@ export function StageWorkspace({
                 nextSlide={data.nextSlide}
                 songTitle={data.songTitle}
                 background={style?.backgroundColor}
+                sample
               />
-              {showGuides && canEdit && shown.items.map(item => (
+              {showGuides && canEdit && stageDrawOrder(shown.items).map(item => (
                 <React.Fragment key={item.id}>
                   {editingWordsOf !== item.id && (
                     <DesignBox

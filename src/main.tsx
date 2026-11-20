@@ -1,6 +1,9 @@
 import {StrictMode} from 'react';
 import {createRoot} from 'react-dom/client';
 import App from './App.tsx';
+import { applyAppTheme } from './lib/themes';
+// The app's colour theme before the first frame (blue unless another was chosen)
+try { applyAppTheme((localStorage.getItem('flowshow_app_theme') || undefined) as any); } catch { applyAppTheme(undefined); }
 import './index.css';
 
 // Suppress benign ResizeObserver errors

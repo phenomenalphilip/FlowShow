@@ -9,7 +9,8 @@ import {
   SCRIPTURE_SAMPLES,
   getStoredTemplates,
   saveTemplate,
-  deleteTemplate
+  deleteTemplate,
+  TEMPLATE_KINDS, TEMPLATE_KIND_LABEL, templateKind, categoryForKind,
 } from '../lib/templates';
 import { SmartTextLayout } from './SmartTextLayout';
 import { FixedStage } from './FixedStage';
@@ -814,7 +815,7 @@ export function InlineTemplateGrid({
               <div
                 key={t.id}
                 className={`group flex flex-col rounded-lg overflow-hidden border transition-all duration-150 cursor-pointer bg-[#121218] ${
-                  isApplied ? 'border-pink-500 shadow-[0_0_12px_rgba(236,72,153,0.4)]' : 'border-white/8 hover:border-pink-500/60'
+                  isApplied ? 'border-pink-500 shadow-[0_0_12px_color-mix(in_srgb,var(--color-pink-500)_40%,transparent)]' : 'border-white/8 hover:border-pink-500/60'
                 }`}
                 onMouseEnter={() => { setHoveredId(t.id); setPreviewKey(k => k + 1); }}
                 onMouseLeave={() => setHoveredId(null)}
@@ -920,6 +921,26 @@ export function InlineTemplateGrid({
           >
             <Download size={12} className="text-neutral-400" /> Export…
           </button>
+          {/* What the template is for: lyrics and declarations never share templates */}
+          <div className="h-px bg-white/5 my-1" />
+          <div className="px-3 pt-1 pb-0.5 text-[10px] font-bold uppercase tracking-widest text-neutral-500">This template is for</div>
+          <div className="px-2 pb-1.5 flex gap-1" data-template-kind-menu>
+            {TEMPLATE_KINDS.map(k => (
+              <button
+                key={k}
+                type="button"
+                className={`flex-1 px-1.5 py-1 rounded text-[11px] font-semibold transition-colors ${templateKind(ctxMenu.template) === k ? 'bg-pink-600 text-white' : 'bg-white/5 text-neutral-300 hover:text-white'}`}
+                onClick={async () => {
+                  const t = ctxMenu.template;
+                  if (templateKind(t) !== k) { await saveTemplate({ ...t, category: categoryForKind(k, t.category) }); reload(); }
+                  setCtxMenu(null);
+                }}
+                data-kind={k}
+              >
+                {TEMPLATE_KIND_LABEL[k]}
+              </button>
+            ))}
+          </div>
           {(ctxMenu.template.isCustom) && (
             <>
               <div className="h-px bg-white/5 my-1" />

@@ -7,6 +7,8 @@ import { PresentationTemplate, AnimationType, AnimationConfig, getScrollPosition
 import { SmartTextLayout } from './SmartTextLayout';
 import { FixedStage } from './FixedStage';
 import { DesignBox, Rect, getPlacement, placeAcross, placeDown, resizeBox } from './DesignCanvas';
+import { DesignMediaControls, DesignMediaLayer, chooseDesignMediaFile, newDesignMedia, type DesignMedia } from '../lib/designMedia';
+import { Image as ImageIcon, Plus } from 'lucide-react';
 
 interface TemplateEditorProps {
   template: PresentationTemplate;
@@ -135,6 +137,46 @@ export function TemplateEditor({
   }));
 
   const replay = () => setPreviewKey(k => k + 1);
+
+  // Pictures and videos in the template: placed anywhere, under the words
+  const [mediaSel, setMediaSel] = useState<string | null>(null);
+  const mediaItems = draft.styles.media || [];
+  const selectedMedia = mediaSel ? mediaItems.find(m => m.id === mediaSel) : undefined;
+  const setMedia = (fn: (list: DesignMedia[]) => DesignMedia[]) => setDraft(prev => {
+    const media = fn(prev.styles.media || []);
+    return { ...prev, styles: { ...prev.styles, media: media.length ? media : undefined } };
+  });
+  const changeMedia = (id: string, patch: Partial<DesignMedia>) => setMedia(list => list.map(m => m.id === id ? { ...m, ...patch } : m));
+  const addMedia = async () => {
+    const file = await chooseDesignMediaFile();
+    if (!file) return;
+    const item = newDesignMedia(file);
+    setMedia(list => [...list, item]);
+    setMediaSel(item.id);
+  };
+  const replaceMedia = async (id: string) => {
+    const file = await chooseDesignMediaFile();
+    if (file) changeMedia(id, { type: file.type, name: file.name, path: file.path, storedId: file.storedId });
+  };
+  const moveMedia = (id: string, dir: 1 | -1) => setMedia(list => {
+    const next = [...list];
+    const at = next.findIndex(m => m.id === id);
+    const to = at + dir;
+    if (at < 0 || to < 0 || to >= next.length) return list;
+    [next[at], next[to]] = [next[to], next[at]];
+    return next;
+  });
+  const mediaBox = (m: DesignMedia, selected: boolean, scale: number) => (
+    <DesignBox
+      rect={m.layout}
+      scale={scale}
+      movable
+      selected={selected}
+      label={`${m.type === 'video' ? 'Video' : 'Picture'} · drag to move · drag the corners to resize`}
+      onSelect={() => setMediaSel(m.id)}
+      onChange={(r) => changeMedia(m.id, { layout: r })}
+    />
+  );
 
   const handleSave = () => {
     onSave(draft);
@@ -276,6 +318,8 @@ export function TemplateEditor({
             <FixedStage key={previewKey} className="w-full h-full">
               {(scale: number) => (
                 <>
+                  <DesignMediaLayer items={mediaItems} />
+                  {mediaItems.filter(m => m.id !== selectedMedia?.id).map(m => <React.Fragment key={m.id}>{mediaBox(m, false, scale)}</React.Fragment>)}
                   <SmartTextLayout
                     text={sampleText}
                     animation={draft.animation}
@@ -285,7 +329,7 @@ export function TemplateEditor({
                       lines: draft.styles.lines,
                       layout: draft.styles.layout
                     }}
-                    className="w-full h-full"
+                    className="relative z-10 w-full h-full"
                   />
                   {isScrollTemplate && (
                     <>
@@ -298,11 +342,53 @@ export function TemplateEditor({
                     scale={scale}
                     movable
                     label="Drag to move · edges to resize"
+                    selected={!selectedMedia}
+                    onSelect={() => setMediaSel(null)}
                     onChange={(r) => updateBox(r)}
                   />
+                  {selectedMedia && mediaBox(selectedMedia, true, scale)}
                 </>
               )}
             </FixedStage>
+          </div>
+
+          {/* Pictures and videos in this template */}
+          <div className="w-full max-w-3xl mt-3 flex flex-col gap-2" data-template-media>
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-[11px] font-semibold text-neutral-400 uppercase tracking-wider">Media</span>
+              {mediaItems.map((m, i) => (
+                <button
+                  key={m.id}
+                  type="button"
+                  onClick={() => setMediaSel(selectedMedia?.id === m.id ? null : m.id)}
+                  className={`px-2 py-1 rounded text-[11px] font-semibold flex items-center gap-1 ${selectedMedia?.id === m.id ? 'bg-pink-600 text-white' : 'bg-white/5 text-neutral-300 hover:text-white'}`}
+                  title={m.name}
+                  data-design-media-chip={m.id}
+                >
+                  <ImageIcon size={11} /> {m.type === 'video' ? 'Video' : 'Picture'} {i + 1}
+                </button>
+              ))}
+              <button type="button" onClick={() => void addMedia()} className="px-2 py-1 rounded text-[11px] font-semibold bg-white/5 hover:bg-white/10 text-neutral-200 flex items-center gap-1" title="Put a picture or video in this template. Drag it and its corners on the canvas to place it." data-design-add-media>
+                <Plus size={11} /> Add media
+              </button>
+              {mediaItems.length === 0 && <span className="text-[11px] text-neutral-500">Pictures or videos placed anywhere on the screen, under the words</span>}
+            </div>
+            {selectedMedia && (
+              <div className="flex items-center gap-2 flex-wrap">
+                <DesignMediaControls
+                  item={selectedMedia}
+                  onChange={(patch) => changeMedia(selectedMedia.id, patch)}
+                  onReplace={() => void replaceMedia(selectedMedia.id)}
+                  onRemove={() => { setMedia(list => list.filter(m => m.id !== selectedMedia.id)); setMediaSel(null); }}
+                />
+                {mediaItems.length > 1 && (
+                  <>
+                    <button type="button" onClick={() => moveMedia(selectedMedia.id, 1)} className="px-2 py-1 rounded-md text-[11px] font-semibold bg-white/5 hover:bg-white/10 text-neutral-200" title="In front of the other media (words always stay on top)">Forward</button>
+                    <button type="button" onClick={() => moveMedia(selectedMedia.id, -1)} className="px-2 py-1 rounded-md text-[11px] font-semibold bg-white/5 hover:bg-white/10 text-neutral-200" title="Behind the other media">Backward</button>
+                  </>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Sample Text Editor Input */}

@@ -1,20 +1,26 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { startTransition, useEffect, useMemo, useRef, useState } from 'react';
+import { askConfirm, askText } from '../lib/appDialogs';
 import {
   AlignLeft, AlignCenter, AlignRight, Minus, Plus, RotateCcw, Eye, EyeOff, Info, Check, Play, Radio, Scissors, Trash2, Send, X, BookmarkPlus, ChevronLeft, Tag,
+  Image as ImageIcon,
+  Monitor as MonitorIcon,
 } from 'lucide-react';
 import { GROUP_PRESETS, groupColors } from '../lib/slideGroups';
 import { tokenize } from '../lib/TokenEngine';
 import type { CustomTextBox, OutputSettings, SlideDefinition, SlideDesign, TemplateSource } from '../App';
 import type { TextPosition } from '../lib/templates';
+import { BOX_COLOR_KEY, BOX_OPACITY_KEY, CONTRAST_KEY, readabilityOf } from '../lib/readability';
 import {
-  PresentationTemplate, AnimationConfig, AnimationType, getScrollPositions, SCROLL_POS_MIN, SCROLL_POS_MAX, FALLBACK_ANIMATION, saveTemplate,
+  PresentationTemplate, AnimationConfig, AnimationType, getScrollPositions, SCROLL_POS_MIN, SCROLL_POS_MAX, FALLBACK_ANIMATION, saveTemplate, categoryForKind, TemplateKind,
 } from '../lib/templates';
 import { FONT_OPTIONS, MOTION_PRESETS, LAYOUT_PRESETS, SHADOW_PRESETS, ScrollMarker, MOTION_DEFAULTS, GENERIC_MOTION_DEFAULTS } from './TemplateEditor';
 import { FixedStage } from './FixedStage';
+import { DesignMediaControls, chooseDesignMediaFile, newDesignMedia, type DesignMedia } from '../lib/designMedia';
 import { DesignBox, InlineTextEditor, Rect, getPlacement, placeAcross, placeDown, resizeBox } from './DesignCanvas';
 import {
-  Phase, WEIGHTS, selectCls, segBtn, smallBtn, GroupLabel, Divider, SizeStepper, NumField, ColorField, MiniSlider,
-  DesignFor, DesignForSwitch, DesignStatus, StatusBadges, Notice, MotionOptions, MotionLayers, ExitSelect, FontSelect, TextPositionSwitch,
+  Phase, WEIGHTS, selectCls, segBtn, smallBtn, GroupLabel, Divider, SizeStepper, NumField, ColorField, MiniSlider, TemplateOptions, SaveTemplateDialog,
+  useDesignRows, rowClass, RowHead, ScreenBackgroundControl,
+  TemplateChip, DesignFor, DesignForSwitch, DesignStatus, StatusBadges, Notice, MotionOptions, MotionLayers, ExitSelect, FontSelect, TextPositionSwitch,
 } from './DesignControls';
 
 export interface OutputTemplateInfo {
@@ -43,12 +49,19 @@ interface LiveDesignWorkspaceProps {
   templates: PresentationTemplate[];
   templateInfo: OutputTemplateInfo;
   onAssignTemplate: (templateId: string) => void;
+  /** The slide on the canvas is a declaration: its template is chosen under For declarations, not here */
+  isDeclarationSlide?: boolean;
+  /** This screen's background opacity (0–100) and how to change it (live) */
+  backgroundOpacity?: number;
+  onBackgroundOpacity?: (v: number, phase: Phase) => void;
   look: DesignLook;
   /** This slide's own design on this screen; undefined = it shows the template look */
   design?: SlideDesign;
   onChangeDesign: (fn: (d: SlideDesign) => SlideDesign) => void;
   onCopyDesign: (toSlideIds: string[]) => void;
   onResetDesign: (slideIds: string[]) => void;
+  /** Take the media (background media and Design-mode pictures/videos) off these slides */
+  onRemoveMedia?: (slideIds: string[]) => void;
   /** Show this slide's text boxes (and hidden lyrics) on every other screen; returns how many screens */
   onSendTextBoxesToAllScreens: () => number;
   canSplit: boolean;
@@ -120,8 +133,8 @@ const sourceLabel = (info: OutputTemplateInfo) => {
 
 
 export function LiveDesignWorkspace({
-  outputs, selectedOutputId, onSelectOutput, onDesignFor, templates, templateInfo, onAssignTemplate,
-  look, design, onChangeDesign, onCopyDesign, onResetDesign, onSendTextBoxesToAllScreens, canSplit, onSplitSlide, onInsertSlide, onDeleteSlide, onMoveSlides,
+  outputs, selectedOutputId, onSelectOutput, onDesignFor, templates, templateInfo, onAssignTemplate, isDeclarationSlide, backgroundOpacity, onBackgroundOpacity,
+  look, design, onChangeDesign, onCopyDesign, onResetDesign, onRemoveMedia, onSendTextBoxesToAllScreens, canSplit, onSplitSlide, onInsertSlide, onDeleteSlide, onMoveSlides,
   onSetSlideGroup, onUseLookForGroup,
   textHidden, status, slideIsOnAir, followingLive,
   renderOutput, slideText, onEditSlideText, songTitle, slides, liveSlideId, canvasSlideId, canvasSlide: canvasSlideProp,
@@ -135,12 +148,20 @@ export function LiveDesignWorkspace({
   const anchorRef = useRef<number | null>(null);
   const sweepRef = useRef<{ start: number } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [selected, setSelected] = useState<Target>('lyrics');
+  const [selected, setSelectedRaw] = useState<Target>('lyrics');
+  // A picture or video picked on the canvas (instead of a text box)
+  const [mediaSel, setMediaSel] = useState<string | null>(null);
+  const setSelected = (t: Target) => { setMediaSel(null); setSelectedRaw(t); };
   const [editing, setEditing] = useState<Target | null>(null);
   // A single lyrics word being styled (word number across the slide)
   const [selectedWord, setSelectedWord] = useState<number | null>(null);
   // An unfinished edit (mid-drag, or a new text box still being typed): canvas only, never sent to the screens
   const [draft, setDraft] = useState<SlideDesign | null>(null);
+  // A change is being saved: the canvas shows it (as a draft) until the saved design comes back
+  const committing = useRef(false);
+  useEffect(() => {
+    if (committing.current) { committing.current = false; setDraft(null); }
+  }, [design]);
   // A slide just added: open its words for typing once it is on the canvas
   const [typeIntoSlideId, setTypeIntoSlideId] = useState<string | null>(null);
   // Right-click menu on a strip slide
@@ -204,13 +225,15 @@ export function LiveDesignWorkspace({
   const canvasIndex = slides.findIndex(s => s.id === canvasSlideId);
   const canvasSlide = canvasIndex >= 0 ? slides[canvasIndex] : canvasSlideProp ?? undefined;
   // New text boxes (on any screen) that go out when this slide goes live
-  const waitingCount = Object.values(canvasSlide?.designs || {}).flatMap(d => d.customBoxes || []).filter(b => b.waiting).length;
+  const waitingCount = Object.values(canvasSlide?.designs || {}).flatMap(d => [...(d.customBoxes || []), ...(d.media || [])]).filter(b => b.waiting).length;
   const canDesign = slideText !== null && !textHidden;
   const toolbarEnabled = canDesign && editing === null;
 
   const current: SlideDesign = draft ?? design ?? {};
   const boxes = current.customBoxes || [];
   const lyricsHidden = !!current.hideLyrics;
+  const mediaItems = current.media || [];
+  const selectedMedia = mediaSel ? mediaItems.find(m => m.id === mediaSel) : undefined;
   const selectedBox = selected === 'lyrics' ? undefined : boxes.find(b => b.id === selected);
   const target: Target = selectedBox ? selectedBox.id : 'lyrics';
   // Edits to a hidden or waiting box don't reach the screen
@@ -261,8 +284,12 @@ export function LiveDesignWorkspace({
       setDraft(prev => fn(prev ?? design ?? {}));
       return;
     }
-    setDraft(null);
-    onChangeDesign(fn);
+    // Show the change here at once; saving it (which redraws the whole app) follows in the background,
+    // so buttons and the canvas never wait for the rest of the window
+    setDraft(prev => fn(prev ?? design ?? {}));
+    committing.current = true;
+    // Let the screen paint the change first (next frame), then save it
+    requestAnimationFrame(() => setTimeout(() => startTransition(() => onChangeDesign(fn)), 0));
   };
   const editTarget = (t: Target, phase: Phase, onLyrics: (d: SlideDesign) => SlideDesign, onBox: (b: CustomTextBox) => CustomTextBox) =>
     mutate(d => t === 'lyrics' ? onLyrics(d) : { ...d, customBoxes: (d.customBoxes || []).map(b => b.id === t ? onBox(b) : b) }, phase);
@@ -284,12 +311,48 @@ export function LiveDesignWorkspace({
       return { ...d, words: Object.keys(rest).length ? rest : undefined };
     }, 'commit');
   };
+  // Readability settings belong to the whole box (never one word)
+  const setBoxLook = (patch: Record<string, string | number>, phase: Phase = 'commit') =>
+    editTarget(target, phase, d => ({ ...d, global: { ...(d.global || {}), ...patch } as React.CSSProperties }), b => ({ ...b, style: { ...(b.style || {}), ...patch } as React.CSSProperties }));
   const setLayoutOf = (t: Target, patch: Partial<Rect>, phase: Phase = 'commit') =>
     editTarget(t, phase, d => ({ ...d, layout: { ...look.layout, ...(d.layout || {}), ...patch } }), b => ({ ...b, layout: { ...b.layout, ...patch } }));
   const setLayout = (patch: Partial<Rect>, phase: Phase = 'commit') => setLayoutOf(target, patch, phase);
   const setAnim = (patch: Partial<AnimationConfig>, phase: Phase = 'commit') =>
     editTarget(target, phase, d => ({ ...d, animation: { ...(d.animation || {}), ...patch } }), b => ({ ...b, animation: { ...(b.animation || {}), ...patch } }));
   const setMotionType = (type: AnimationType) => setAnim({ type, ...(MOTION_DEFAULTS[type] || GENERIC_MOTION_DEFAULTS) });
+
+  // Pictures and videos on this slide for this screen. A new one waits for Go live, like a new text box.
+  const changeMedia = (id: string, patch: Partial<DesignMedia>, phase: Phase = 'commit') =>
+    mutate(d => ({ ...d, media: (d.media || []).map(m => m.id === id ? { ...m, ...patch } : m) }), phase);
+  const addMedia = async () => {
+    const file = await chooseDesignMediaFile();
+    if (!file) return;
+    const item = { ...newDesignMedia(file), waiting: true };
+    mutate(d => ({ ...d, media: [...(d.media || []), item] }), 'commit');
+    setSelectedWord(null);
+    setMediaSel(item.id);
+    setNotice('Media added · it goes on the screen when you click Go live');
+  };
+  const replaceMedia = async (id: string) => {
+    const file = await chooseDesignMediaFile();
+    if (file) changeMedia(id, { type: file.type, name: file.name, path: file.path, storedId: file.storedId });
+  };
+  const removeMedia = (id: string) => {
+    mutate(d => {
+      const media = (d.media || []).filter(m => m.id !== id);
+      return { ...d, media: media.length ? media : undefined };
+    }, 'commit');
+    setMediaSel(null);
+  };
+  // Bring the picked media to the front (or send it back) among this slide's media
+  const moveMedia = (id: string, dir: 1 | -1) => mutate(d => {
+    const list = [...(d.media || [])];
+    const at = list.findIndex(m => m.id === id);
+    const to = at + dir;
+    if (at < 0 || to < 0 || to >= list.length) return d;
+    [list[at], list[to]] = [list[to], list[at]];
+    return { ...d, media: list };
+  }, 'commit');
 
   // A new text box stays off the screens until its slide goes live (Go live)
   const addTextBox = () => {
@@ -324,15 +387,17 @@ export function LiveDesignWorkspace({
   const toggleLyrics = () => mutate(d => ({ ...d, hideLyrics: lyricsHidden ? undefined : true }), 'commit');
   const sendBoxes = () => {
     const n = onSendTextBoxesToAllScreens();
-    const waiting = (design?.customBoxes || []).some(b => b.waiting);
+    const waiting = (design?.customBoxes || []).some(b => b.waiting) || (design?.media || []).some(m => m.waiting);
     setNotice(!n ? 'No other screens are switched on'
       : `${waiting ? 'Copied' : 'Sent'} to ${n} other screen${n === 1 ? '' : 's'}${waiting ? ' · new boxes wait for Go live' : ''}`);
   };
   const splitSlide = () => { onSplitSlide(); setNotice('Slide split in two'); };
-  const resetSlide = () => {
+  const resetSlide = async () => {
     if (!canvasSlideId) return;
     const n = design?.customBoxes?.length || 0;
-    if (n && !window.confirm(`Put this slide back to the template look on ${outputName}? Its ${n} text box${n === 1 ? '' : 'es'} will be removed.`)) return;
+    const nm = design?.media?.length || 0;
+    const parts = [n ? `${n} text box${n === 1 ? '' : 'es'}` : '', nm ? `${nm} picture${nm === 1 ? '' : 's'}/video${nm === 1 ? '' : 's'}` : ''].filter(Boolean).join(' and ');
+    if (parts && !(await askConfirm(`Put this slide back to the template look on ${outputName}? Its ${parts} will be removed.`, { okLabel: 'Reset' }))) return;
     setDraft(null);
     onResetDesign([canvasSlideId]);
   };
@@ -340,6 +405,8 @@ export function LiveDesignWorkspace({
   const g = wordActive ? { ...elementLook.global, ...wordStyle } : elementLook.global;
   const box = elementLook.layout;
   const anim = elementLook.animation;
+  const boxLook = readabilityOf(elementLook.global);
+  const rows = useDesignRows();
   const isScroll = anim?.type === 'vertical-scroll';
   const isWordStack = anim?.type === 'word-stack';
   const scrollPos = getScrollPositions(anim);
@@ -349,7 +416,7 @@ export function LiveDesignWorkspace({
   const parkedPos = lyricsScroll && target === 'lyrics' && parkedFader ? lyricsScrollPos[parkedFader] : undefined;
   const colorValue = /^#[0-9a-f]{6}$/i.test(String(g.color || '')) ? String(g.color) : '#ffffff';
   const shadowValue = String(g.textShadow || 'none');
-  const canSendBoxes = (design?.customBoxes?.length ?? 0) > 0 || !!design?.hideLyrics;
+  const canSendBoxes = (design?.customBoxes?.length ?? 0) > 0 || (design?.media?.length ?? 0) > 0 || !!design?.hideLyrics;
 
   const otherSlideIds = slides.filter(s => s.id !== canvasSlideId).map(s => s.id);
   const chosenTargets = otherSlideIds.filter(id => chosen.has(id));
@@ -455,6 +522,19 @@ export function LiveDesignWorkspace({
       anchorRef.current = index;
     }
   };
+  const stripHandlers = useRef<StripHandlers>(null!);
+  stripHandlers.current = {
+    pointerDown: (i, e) => onCardPointerDown(i, e),
+    pointerEnter: (i) => onCardPointerEnter(i),
+    contextMenu: (i, e) => { e.preventDefault(); e.stopPropagation(); setMenuView('main'); setSlideMenu({ x: e.clientX, y: e.clientY, index: i }); },
+    click: (sl, i, e) => {
+      if (suppressClickRef.current || e.shiftKey || e.ctrlKey || e.metaKey) return;
+      onPickSlide(sl);
+      anchorRef.current = i;
+    },
+    doubleClick: (sl, e) => { if (!sl.disabled && !e.shiftKey && !e.ctrlKey && !e.metaKey) onGoLive(sl); },
+    pick: (sl) => onPickSlide(sl),
+  };
   const onCardPointerEnter = (index: number) => {
     if (sweepRef.current) setChosen(new Set(rangeIds(sweepRef.current.start, index)));
   };
@@ -482,8 +562,8 @@ export function LiveDesignWorkspace({
     const what = ids.length > 1 ? `${ids.length} slides` : 'Slide';
     setNotice(group ? `${what} grouped as ${group}` : `${what}: group removed`);
   };
-  const askCustomGroup = (ids: string[]) => {
-    const name = window.prompt('Group name (for example Verse 5, Chorus 2, Vamp)')?.trim();
+  const askCustomGroup = async (ids: string[]) => {
+    const name = await askText('Group name (for example Verse 5, Chorus 2, Vamp)');
     if (name) setGroupFor(ids, name);
   };
   const applyLookToGroup = (group: string, fromSlideId: string) => {
@@ -492,14 +572,14 @@ export function LiveDesignWorkspace({
     setNotice(`All ${n} ${group} slide${n === 1 ? '' : 's'} now look like this one`);
   };
   // Save the lyrics look of this slide (on this screen) as a template that any slide or song can use
-  const saveLookAsTemplate = async () => {
-    const suggested = `${songTitle || 'Song'} – ${canvasSlide?.group || `Slide ${canvasIndex + 1}`}`;
-    const name = window.prompt('Name for the new template', suggested)?.trim();
-    if (!name) return;
+  const [savingTemplate, setSavingTemplate] = useState(false);
+  const saveLookAsTemplate = () => setSavingTemplate(true);
+  const saveTemplateAs = async (name: string, kind: TemplateKind) => {
+    setSavingTemplate(false);
     const template: PresentationTemplate = {
       id: `custom-${Date.now()}`,
       name,
-      category: 'custom',
+      category: categoryForKind(kind),
       tagline: 'Saved from Design mode',
       description: `Saved from a slide of "${songTitle || 'a song'}" on ${outputName}.`,
       badge: 'Custom',
@@ -512,8 +592,8 @@ export function LiveDesignWorkspace({
     setNotice(`Saved as template "${name}"`);
   };
 
-  const copyToAll = () => {
-    if (!window.confirm(`Copy this slide's design (including its text boxes) to all ${otherSlideIds.length} other slides on ${outputName}? Any design they have on this screen will be replaced.`)) return;
+  const copyToAll = async () => {
+    if (!(await askConfirm(`Copy this slide's design (including its text boxes) to all ${otherSlideIds.length} other slides on ${outputName}? Any design they have on this screen will be replaced.`, { okLabel: 'Copy to all' }))) return;
     onCopyDesign(otherSlideIds);
     setNotice(`Design copied to ${otherSlideIds.length} slide${otherSlideIds.length === 1 ? '' : 's'}`);
   };
@@ -540,10 +620,13 @@ export function LiveDesignWorkspace({
               key={o.id}
               type="button"
               onClick={() => onSelectOutput(o.id)}
-              className={`px-3 py-1 rounded-md text-xs font-semibold transition-colors ${
-                o.id === selectedOutputId ? 'bg-pink-600 text-white' : 'text-neutral-400 hover:text-white hover:bg-white/5'
+              className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-semibold transition-colors ${
+                o.id === selectedOutputId ? 'bg-[var(--fs-second)] text-[var(--fs-second-text)] shadow-sm' : 'text-neutral-400 hover:text-white hover:bg-white/5'
               }`}
+              title={`Design what ${o.name} shows`}
+              data-design-output={o.id}
             >
+              <MonitorIcon size={12} className={o.id === selectedOutputId ? 'opacity-70' : 'text-neutral-500'} />
               {o.name}
             </button>
           ))}
@@ -551,17 +634,25 @@ export function LiveDesignWorkspace({
         {onDesignFor && <DesignForSwitch value="lyrics" onChange={onDesignFor} />}
 
         <div className="flex items-center gap-2 min-w-0">
-          <span className="text-[10px] uppercase font-bold tracking-wider text-neutral-500">Template</span>
-          <select
+          <TemplateChip
+            name={templateInfo.templateId ? (templates.find(t => t.id === templateInfo.templateId)?.name || templateInfo.templateId) : 'No template'}
             value={templateInfo.templateId || ''}
-            onChange={(e) => e.target.value && onAssignTemplate(e.target.value)}
-            className={`${selectCls} max-w-[200px]`}
-            title="The starting look. Slide designs sit on top of it and never change it."
+            onChange={(id) => id && onAssignTemplate(id)}
+            disabled={isDeclarationSlide}
+            title={isDeclarationSlide
+              ? 'This slide is a declaration: choose its template under For declarations'
+              : `Template: ${sourceLabel(templateInfo)}. The starting look; slide designs sit on top of it and never change it. Click to choose another.`}
+            data-lyrics-template-select
           >
             {!templateInfo.templateId && <option value="">None (plain text)</option>}
-            {templates.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-          </select>
-          <span className="text-[11px] text-neutral-500 truncate">{sourceLabel(templateInfo)}</span>
+            {templateInfo.templateId && !templates.some(t => t.id === templateInfo.templateId) && <option value={templateInfo.templateId}>{templateInfo.templateId}</option>}
+            <TemplateOptions templates={templates} first="lyrics" />
+          </TemplateChip>
+          {isDeclarationSlide && onDesignFor && (
+            <button type="button" onClick={() => onDesignFor('declaration')} className={`${smallBtn} bg-white/5 text-amber-300 hover:bg-white/10`} title="Declarations have their own template">
+              A declaration: design it under For declarations
+            </button>
+          )}
         </div>
 
         <div className="ml-auto flex items-center gap-2 shrink-0">
@@ -598,7 +689,7 @@ export function LiveDesignWorkspace({
                 className={`${smallBtn} ${target === 'lyrics' && !wordActive ? 'bg-pink-600 text-white' : 'bg-[#1e1e28] text-neutral-300 hover:text-white'} ${lyricsHidden ? 'line-through decoration-2' : ''}`}
                 title={lyricsHidden ? 'The lyrics are hidden on this screen' : 'The song lyrics (click a word on the canvas to style just that word)'}
               >
-                Lyrics{lyricsHidden ? ' (hidden)' : ''}
+                Lyrics
               </button>
               {wordActive && (
                 <span className="flex items-center rounded bg-pink-600 text-white text-[11px] font-semibold" title="Text changes now apply to this word only">
@@ -617,12 +708,33 @@ export function LiveDesignWorkspace({
                   title={b.hidden ? `Hidden on ${outputName}` : b.waiting ? 'Not on the screen yet: it goes out when you click Go live' : undefined}
                 >
                   {b.waiting && !b.hidden && <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" />}
-                  {boxName(b, i)}{b.hidden ? ' (hidden)' : ''}
+                  {boxName(b, i)}
                 </button>
               ))}
             </div>
+            {mediaItems.length > 0 && (
+              <div className="flex flex-wrap gap-1" data-design-media-chips>
+                {mediaItems.map((m, i) => (
+                  <button
+                    key={m.id}
+                    type="button"
+                    onClick={() => { setSelectedWord(null); setMediaSel(m.id); }}
+                    className={`${smallBtn} flex items-center gap-1 max-w-[150px] ${selectedMedia?.id === m.id ? 'bg-pink-600 text-white' : 'bg-[#1e1e28] text-neutral-300 hover:text-white'}`}
+                    title={m.waiting ? `${m.name} · not on the screen yet: it goes out when you click Go live` : m.name}
+                    data-design-media-chip={m.id}
+                  >
+                    {m.waiting && <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" />}
+                    <ImageIcon size={11} className="shrink-0" />
+                    <span className="truncate">{m.type === 'video' ? 'Video' : 'Picture'} {i + 1}</span>
+                  </button>
+                ))}
+              </div>
+            )}
             <button type="button" onClick={addTextBox} className={`${smallBtn} bg-white/5 text-neutral-200 hover:bg-white/10 flex items-center gap-1`} title="Add your own text to this slide on this screen">
               <Plus size={11} /> Add text box
+            </button>
+            <button type="button" onClick={() => void addMedia()} className={`${smallBtn} bg-white/5 text-neutral-200 hover:bg-white/10 flex items-center gap-1`} title="Put a picture or video on this slide on this screen (drag it and its corners to place it)" data-design-add-media>
+              <ImageIcon size={11} /> Add media
             </button>
             <Divider />
             {wordActive && (
@@ -630,8 +742,8 @@ export function LiveDesignWorkspace({
                 <RotateCcw size={11} /> Clear word style
               </button>
             )}
-            {target === 'lyrics' ? (
-              <button type="button" onClick={toggleLyrics} className={`${smallBtn} bg-white/5 text-neutral-200 hover:bg-white/10 flex items-center gap-1`} title={`Show or hide the lyrics on ${outputName} for this slide`}>
+            {selectedMedia ? null : target === 'lyrics' ? (
+              <button type="button" onClick={toggleLyrics} className={`${smallBtn} bg-white/5 text-neutral-200 hover:bg-white/10 flex items-center justify-center gap-1 w-[92px]`} title={`Show or hide the lyrics on ${outputName} for this slide`}>
                 {lyricsHidden ? <><Eye size={11} /> Show lyrics</> : <><EyeOff size={11} /> Hide lyrics</>}
               </button>
             ) : (
@@ -656,15 +768,39 @@ export function LiveDesignWorkspace({
               disabled={!canSendBoxes}
               onClick={sendBoxes}
               className={`${smallBtn} bg-white/5 text-neutral-200 hover:bg-white/10 flex items-center gap-1`}
-              title={canSendBoxes ? 'Show these text boxes (and the hidden lyrics) for this slide on every screen' : 'Add a text box or hide the lyrics first'}
+              title={canSendBoxes ? 'Show these text boxes, pictures and videos (and the hidden lyrics) for this slide on every screen' : 'Add a text box or media, or hide the lyrics first'}
             >
               <Send size={11} /> Send text boxes to all screens
             </button>
           </div>
 
+          {/* The picked picture or video */}
+          {selectedMedia && (
+            <div className="flex flex-wrap items-center gap-2" data-design-row="media">
+              <GroupLabel fixed>Media</GroupLabel>
+              <DesignMediaControls
+                item={selectedMedia}
+                onChange={(patch, phase) => changeMedia(selectedMedia.id, patch, phase)}
+                onReplace={() => void replaceMedia(selectedMedia.id)}
+                onRemove={() => removeMedia(selectedMedia.id)}
+              />
+              {mediaItems.length > 1 && (
+                <>
+                  <Divider />
+                  <button type="button" onClick={() => moveMedia(selectedMedia.id, 1)} className={`${smallBtn} bg-white/5 text-neutral-200 hover:bg-white/10`} title="In front of the other media (words always stay on top)">Forward</button>
+                  <button type="button" onClick={() => moveMedia(selectedMedia.id, -1)} className={`${smallBtn} bg-white/5 text-neutral-200 hover:bg-white/10`} title="Behind the other media">Backward</button>
+                </>
+              )}
+              <button type="button" onClick={() => setMediaSel(null)} className={`${smallBtn} text-neutral-400 hover:text-white`} title="Back to the text settings">Done</button>
+            </div>
+          )}
+
+          {/* Rows 1–3 style the words: hidden while a picture or video is picked */}
+          <div className={selectedMedia ? 'hidden' : 'contents'}>
           {/* Row 1: text */}
-          <div className="flex flex-wrap items-center gap-2">
-            <GroupLabel fixed>{wordActive ? 'Word' : 'Text'}</GroupLabel>
+          <div className={rowClass(rows.isOpen('text'))} data-design-row="text">
+            <RowHead label={wordActive ? 'Word' : 'Text'} open={rows.isOpen('text')} onToggle={() => rows.toggle('text')}
+              summary={`${String(g.fontFamily || 'Inter').split(',')[0].replace(/['"]/g, '')} · ${parseNum(g.fontSize, 110)}px · weight ${g.fontWeight || '700'}${boxLook.contrast ? ` · contrast ${Math.round(boxLook.contrast)}` : ''}`} />
             <FontSelect value={String(g.fontFamily || '')} onChange={(v) => setGlobal({ fontFamily: v })} />
             <SizeStepper value={parseNum(g.fontSize, 110)} onChange={(v) => setGlobal({ fontSize: `${v}px` })} />
             <select value={String(g.fontWeight || '700')} onChange={(e) => setGlobal({ fontWeight: e.target.value })} className={selectCls} title="Weight">
@@ -684,11 +820,16 @@ export function LiveDesignWorkspace({
               {SHADOW_PRESETS.map(s => <option key={s.label} value={s.value}>Shadow: {s.label}</option>)}
             </select>
             <MiniSlider label="Letters" min={-0.05} max={0.4} step={0.01} value={parseNum(g.letterSpacing, 0)} format={(v) => `${v.toFixed(2)}em`} onChange={(v, phase) => setGlobal({ letterSpacing: `${v}em` }, phase)} />
+            <Divider />
+            <span title="A dark edge and halo around the letters, so they stand out on busy backgrounds" data-contrast-control>
+              <MiniSlider label="Contrast" min={0} max={100} step={1} value={boxLook.contrast} format={(v) => (v ? String(Math.round(v)) : 'Off')} onChange={(v, phase) => setBoxLook({ [CONTRAST_KEY]: v }, phase)} />
+            </span>
           </div>
 
           {/* Row 2: line spacing + where the box sits (or drag it on the canvas) */}
-          <div className="flex flex-wrap items-center gap-2">
-            <GroupLabel fixed>Layout</GroupLabel>
+          <div className={rowClass(rows.isOpen('layout'))} data-design-row="layout">
+            <RowHead label="Layout" open={rows.isOpen('layout')} onToggle={() => rows.toggle('layout')}
+              summary={`${placementLabel(placement.across, 'Left', 'Right')} · ${placementLabel(placement.down, 'Top', 'Bottom')} · ${toPct(box.width)}% × ${toPct(box.height)}%${boxLook.boxOpacity ? ` · box ${Math.round(boxLook.boxOpacity)}%` : ''}`} />
             <MiniSlider label="Lines" min={0.8} max={2} step={0.05} value={parseNum(g.lineHeight, 1.15)} format={(v) => v.toFixed(2)} onChange={(v, phase) => setGlobal({ lineHeight: String(v) }, phase)} />
             <Divider />
             <MiniSlider label="Across" min={0} max={100} step={1} value={placement.across} format={(v) => placementLabel(v, 'Left', 'Right')} onChange={(v, phase) => setLayout(placeAcross(box, v), phase)} />
@@ -704,11 +845,18 @@ export function LiveDesignWorkspace({
               value={selectedBox ? selectedBox.verticalAlign : (draft?.verticalAlign ?? design?.verticalAlign ?? look.verticalAlign)}
               onChange={(v) => editTarget(target, 'commit', d => ({ ...d, verticalAlign: v }), b => ({ ...b, verticalAlign: v }))}
             />
+            <Divider />
+            <span className="flex items-center gap-1.5" title="A colour filled behind this text box" data-box-fill-control>
+              <span className="text-[11px] text-neutral-400">Box</span>
+              <ColorField value={boxLook.boxColor} title="Box colour" onChange={(v, phase) => setBoxLook({ [BOX_COLOR_KEY]: v, ...(boxLook.boxOpacity === 0 ? { [BOX_OPACITY_KEY]: 60 } : {}) }, phase)} />
+              <MiniSlider label="" min={0} max={100} step={1} value={boxLook.boxOpacity} format={(v) => (v ? `${Math.round(v)}%` : 'Off')} onChange={(v, phase) => setBoxLook({ [BOX_OPACITY_KEY]: v }, phase)} />
+            </span>
           </div>
 
           {/* Row 3: motion */}
-          <div className="flex flex-wrap items-center gap-2">
-            <GroupLabel fixed>Motion</GroupLabel>
+          <div className={rowClass(rows.isOpen('motion'))} data-design-row="motion">
+            <RowHead label="Motion" open={rows.isOpen('motion')} onToggle={() => rows.toggle('motion')}
+              summary={`${MOTION_PRESETS.find(m => m.type === anim?.type)?.label || 'Simple fade'}${anim?.layers?.length ? ` + ${anim.layers.length} more` : ''}${anim?.exit?.type && anim.exit.type !== 'none' ? ` · exit ${anim.exit.type}` : ''}`} />
             <select value={anim?.type || ''} onChange={(e) => setMotionType(e.target.value as AnimationType)} className={selectCls} title="Animation">
               {!anim && <option value="">Simple fade</option>}
               {MOTION_PRESETS.map(m => <option key={m.type} value={m.type}>{m.label}</option>)}
@@ -754,6 +902,16 @@ export function LiveDesignWorkspace({
               </>
             )}
           </div>
+
+          </div>
+
+          {/* Row 4: this screen (not the slide): how strongly its background shows */}
+          {onBackgroundOpacity && (
+            <div className={rowClass(rows.isOpen('screen'))} data-design-row="screen">
+              <RowHead label="Screen" open={rows.isOpen('screen')} onToggle={() => rows.toggle('screen')} summary={`Background ${backgroundOpacity ?? 80}%`} />
+              <ScreenBackgroundControl value={backgroundOpacity ?? 80} screenName={outputName} onChange={onBackgroundOpacity} />
+            </div>
+          )}
         </div>
       </fieldset>
 
@@ -788,6 +946,14 @@ export function LiveDesignWorkspace({
         >
           <BookmarkPlus size={11} /> Save as template
         </button>
+        {savingTemplate && (
+          <SaveTemplateDialog
+            initialName={`${songTitle || 'Song'} – ${canvasSlide?.group || `Slide ${canvasIndex + 1}`}`}
+            initialKind={isDeclarationSlide ? 'declaration' : 'lyrics'}
+            onSave={(name, kind) => void saveTemplateAs(name, kind)}
+            onCancel={() => setSavingTemplate(false)}
+          />
+        )}
         {!notice && <span className="text-neutral-500 truncate hidden 2xl:inline">Edits change only this slide on {outputName}; the template is not changed.</span>}
         {/* Passing messages give way when space is short; the status and buttons after them never do */}
         <div className="ml-auto flex items-center gap-2 min-w-0">
@@ -800,7 +966,7 @@ export function LiveDesignWorkspace({
           {waitingCount > 0 && (
             <span className="flex items-center gap-1 text-amber-300 text-[11px] whitespace-nowrap" title="New text boxes stay off the screens until this slide goes live">
               <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
-              {waitingCount} new text box{waitingCount === 1 ? '' : 'es'} waiting
+              {waitingCount} new item{waitingCount === 1 ? '' : 's'} waiting
             </span>
           )}
           {slideIsOnAir ? (
@@ -849,6 +1015,18 @@ export function LiveDesignWorkspace({
                   <ScrollMarker pos={lyricsScrollPos.end} color="#10b981" label="STOP" />
                 </>
               )}
+              {showGuides && canDesign && mediaItems.filter(m => m.id !== selectedMedia?.id).map(m => (
+                <React.Fragment key={m.id}><DesignBox
+                  rect={m.layout}
+                  scale={scale}
+                  movable
+                  label={`${m.type === 'video' ? 'Video' : 'Picture'} · drag to move · drag the corners to resize`}
+                  tag={m.waiting ? { text: 'Waiting for Go live', tone: 'amber' } : undefined}
+                  onSelect={() => { setSelectedWord(null); setMediaSel(m.id); }}
+                  onChange={(r) => changeMedia(m.id, { layout: r }, 'draft')}
+                  onChangeEnd={(r) => changeMedia(m.id, { layout: r }, 'commit')}
+                /></React.Fragment>
+              ))}
               {showGuides && canDesign && !lyricsHidden && editing !== 'lyrics' && (
                 <DesignBox
                   rect={lyricsLook.layout}
@@ -881,6 +1059,19 @@ export function LiveDesignWorkspace({
                   )}
                 </React.Fragment>
               ))}
+              {showGuides && canDesign && selectedMedia && editing === null && (
+                <DesignBox
+                  rect={selectedMedia.layout}
+                  scale={scale}
+                  movable
+                  selected
+                  label={`${selectedMedia.type === 'video' ? 'Video' : 'Picture'} · drag to move · drag the corners to resize`}
+                  tag={selectedMedia.waiting ? { text: 'Waiting for Go live', tone: 'amber' } : undefined}
+                  onSelect={() => setMediaSel(selectedMedia.id)}
+                  onChange={(r) => changeMedia(selectedMedia.id, { layout: r }, 'draft')}
+                  onChangeEnd={(r) => changeMedia(selectedMedia.id, { layout: r }, 'commit')}
+                />
+              )}
               {editing === 'lyrics' && slideText !== null && (
                 <InlineTextEditor
                   rect={lyricsLook.layout}
@@ -976,36 +1167,17 @@ export function LiveDesignWorkspace({
             return (
               <React.Fragment key={s.id}>
                 {showDropMarker && <DropMarker />}
-                <div
-                  role="button"
-                  tabIndex={0}
-                  data-slide-id={s.id}
-                  onPointerDown={(e) => onCardPointerDown(i, e)}
-                  onPointerEnter={() => onCardPointerEnter(i)}
-                  onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setMenuView('main'); setSlideMenu({ x: e.clientX, y: e.clientY, index: i }); }}
-                  onClick={(e) => {
-                    if (suppressClickRef.current || e.shiftKey || e.ctrlKey || e.metaKey) return;
-                    onPickSlide(s);
-                    anchorRef.current = i;
-                  }}
-                  onDoubleClick={(e) => { if (!s.disabled && !e.shiftKey && !e.ctrlKey && !e.metaKey) onGoLive(s); }}
-                  onKeyDown={(e) => { if (e.key === 'Enter') onPickSlide(s); }}
-                  className={`relative w-40 shrink-0 rounded-lg border text-left px-2 pb-4 pt-6 cursor-pointer transition-colors outline-none ${
-                    isCanvas ? 'border-blue-400 bg-blue-500/10' : isLive ? 'border-pink-500 bg-pink-500/10' : 'border-white/10 bg-white/[0.03] hover:border-white/30'
-                  } ${isChosen ? 'ring-2 ring-pink-500' : isCanvas ? 'ring-1 ring-blue-400/40' : ''} ${isMoving ? 'opacity-30' : s.disabled ? 'opacity-40' : ''}`}
-                  title={isCanvas ? 'Being designed · drag to move · right-click for more' : 'Click to design · double-click to go live · drag to move · right-click for more'}
-                >
-                  <span className="absolute top-1 left-1.5 right-10 flex items-center gap-1 text-[10px] font-bold text-neutral-400 min-w-0">
-                    {isChosen && <span className="w-3.5 h-3.5 shrink-0 rounded-full bg-pink-500 text-white flex items-center justify-center"><Check size={9} strokeWidth={3} /></span>}
-                    {i + 1}
-                    {s.group && (
-                      <span className={`px-1 rounded text-[9px] uppercase tracking-wide truncate ${groupColors(s.group).bg} ${groupColors(s.group).text}`}>{s.group}</span>
-                    )}
-                  </span>
-                  {isLive && <span className="absolute top-1 right-2 text-[9px] font-bold tracking-wider text-pink-400">LIVE</span>}
-                  <span className="block text-[10px] leading-snug text-neutral-200 line-clamp-2 whitespace-pre-line">{s.text}</span>
-                  {hasDesign && <span className="absolute bottom-1 right-2 text-[9px] font-bold text-pink-400" title={`Has its own design on ${outputName}`}>✦ Own design</span>}
-                </div>
+                <StripCard
+                  slide={s}
+                  index={i}
+                  isLive={isLive}
+                  isCanvas={isCanvas}
+                  isChosen={isChosen}
+                  hasDesign={hasDesign}
+                  isMoving={isMoving}
+                  outputName={outputName}
+                  handlers={stripHandlers}
+                />
               </React.Fragment>
             );
           })}
@@ -1041,6 +1213,14 @@ export function LiveDesignWorkspace({
                 <div className="h-px bg-white/5 my-1" />
                 <MenuButton onClick={act(() => onPickSlide(menuSlide))}><Eye size={13} /> Design this slide</MenuButton>
                 <MenuButton disabled={!!menuSlide.disabled} onClick={act(() => onGoLive(menuSlide))}><Play size={13} /> Go live</MenuButton>
+                {onRemoveMedia && targets.some(id => {
+                  const s = slides.find(x => x.id === id);
+                  return !!s && (!!s.background || Object.values(s.designs || {}).some(d => (d.media?.length ?? 0) > 0));
+                }) && (
+                  <MenuButton onClick={act(() => { onRemoveMedia(targets); setMediaSel(null); setDraft(null); })}>
+                    <ImageIcon size={13} /> Remove media{targets.length > 1 ? ` (${targets.length} slides)` : ''}
+                  </MenuButton>
+                )}
                 <div className="h-px bg-white/5 my-1" />
                 <MenuButton danger disabled={!onDeleteSlide} onClick={act(() => deleteSlide(menuSlide.id))}><Trash2 size={13} /> Delete slide</MenuButton>
               </>
@@ -1075,8 +1255,52 @@ export function LiveDesignWorkspace({
 }
 
 /** Shows where a dragged slide will land */
+type StripHandlers = {
+  pointerDown: (i: number, e: React.PointerEvent) => void;
+  pointerEnter: (i: number) => void;
+  contextMenu: (i: number, e: React.MouseEvent) => void;
+  click: (s: SlideDefinition, i: number, e: React.MouseEvent) => void;
+  doubleClick: (s: SlideDefinition, e: React.MouseEvent) => void;
+  pick: (s: SlideDefinition) => void;
+};
+
+/** One slide in the strip. Redraws only when its own slide or state changes (the strip can hold many slides) */
+const StripCard = React.memo(function StripCard({ slide: s, index: i, isLive, isCanvas, isChosen, hasDesign, isMoving, outputName, handlers }: {
+  slide: SlideDefinition; index: number; isLive: boolean; isCanvas: boolean; isChosen: boolean; hasDesign: boolean; isMoving: boolean; outputName: string;
+  handlers: React.MutableRefObject<StripHandlers>;
+}) {
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      data-slide-id={s.id}
+      onPointerDown={(e) => handlers.current.pointerDown(i, e)}
+      onPointerEnter={() => handlers.current.pointerEnter(i)}
+      onContextMenu={(e) => handlers.current.contextMenu(i, e)}
+      onClick={(e) => handlers.current.click(s, i, e)}
+      onDoubleClick={(e) => handlers.current.doubleClick(s, e)}
+      onKeyDown={(e) => { if (e.key === 'Enter') handlers.current.pick(s); }}
+      className={`relative w-40 shrink-0 rounded-lg border text-left px-2 pb-4 pt-6 cursor-pointer transition-colors outline-none ${
+        isCanvas ? 'border-blue-400 bg-blue-500/10' : isLive ? 'border-pink-500 bg-pink-500/10' : 'border-white/10 bg-white/[0.03] hover:border-white/30'
+      } ${isChosen ? 'ring-2 ring-pink-500' : isCanvas ? 'ring-1 ring-blue-400/40' : ''} ${isMoving ? 'opacity-30' : s.disabled ? 'opacity-40' : ''}`}
+      title={isCanvas ? 'Being designed · drag to move · right-click for more' : 'Click to design · double-click to go live · drag to move · right-click for more'}
+    >
+      <span className="absolute top-1 left-1.5 right-10 flex items-center gap-1 text-[10px] font-bold text-neutral-400 min-w-0">
+        {isChosen && <span className="w-3.5 h-3.5 shrink-0 rounded-full bg-pink-500 text-white flex items-center justify-center"><Check size={9} strokeWidth={3} /></span>}
+        {i + 1}
+        {s.group && (
+          <span className={`px-1 rounded text-[9px] uppercase tracking-wide truncate ${groupColors(s.group).bg} ${groupColors(s.group).text}`}>{s.group}</span>
+        )}
+      </span>
+      {isLive && <span className="absolute top-1 right-2 text-[9px] font-bold tracking-wider text-pink-400">LIVE</span>}
+      <span className="block text-[10px] leading-snug text-neutral-200 line-clamp-2 whitespace-pre-line">{s.text}</span>
+      {hasDesign && <span className="absolute bottom-1 right-2 text-[9px] font-bold text-pink-400" title={`Has its own design on ${outputName}`}>✦ Own design</span>}
+    </div>
+  );
+});
+
 function DropMarker() {
-  return <div className="w-1 shrink-0 self-stretch rounded-full bg-pink-500 shadow-[0_0_10px_rgba(236,72,153,0.8)]" />;
+  return <div className="w-1 shrink-0 self-stretch rounded-full bg-pink-500 shadow-[0_0_10px_color-mix(in_srgb,var(--color-pink-500)_80%,transparent)]" />;
 }
 
 function MenuButton({ onClick, disabled = false, danger = false, children }: { onClick: () => void; disabled?: boolean; danger?: boolean; children: React.ReactNode }) {

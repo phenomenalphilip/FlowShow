@@ -1,15 +1,18 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { AlignCenter, AlignLeft, AlignRight, Check, Copy, Eye, EyeOff, Pencil, Play, RotateCcw } from 'lucide-react';
+import { askText } from '../lib/appDialogs';
+import { AlignCenter, AlignLeft, AlignRight, Check, Copy, Eye, EyeOff, Image as ImageIcon, Monitor as MonitorIcon, Pencil, Play, RotateCcw } from 'lucide-react';
+import { DesignMediaControls, chooseDesignMediaFile, newDesignMedia, type DesignMedia } from '../lib/designMedia';
 import type { OutputSettings, SlideDefinition } from '../App';
 import {
   PresentationTemplate, AnimationConfig, AnimationType, FALLBACK_ANIMATION, SCRIPTURE_SAMPLES, DECLARATION_SAMPLES, saveTemplate, deleteTemplate,
 } from '../lib/templates';
 import { FONT_OPTIONS, MOTION_PRESETS, LAYOUT_PRESETS, SHADOW_PRESETS, MOTION_DEFAULTS, GENERIC_MOTION_DEFAULTS } from './TemplateEditor';
 import { FixedStage } from './FixedStage';
+import { BOX_COLOR_KEY, BOX_OPACITY_KEY, CONTRAST_KEY, readabilityOf } from '../lib/readability';
 import { DesignBox, Rect, getPlacement, placeAcross, placeDown, resizeBox } from './DesignCanvas';
 import {
   Phase, WEIGHTS, selectCls, segBtn, smallBtn, GroupLabel, Divider, SizeStepper, NumField, ColorField, MiniSlider,
-  DesignFor, DesignForSwitch, DesignStatus, StatusBadges, Notice, MotionOptions, MotionLayers, ExitSelect, TextPositionSwitch, FontSelect,
+  TemplateChip, DesignFor, DesignForSwitch, TemplateOptions, useDesignRows, rowClass, RowHead, ScreenBackgroundControl, DesignStatus, StatusBadges, Notice, MotionOptions, MotionLayers, ExitSelect, TextPositionSwitch, FontSelect,
 } from './DesignControls';
 
 /** Where a screen's scripture template is kept: in its style (shared by the screens on that style), or on the screen */
@@ -30,6 +33,9 @@ interface ScriptureDesignWorkspaceProps {
   onUseTemplate: (templateId: string) => void;
   /** This screen's style turns slide text off */
   textHidden: boolean;
+  /** This screen's background opacity (0–100) and how to change it (live) */
+  backgroundOpacity?: number;
+  onBackgroundOpacity?: (v: number, phase: Phase) => void;
   styleName?: string;
   status: DesignStatus;
   /** A real verse to design with: the one on this screen, or the one in preview */
@@ -79,12 +85,15 @@ const sampleSlide = (id: string, declaration: boolean): SlideDefinition => {
 /** Design mode, for scripture: how Bible verses and their references look on one screen. Edits change the screen's scripture template. */
 export function ScriptureDesignWorkspace({
   kind = 'scripture', outputs, selectedOutputId, onSelectOutput, onDesignFor, templates, template, scope, onUseTemplate,
-  textHidden, styleName, status, verse, verseOnAir, renderOutput, onGoLive,
+  textHidden, styleName, status, verse, verseOnAir, renderOutput, onGoLive, backgroundOpacity, onBackgroundOpacity,
 }: ScriptureDesignWorkspaceProps) {
   const isDeclaration = kind === 'declaration';
   // Words used on screen: "verse" / "declaration"
   const noun = isDeclaration ? 'declaration' : 'scripture';
-  const [part, setPart] = useState<Part>('verse');
+  const [part, setPartRaw] = useState<Part>('verse');
+  // A picture or video of the template picked on the canvas
+  const [mediaSel, setMediaSel] = useState<string | null>(null);
+  const setPart = (p: Part) => { setMediaSel(null); setPartRaw(p); };
   // An unfinished change (mid-drag, colour being picked): canvas only, never on the screens
   const [draft, setDraft] = useState<PresentationTemplate | null>(null);
   const [showGuides, setShowGuides] = useState(true);
@@ -222,6 +231,36 @@ export function ScriptureDesignWorkspace({
     change(t => ({ ...t, animation: { ...(t.animation || FALLBACK_ANIMATION), ...patch } as AnimationConfig }), phase);
   const setMotionType = (type: AnimationType) => setAnim({ type, ...(MOTION_DEFAULTS[type] || GENERIC_MOTION_DEFAULTS) });
 
+  // Pictures and videos belong to the template (everything shown in it has them, under the words)
+  const mediaItems = shown.styles.media || [];
+  const selectedMedia = mediaSel ? mediaItems.find(m => m.id === mediaSel) : undefined;
+  const setMedia = (fn: (list: DesignMedia[]) => DesignMedia[], phase: Phase = 'commit') => change(t => {
+    const media = fn(t.styles.media || []);
+    return { ...t, styles: { ...t.styles, media: media.length ? media : undefined } };
+  }, phase);
+  const changeMedia = (id: string, patch: Partial<DesignMedia>, phase: Phase = 'commit') =>
+    setMedia(list => list.map(m => m.id === id ? { ...m, ...patch } : m), phase);
+  const addMedia = async () => {
+    const file = await chooseDesignMediaFile();
+    if (!file) return;
+    const item = newDesignMedia(file);
+    setMedia(list => [...list, item]);
+    setMediaSel(item.id);
+  };
+  const replaceMedia = async (id: string) => {
+    const file = await chooseDesignMediaFile();
+    if (file) changeMedia(id, { type: file.type, name: file.name, path: file.path, storedId: file.storedId });
+  };
+  const removeMedia = (id: string) => { setMedia(list => list.filter(m => m.id !== id)); setMediaSel(null); };
+  const moveMedia = (id: string, dir: 1 | -1) => setMedia(list => {
+    const next = [...list];
+    const at = next.findIndex(m => m.id === id);
+    const to = at + dir;
+    if (at < 0 || to < 0 || to >= next.length) return list;
+    [next[at], next[to]] = [next[to], next[at]];
+    return next;
+  });
+
   // ─── Choosing templates ───
   const chooseTemplate = (id: string) => {
     if (!id || id === template.id) return;
@@ -236,8 +275,8 @@ export function ScriptureDesignWorkspace({
     onUseTemplate(copy.id);
     setNotice(`Copied to "${copy.name}"`);
   };
-  const renameTemplate = () => {
-    const name = window.prompt(`Name for this ${noun} template`, template.name)?.trim();
+  const renameTemplate = async () => {
+    const name = await askText(`Name for this ${noun} template`, template.name, { okLabel: 'Rename' });
     if (!name || name === template.name) return;
     const next = { ...template, name };
     record({ templateId: template.id, before: template, after: next, usedBefore: template.id, usedAfter: template.id });
@@ -249,6 +288,7 @@ export function ScriptureDesignWorkspace({
   const box = part === 'verse' ? verseBox : referenceBox;
   const placement = getPlacement(box);
   const anim = shown.animation;
+  const rows = useDesignRows();
   const colorValue = /^#[0-9a-f]{6}$/i.test(String(g.color || '')) ? String(g.color) : '#ffffff';
   const shadowValue = String(g.textShadow || 'none');
   // The size the screens use when the template doesn't set one
@@ -271,41 +311,35 @@ export function ScriptureDesignWorkspace({
               key={o.id}
               type="button"
               onClick={() => onSelectOutput(o.id)}
-              className={`px-3 py-1 rounded-md text-xs font-semibold transition-colors ${o.id === selectedOutputId ? 'bg-pink-600 text-white' : 'text-neutral-400 hover:text-white hover:bg-white/5'}`}
+              className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-semibold transition-colors ${o.id === selectedOutputId ? 'bg-[var(--fs-second)] text-[var(--fs-second-text)] shadow-sm' : 'text-neutral-400 hover:text-white hover:bg-white/5'}`}
+              title={`Design what ${o.name} shows`}
+              data-design-output={o.id}
             >
+              <MonitorIcon size={12} className={o.id === selectedOutputId ? 'opacity-70' : 'text-neutral-500'} />
               {o.name}
             </button>
           ))}
         </div>
         <DesignForSwitch value={kind} onChange={onDesignFor} />
 
-        <div className="flex items-center gap-2 min-w-0 overflow-hidden">
-          <span className="text-[10px] uppercase font-bold tracking-wider text-neutral-500">Template</span>
-          <select
+        <div className="flex items-center gap-1 min-w-0">
+          <TemplateChip
+            name={template.name}
             value={template.id}
-            onChange={(e) => chooseTemplate(e.target.value)}
-            className={`${selectCls} max-w-[210px]`}
-            title={`The ${noun} template on ${outputName}`}
+            onChange={chooseTemplate}
+            title={`The ${noun} template on ${outputName} (${scopeText}). Click to choose another.`}
           >
             {!templates.some(t => t.id === template.id) && <option value={template.id}>{template.name}</option>}
-            <optgroup label={isDeclaration ? 'Your declaration templates' : 'Scripture'}>
-              {scriptureTemplates.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-            </optgroup>
-            {otherTemplates.length > 0 && (
-              <optgroup label="Other templates">
-                {otherTemplates.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-              </optgroup>
-            )}
-          </select>
-          <button type="button" onClick={copyTemplate} className={`${smallBtn} bg-white/5 text-neutral-200 hover:bg-white/10 flex items-center gap-1 shrink-0`} title="Make a copy of this template to change">
-            <Copy size={11} /> Copy
+            <TemplateOptions templates={templates} first={isDeclaration ? 'declaration' : 'scripture'} />
+          </TemplateChip>
+          <button type="button" onClick={copyTemplate} className="p-1.5 rounded text-neutral-400 hover:text-white hover:bg-white/10 shrink-0" title="Make a copy of this template to change" data-template-copy>
+            <Copy size={13} />
           </button>
           {ownTemplate && (
-            <button type="button" onClick={renameTemplate} className={`${smallBtn} bg-white/5 text-neutral-200 hover:bg-white/10 flex items-center gap-1 shrink-0`}>
-              <Pencil size={11} /> Rename
+            <button type="button" onClick={renameTemplate} className="p-1.5 rounded text-neutral-400 hover:text-white hover:bg-white/10 shrink-0" title="Rename this template" data-template-rename>
+              <Pencil size={13} />
             </button>
           )}
-          <span className="text-[11px] text-neutral-500 truncate" title={scopeText}>{scopeText}</span>
         </div>
 
         <div className="ml-auto flex items-center gap-2 shrink-0">
@@ -346,12 +380,50 @@ export function ScriptureDesignWorkspace({
               >
                 Reference
               </button>}
+              {mediaItems.map((m, i) => (
+                <button
+                  key={m.id}
+                  type="button"
+                  onClick={() => setMediaSel(m.id)}
+                  className={`${smallBtn} flex items-center gap-1 ${selectedMedia?.id === m.id ? 'bg-pink-600 text-white' : 'bg-[#1e1e28] text-neutral-300 hover:text-white'}`}
+                  title={m.name}
+                  data-design-media-chip={m.id}
+                >
+                  <ImageIcon size={11} /> {m.type === 'video' ? 'Video' : 'Picture'} {i + 1}
+                </button>
+              ))}
             </div>
+            <button type="button" onClick={() => void addMedia()} className={`${smallBtn} bg-white/5 text-neutral-200 hover:bg-white/10 flex items-center gap-1`} title={`Put a picture or video in this template (every ${isDeclaration ? 'declaration slide' : 'verse'} using it shows it). Drag it and its corners to place it.`} data-design-add-media>
+              <ImageIcon size={11} /> Add media
+            </button>
             {!ownTemplate && <span className="text-[11px] text-neutral-500">Ready-made: your first change saves your own copy</span>}
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
-            <GroupLabel fixed>Text</GroupLabel>
+          {selectedMedia && (
+            <div className="flex flex-wrap items-center gap-2" data-design-row="media">
+              <GroupLabel fixed>Media</GroupLabel>
+              <DesignMediaControls
+                item={selectedMedia}
+                onChange={(patch, phase) => changeMedia(selectedMedia.id, patch, phase)}
+                onReplace={() => void replaceMedia(selectedMedia.id)}
+                onRemove={() => removeMedia(selectedMedia.id)}
+              />
+              {mediaItems.length > 1 && (
+                <>
+                  <Divider />
+                  <button type="button" onClick={() => moveMedia(selectedMedia.id, 1)} className={`${smallBtn} bg-white/5 text-neutral-200 hover:bg-white/10`} title="In front of the other media (words always stay on top)">Forward</button>
+                  <button type="button" onClick={() => moveMedia(selectedMedia.id, -1)} className={`${smallBtn} bg-white/5 text-neutral-200 hover:bg-white/10`} title="Behind the other media">Backward</button>
+                </>
+              )}
+              <button type="button" onClick={() => setMediaSel(null)} className={`${smallBtn} text-neutral-400 hover:text-white`} title="Back to the text settings">Done</button>
+            </div>
+          )}
+
+          {/* The text rows: hidden while a picture or video is picked */}
+          <div className={selectedMedia ? 'hidden' : 'contents'}>
+          <div className={rowClass(rows.isOpen('text'))} data-design-row="text">
+            <RowHead label="Text" open={rows.isOpen('text')} onToggle={() => rows.toggle('text')}
+              summary={`${String(g.fontFamily || 'Inter').split(',')[0].replace(/['"]/g, '')} · ${parseNum(g.fontSize, defaultSize)}px${readabilityOf(g).contrast ? ` · contrast ${Math.round(readabilityOf(g).contrast)}` : ''}`} />
             <FontSelect value={String(g.fontFamily || '')} onChange={(v) => setTextStyle({ fontFamily: v })} />
             <SizeStepper value={parseNum(g.fontSize, defaultSize)} onChange={(v) => setTextStyle({ fontSize: `${v}px` })} />
             <select value={String(g.fontWeight || '700')} onChange={(e) => setTextStyle({ fontWeight: e.target.value })} className={selectCls} title="Weight">
@@ -378,10 +450,15 @@ export function ScriptureDesignWorkspace({
               {SHADOW_PRESETS.map(s => <option key={s.label} value={s.value}>Shadow: {s.label}</option>)}
             </select>
             <MiniSlider label="Letters" min={-0.05} max={0.4} step={0.01} value={parseNum(g.letterSpacing, 0)} format={(v) => `${v.toFixed(2)}em`} onChange={(v, phase) => setTextStyle({ letterSpacing: `${v}em` }, phase)} />
+            <Divider />
+            <span title="A dark edge and halo around the letters, so they stand out on busy backgrounds" data-contrast-control>
+              <MiniSlider label="Contrast" min={0} max={100} step={1} value={readabilityOf(g).contrast} format={(v) => (v ? String(Math.round(v)) : 'Off')} onChange={(v, phase) => setTextStyle({ [CONTRAST_KEY]: v } as React.CSSProperties, phase)} />
+            </span>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
-            <GroupLabel fixed>Layout</GroupLabel>
+          <div className={rowClass(rows.isOpen('layout'))} data-design-row="layout">
+            <RowHead label="Layout" open={rows.isOpen('layout')} onToggle={() => rows.toggle('layout')}
+              summary={`${Math.round(box.width * 100)}% × ${Math.round(box.height * 100)}%${readabilityOf(g).boxOpacity ? ` · box ${Math.round(readabilityOf(g).boxOpacity)}%` : ''}`} />
             <MiniSlider label="Lines" min={0.8} max={2} step={0.05} value={parseNum(g.lineHeight, 1.3)} format={(v) => v.toFixed(2)} onChange={(v, phase) => setTextStyle({ lineHeight: String(v) }, phase)} />
             <Divider />
             <MiniSlider label="Across" min={0} max={100} step={1} value={placement.across} format={(v) => placementLabel(v, 'Left', 'Right')} onChange={(v, phase) => setBox(placeAcross(box, v), phase)} />
@@ -399,10 +476,17 @@ export function ScriptureDesignWorkspace({
                 ? { ...t, styles: { ...t.styles, verticalAlign: v } }
                 : withReferenceBox(t, { sourceVerticalAlign: v }))}
             />
+            <Divider />
+            <span className="flex items-center gap-1.5" title="A colour filled behind this box" data-box-fill-control>
+              <span className="text-[11px] text-neutral-400">Box</span>
+              <ColorField value={readabilityOf(g).boxColor} title="Box colour" onChange={(v, phase) => setTextStyle({ [BOX_COLOR_KEY]: v, ...(readabilityOf(g).boxOpacity === 0 ? { [BOX_OPACITY_KEY]: 60 } : {}) } as React.CSSProperties, phase)} />
+              <MiniSlider label="" min={0} max={100} step={1} value={readabilityOf(g).boxOpacity} format={(v) => (v ? `${Math.round(v)}%` : 'Off')} onChange={(v, phase) => setTextStyle({ [BOX_OPACITY_KEY]: v } as React.CSSProperties, phase)} />
+            </span>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
-            <GroupLabel fixed>Motion</GroupLabel>
+          <div className={rowClass(rows.isOpen('motion'))} data-design-row="motion">
+            <RowHead label="Motion" open={rows.isOpen('motion')} onToggle={() => rows.toggle('motion')}
+              summary={`${MOTION_PRESETS.find(m => m.type === anim?.type)?.label || 'Simple fade'}${anim?.exit?.type && anim.exit.type !== 'none' ? ` · exit ${anim.exit.type}` : ''}`} />
             <select value={anim?.type || ''} onChange={(e) => setMotionType(e.target.value as AnimationType)} className={selectCls} title="How the verse and its reference come in">
               {MOTION_PRESETS.map(m => <option key={m.type} value={m.type}>{m.label}</option>)}
             </select>
@@ -428,6 +512,15 @@ export function ScriptureDesignWorkspace({
             )}
             {!isDeclaration && <span className="text-[11px] text-neutral-500">The verse and its reference move together</span>}
           </div>
+
+          </div>
+
+          {onBackgroundOpacity && (
+            <div className={rowClass(rows.isOpen('screen'))} data-design-row="screen">
+              <RowHead label="Screen" open={rows.isOpen('screen')} onToggle={() => rows.toggle('screen')} summary={`Background ${backgroundOpacity ?? 80}%`} />
+              <ScreenBackgroundControl value={backgroundOpacity ?? 80} screenName={outputName} onChange={onBackgroundOpacity} />
+            </div>
+          )}
         </div>
       </fieldset>
 
@@ -472,6 +565,19 @@ export function ScriptureDesignWorkspace({
             <>
               <div className="absolute inset-0 bg-black" />
               <React.Fragment key={replayKey}>{renderOutput(canvasSlide, shown)}</React.Fragment>
+              {showGuides && canDesign && mediaItems.filter(m => m.id !== selectedMedia?.id).map(m => (
+                <React.Fragment key={m.id}>
+                  <DesignBox
+                    rect={m.layout}
+                    scale={scale}
+                    movable
+                    label={`${m.type === 'video' ? 'Video' : 'Picture'} · drag to move · drag the corners to resize`}
+                    onSelect={() => setMediaSel(m.id)}
+                    onChange={(r) => changeMedia(m.id, { layout: r }, 'draft')}
+                    onChangeEnd={(r) => changeMedia(m.id, { layout: r }, 'commit')}
+                  />
+                </React.Fragment>
+              ))}
               {showGuides && canDesign && (
                 <>
                   <DesignBox
@@ -498,6 +604,18 @@ export function ScriptureDesignWorkspace({
                     />
                   )}
                 </>
+              )}
+              {showGuides && canDesign && selectedMedia && (
+                <DesignBox
+                  rect={selectedMedia.layout}
+                  scale={scale}
+                  movable
+                  selected
+                  label={`${selectedMedia.type === 'video' ? 'Video' : 'Picture'} · drag to move · drag the corners to resize`}
+                  onSelect={() => setMediaSel(selectedMedia.id)}
+                  onChange={(r) => changeMedia(selectedMedia.id, { layout: r }, 'draft')}
+                  onChangeEnd={(r) => changeMedia(selectedMedia.id, { layout: r }, 'commit')}
+                />
               )}
             </>
           )}

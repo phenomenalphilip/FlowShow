@@ -1,4 +1,5 @@
 import React from 'react';
+import type { DesignMedia } from './designMedia';
 import { get, set } from 'idb-keyval';
 
 export type AnimationType = 
@@ -129,6 +130,8 @@ export interface PresentationTemplate {
     verticalAlign?: TextPosition;
     /** The same for the scripture reference's own box */
     sourceVerticalAlign?: TextPosition;
+    /** Pictures and videos placed on the template (under the words) */
+    media?: DesignMedia[];
   };
   animation: AnimationConfig;
   backgroundPreview?: string;
@@ -284,6 +287,23 @@ export const STARTER_TEMPLATES: PresentationTemplate[] = [
     },
     animation: { type: 'blur-in', duration: 0.5, stagger: 0.04, easing: 'easeOut', ambientLoop: 'none' },
     backgroundPreview: 'radial-gradient(ellipse at center, #1c1917 0%, #0c0a09 100%)'
+  },
+  {
+    id: 'declaration-classic',
+    name: 'Declaration Classic',
+    category: 'declaration',
+    tagline: 'Bold, steady words read together',
+    description: 'Large bold words in the middle of the screen, coming in line by line. Made for declarations, creeds and confessions the church reads together.',
+    badge: 'Declaration',
+    styles: {
+      global: {
+        fontFamily: 'Inter, sans-serif', fontWeight: '800', fontSize: '84px', color: '#ffffff', textTransform: 'none',
+        letterSpacing: '0.01em', lineHeight: 1.25, textAlign: 'center', textShadow: '0 4px 14px rgba(0,0,0,0.85)'
+      },
+      layout: { x: 0.08, y: 0.15, width: 0.84, height: 0.7 }
+    },
+    animation: { type: 'mask-slide', duration: 0.6, stagger: 0.08, easing: 'easeOut', ambientLoop: 'none' },
+    backgroundPreview: 'radial-gradient(ellipse at center, #1e1b4b 0%, #09090b 100%)'
   },
   {
     id: 'scripture-lower-third',
@@ -590,6 +610,19 @@ export const STARTER_TEMPLATES: PresentationTemplate[] = [
 
 /** What scripture looks like on a screen until someone picks another scripture template for it */
 export const DEFAULT_SCRIPTURE_TEMPLATE_ID = 'scripture-classic';
+/** What a screen's declarations use when no Declarations template is chosen (never the lyrics template) */
+export const DEFAULT_DECLARATION_TEMPLATE_ID = 'declaration-classic';
+
+/** What a template is for. Lyrics and Declarations never share templates. (Stage screens use stage layouts.) */
+export type TemplateKind = 'lyrics' | 'declaration' | 'scripture';
+export const TEMPLATE_KINDS: TemplateKind[] = ['lyrics', 'declaration', 'scripture'];
+export const TEMPLATE_KIND_LABEL: Record<TemplateKind, string> = { lyrics: 'Lyrics', declaration: 'Declarations', scripture: 'Scripture' };
+export const templateKind = (t: Pick<PresentationTemplate, 'category'>): TemplateKind =>
+  t.category === 'scripture' ? 'scripture' : t.category === 'declaration' ? 'declaration' : 'lyrics';
+/** The category that marks a template as this kind (a lyrics template keeps its own style category) */
+export const categoryForKind = (kind: TemplateKind, current?: PresentationTemplate['category']): PresentationTemplate['category'] =>
+  kind === 'scripture' ? 'scripture' : kind === 'declaration' ? 'declaration'
+    : current && current !== 'scripture' && current !== 'declaration' ? current : 'custom';
 
 /** Sample verses for previews and for designing scripture when no verse is on the screens */
 export const SCRIPTURE_SAMPLES: { id: string; label: string; text: string; source: string }[] = [

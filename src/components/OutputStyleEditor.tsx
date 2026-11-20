@@ -73,7 +73,7 @@ export function OutputStyleEditor({ initialStyle, type, outputName, onSave, onCa
             </div>
             <div className="flex gap-3">
                <button onClick={onCancel} className="px-5 py-2.5 rounded-lg bg-white/5 hover:bg-white/10 text-sm font-medium transition-all">Cancel</button>
-               <button onClick={() => onSave(style)} className="px-5 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-sm font-bold shadow-lg shadow-blue-500/20 transition-all">Save Changes</button>
+               <button onClick={() => onSave(style)} className="px-5 py-2.5 rounded-lg bg-pink-600 hover:bg-pink-500 text-white text-sm font-bold shadow-lg shadow-pink-500/20 transition-all">Save Changes</button>
             </div>
          </div>
          
@@ -118,7 +118,7 @@ export function OutputStyleEditor({ initialStyle, type, outputName, onSave, onCa
                         } 
                       });
                    }}
-                   className={`border-[3px] transition-colors group bg-white/5 backdrop-blur-sm ${activeElement === 'text' ? 'border-blue-500 shadow-[0_0_20px_rgba(59,130,246,0.5)] z-20' : 'border-white/20 hover:border-blue-500/50 z-10'}`}
+                   className={`border-[3px] transition-colors group bg-white/5 backdrop-blur-sm ${activeElement === 'text' ? 'border-pink-500 shadow-[0_0_20px_color-mix(in_srgb,var(--color-pink-500)_50%,transparent)] z-20' : 'border-white/20 hover:border-pink-500/50 z-10'}`}
                    onMouseDown={(e) => { e.stopPropagation(); setActiveElement('text'); }}
                    onClick={(e) => { e.stopPropagation(); setActiveElement('text'); }}
                  >
@@ -213,16 +213,16 @@ export function OutputStyleEditor({ initialStyle, type, outputName, onSave, onCa
               <div className="space-y-3">
                 <label className="text-[10px] font-bold text-neutral-500 uppercase tracking-widest">Style</label>
                 <div className="flex gap-2">
-                  <button onClick={() => toggleStyle('fontWeight', 'bold', 'normal')} className={`flex-1 py-3 hover:bg-white/10 rounded-lg flex justify-center items-center transition-all ${getCurrentStyle()?.fontWeight === 'bold' ? 'bg-blue-600/20 text-blue-400 border border-blue-500/50' : 'bg-white/5 text-neutral-400 border border-transparent'}`}>
+                  <button onClick={() => toggleStyle('fontWeight', 'bold', 'normal')} className={`flex-1 py-3 hover:bg-white/10 rounded-lg flex justify-center items-center transition-all ${getCurrentStyle()?.fontWeight === 'bold' ? 'bg-pink-600/20 text-pink-400 border border-pink-500/50' : 'bg-white/5 text-neutral-400 border border-transparent'}`}>
                      <Bold size={16} />
                   </button>
-                  <button onClick={() => toggleStyle('fontStyle', 'italic', 'normal')} className={`flex-1 py-3 hover:bg-white/10 rounded-lg flex justify-center items-center transition-all ${getCurrentStyle()?.fontStyle === 'italic' ? 'bg-blue-600/20 text-blue-400 border border-blue-500/50' : 'bg-white/5 text-neutral-400 border border-transparent'}`}>
+                  <button onClick={() => toggleStyle('fontStyle', 'italic', 'normal')} className={`flex-1 py-3 hover:bg-white/10 rounded-lg flex justify-center items-center transition-all ${getCurrentStyle()?.fontStyle === 'italic' ? 'bg-pink-600/20 text-pink-400 border border-pink-500/50' : 'bg-white/5 text-neutral-400 border border-transparent'}`}>
                      <Italic size={16} />
                   </button>
-                  <button onClick={() => toggleStyle('textDecoration', 'underline', 'none')} className={`flex-1 py-3 hover:bg-white/10 rounded-lg flex justify-center items-center transition-all ${getCurrentStyle()?.textDecoration === 'underline' ? 'bg-blue-600/20 text-blue-400 border border-blue-500/50' : 'bg-white/5 text-neutral-400 border border-transparent'}`}>
+                  <button onClick={() => toggleStyle('textDecoration', 'underline', 'none')} className={`flex-1 py-3 hover:bg-white/10 rounded-lg flex justify-center items-center transition-all ${getCurrentStyle()?.textDecoration === 'underline' ? 'bg-pink-600/20 text-pink-400 border border-pink-500/50' : 'bg-white/5 text-neutral-400 border border-transparent'}`}>
                      <UnderlineIcon size={16} />
                   </button>
-                  <button onClick={() => toggleStyle('textDecoration', 'line-through', 'none')} className={`flex-1 py-3 hover:bg-white/10 rounded-lg flex justify-center items-center transition-all ${getCurrentStyle()?.textDecoration === 'line-through' ? 'bg-blue-600/20 text-blue-400 border border-blue-500/50' : 'bg-white/5 text-neutral-400 border border-transparent'}`}>
+                  <button onClick={() => toggleStyle('textDecoration', 'line-through', 'none')} className={`flex-1 py-3 hover:bg-white/10 rounded-lg flex justify-center items-center transition-all ${getCurrentStyle()?.textDecoration === 'line-through' ? 'bg-pink-600/20 text-pink-400 border border-pink-500/50' : 'bg-white/5 text-neutral-400 border border-transparent'}`}>
                      <Strikethrough size={16} />
                   </button>
                 </div>
@@ -232,16 +232,16 @@ export function OutputStyleEditor({ initialStyle, type, outputName, onSave, onCa
               <div className="space-y-3">
                 <label className="text-[10px] font-bold text-neutral-500 uppercase tracking-widest">Alignment</label>
                 <div className="flex gap-2">
-                  <button onClick={() => updateStyle({ textAlign: 'left' })} className={`flex-1 py-3 hover:bg-white/10 rounded-lg flex justify-center items-center transition-all ${getCurrentStyle()?.textAlign === 'left' ? 'bg-blue-600/20 text-blue-400 border border-blue-500/50' : 'bg-white/5 text-neutral-400 border border-transparent'}`}>
+                  <button onClick={() => updateStyle({ textAlign: 'left' })} className={`flex-1 py-3 hover:bg-white/10 rounded-lg flex justify-center items-center transition-all ${getCurrentStyle()?.textAlign === 'left' ? 'bg-pink-600/20 text-pink-400 border border-pink-500/50' : 'bg-white/5 text-neutral-400 border border-transparent'}`}>
                      <AlignLeft size={16} />
                   </button>
-                  <button onClick={() => updateStyle({ textAlign: 'center' })} className={`flex-1 py-3 hover:bg-white/10 rounded-lg flex justify-center items-center transition-all ${getCurrentStyle()?.textAlign === 'center' ? 'bg-blue-600/20 text-blue-400 border border-blue-500/50' : 'bg-white/5 text-neutral-400 border border-transparent'}`}>
+                  <button onClick={() => updateStyle({ textAlign: 'center' })} className={`flex-1 py-3 hover:bg-white/10 rounded-lg flex justify-center items-center transition-all ${getCurrentStyle()?.textAlign === 'center' ? 'bg-pink-600/20 text-pink-400 border border-pink-500/50' : 'bg-white/5 text-neutral-400 border border-transparent'}`}>
                      <AlignCenter size={16} />
                   </button>
-                  <button onClick={() => updateStyle({ textAlign: 'right' })} className={`flex-1 py-3 hover:bg-white/10 rounded-lg flex justify-center items-center transition-all ${getCurrentStyle()?.textAlign === 'right' ? 'bg-blue-600/20 text-blue-400 border border-blue-500/50' : 'bg-white/5 text-neutral-400 border border-transparent'}`}>
+                  <button onClick={() => updateStyle({ textAlign: 'right' })} className={`flex-1 py-3 hover:bg-white/10 rounded-lg flex justify-center items-center transition-all ${getCurrentStyle()?.textAlign === 'right' ? 'bg-pink-600/20 text-pink-400 border border-pink-500/50' : 'bg-white/5 text-neutral-400 border border-transparent'}`}>
                      <AlignRight size={16} />
                   </button>
-                  <button onClick={() => updateStyle({ textAlign: 'justify' })} className={`flex-1 py-3 hover:bg-white/10 rounded-lg flex justify-center items-center transition-all ${getCurrentStyle()?.textAlign === 'justify' ? 'bg-blue-600/20 text-blue-400 border border-blue-500/50' : 'bg-white/5 text-neutral-400 border border-transparent'}`}>
+                  <button onClick={() => updateStyle({ textAlign: 'justify' })} className={`flex-1 py-3 hover:bg-white/10 rounded-lg flex justify-center items-center transition-all ${getCurrentStyle()?.textAlign === 'justify' ? 'bg-pink-600/20 text-pink-400 border border-pink-500/50' : 'bg-white/5 text-neutral-400 border border-transparent'}`}>
                      <AlignJustify size={16} />
                   </button>
                 </div>
@@ -254,7 +254,7 @@ export function OutputStyleEditor({ initialStyle, type, outputName, onSave, onCa
                   value={getCurrentStyle()?.letterSpacing || 'normal'}
                   onChange={(e) => updateStyle({ letterSpacing: e.target.value })}
                   placeholder="e.g. 0.05em or 2px"
-                  className="w-full bg-white/5 border border-white/10 rounded-lg p-3 text-sm text-white outline-none focus:border-blue-500 transition-all font-medium"
+                  className="w-full bg-white/5 border border-white/10 rounded-lg p-3 text-sm text-white outline-none focus:border-pink-500 transition-all font-medium"
                 />
               </div>
               
@@ -265,7 +265,7 @@ export function OutputStyleEditor({ initialStyle, type, outputName, onSave, onCa
                      <button 
                        key={color}
                        onClick={() => updateStyle({ color })}
-                       className="w-9 h-9 rounded-full shadow-inner hover:scale-110 transition-transform ring-2 ring-transparent focus:ring-blue-500 hover:ring-white/20"
+                       className="w-9 h-9 rounded-full shadow-inner hover:scale-110 transition-transform ring-2 ring-transparent focus:ring-pink-500 hover:ring-white/20"
                        style={{ backgroundColor: color }}
                      />
                   ))}
@@ -285,7 +285,7 @@ export function OutputStyleEditor({ initialStyle, type, outputName, onSave, onCa
               <div className="space-y-3">
                  <label className="text-[10px] font-bold text-neutral-500 uppercase tracking-widest">Font Family</label>
                  <select 
-                   className="w-full bg-white/5 border border-white/10 rounded-lg p-3 text-sm text-white outline-none focus:border-blue-500 transition-all font-medium"
+                   className="w-full bg-white/5 border border-white/10 rounded-lg p-3 text-sm text-white outline-none focus:border-pink-500 transition-all font-medium"
                    value={getCurrentStyle()?.fontFamily || ''}
                    onChange={(e) => updateStyle({ fontFamily: e.target.value })}
                  >
@@ -307,7 +307,7 @@ export function OutputStyleEditor({ initialStyle, type, outputName, onSave, onCa
                      value={parseInt(
                         (getCurrentStyle()?.fontSize as string) || (type === 'scripture' ? '90' : '110')
                      )}
-                     className="w-full bg-white/5 border border-white/10 rounded-lg p-3 text-sm text-white outline-none focus:border-blue-500 transition-all font-medium"
+                     className="w-full bg-white/5 border border-white/10 rounded-lg p-3 text-sm text-white outline-none focus:border-pink-500 transition-all font-medium"
                      onChange={(e) => updateStyle({ fontSize: `${e.target.value}px` })}
                    />
                    <span className="text-sm font-bold text-neutral-500">px</span>

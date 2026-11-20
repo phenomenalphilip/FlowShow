@@ -2,6 +2,7 @@ import React, { useMemo, useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { tokenize, Token } from '../lib/TokenEngine';
 import { AnimationConfig, TextPosition, getScrollPositions, motionFamily, stackedMotions } from '../lib/templates';
+import { boxFill, contrastStyle, readabilityOf } from '../lib/readability';
 
 /** The canvas every screen is drawn on (FixedStage) */
 const CANVAS_W = 1920;
@@ -46,6 +47,8 @@ interface SmartTextLayoutProps {
   scrollPreviewPos?: number;
   /** Outline one word (Design mode word picking) */
   highlightWordIndex?: number;
+  /** The words have been cleared: they leave with the slide's exit animation, or fade out (and come back when false) */
+  cleared?: boolean;
 }
 
 export function SmartTextLayout({
@@ -66,7 +69,8 @@ export function SmartTextLayout({
   selectedLineIndices,
   disableAbsoluteLayout,
   scrollPreviewPos,
-  highlightWordIndex
+  highlightWordIndex,
+  cleared = false,
 }: SmartTextLayoutProps) {
   const renderedLines = useMemo(() => {
      const source = lines ?? (text ? text.split('\n') : []);
@@ -228,6 +232,8 @@ export function SmartTextLayout({
   }
 
   const useAbsolute = !disableAbsoluteLayout;
+  // Readability: contrast around the letters and a fill behind the box (see lib/readability)
+  const look = readabilityOf(styleOverrides?.global);
 
   const layoutStyle: React.CSSProperties = useAbsolute ? {
     position: 'absolute',
@@ -235,8 +241,9 @@ export function SmartTextLayout({
     top: `${(styleOverrides?.layout?.y ?? 0.05) * 100}%`,
     width: `${(styleOverrides?.layout?.width ?? 0.9) * 100}%`,
     height: `${(styleOverrides?.layout?.height ?? 0.9) * 100}%`,
-    alignItems
-  } : { alignItems };
+    alignItems,
+    ...boxFill(look),
+  } : { alignItems, ...boxFill(look) };
 
   const posClass = useAbsolute ? 'absolute' : 'relative w-full h-full';
   const shouldRenderSeparateSource = source && useAbsolute && styleOverrides?.sourceLayout;
@@ -451,7 +458,7 @@ export function SmartTextLayout({
          className={`transition-colors duration-100 word-token ${isClickable ? 'cursor-pointer rounded hover:bg-white/10' : ''} ${isSelected ? 'bg-[#2563eb] text-white' : ''}`}
          data-word-index={(token.wordIndex ?? -1) >= 0 ? token.wordIndex : undefined}
          style={highlightWordIndex !== undefined && token.wordIndex === highlightWordIndex
-           ? { ...token.computedStyles, outline: '4px solid #ec4899', outlineOffset: '6px', borderRadius: '6px' }
+           ? { ...token.computedStyles, outline: '4px solid var(--color-pink-500)', outlineOffset: '6px', borderRadius: '6px' }
            : token.computedStyles}
       >
         {content ?? token.value}
@@ -577,6 +584,16 @@ export function SmartTextLayout({
     transition: { duration: animation?.exit?.duration ?? 0.35, ease: 'easeIn' as const },
   };
 
+  // ─── Clearing: the whole box leaves with the slide's exit animation if its design has one, otherwise it fades ───
+  const { transition: exitTransition, ...exitTarget } = exitMotion || { opacity: 0, transition: { duration: 0.6, ease: 'easeOut' as const } };
+  const neutral: Record<string, number | string> = { opacity: 1, x: 0, y: 0, scale: 1, filter: 'blur(0px)' };
+  const shownTarget = Object.fromEntries(Object.keys(exitTarget).map(k => [k, neutral[k] ?? 1]));
+  const clearMotion = {
+    initial: false as const,
+    animate: cleared ? exitTarget : shownTarget,
+    transition: pageHidden ? { duration: 0 } : cleared ? exitTransition : { duration: 0.35, ease: 'easeOut' as const },
+  };
+
   const box = styleOverrides?.layout ?? DEFAULT_LAYOUT;
   const baseTextStyle: React.CSSProperties = {
     textAlign: align as any,
@@ -586,6 +603,8 @@ export function SmartTextLayout({
     textShadow: '0 8px 16px rgba(0,0,0,0.8), 0 2px 4px rgba(0,0,0,0.5)',
     ...styleOverrides?.global
   };
+  // Contrast: a dark edge and halo around the letters, on top of the style's own shadow
+  Object.assign(baseTextStyle, contrastStyle(look.contrast, baseTextStyle.textShadow));
   const containerExtra = className.replace(/relative/g, '').replace(/w-full/g, '').replace(/h-full/g, '');
 
   // ─── Ticker: one line travelling across its box, for announcements ───
@@ -602,10 +621,11 @@ export function SmartTextLayout({
     const from = leftward ? boxW : -textW;
     const to = leftward ? -textW : boxW;
     return (
-      <div
+      <motion.div
         ref={containerRef}
         className={`${posClass} flex flex-col justify-center overflow-hidden ${containerExtra}`}
         style={{ ...layoutStyle, alignItems: 'flex-start' }}
+        {...clearMotion}
       >
         <motion.div
           key={`${text}|${leftward ? 'l' : 'r'}|${speed}|${tickerWidth ?? 'measuring'}`}
@@ -631,7 +651,7 @@ export function SmartTextLayout({
             {source && !shouldRenderSeparateSource && <span style={{ paddingLeft: '0.8em', opacity: 0.75 }}>· {source}</span>}
           </motion.span>
         </motion.div>
-      </div>
+      </motion.div>
     );
   }
 
@@ -736,10 +756,12 @@ export function SmartTextLayout({
     : { x: (1 - box.x) * CANVAS_W + 60, y: 0 };
 
   const mainContent = (
-    <div
+    <motion.div
       ref={containerRef}
       className={`${posClass} flex flex-col ${justifyClass} ${isScroll || isScrollIn ? 'overflow-visible' : 'overflow-hidden'} ${containerExtra}`}
       style={layoutStyle}
+      {...clearMotion}
+      data-cleared={cleared ? 'yes' : undefined}
     >
       {isScrollIn ? (
         <AnimatePresence mode="wait">
@@ -756,7 +778,7 @@ export function SmartTextLayout({
           </motion.div>
         </AnimatePresence>
       ) : scaledText}
-    </div>
+    </motion.div>
   );
 
   if (!shouldRenderSeparateSource) return mainContent;
@@ -775,6 +797,7 @@ export function SmartTextLayout({
           }}
           disableAbsoluteLayout={false}
           className={className}
+          cleared={cleared}
       />
     </>
   );

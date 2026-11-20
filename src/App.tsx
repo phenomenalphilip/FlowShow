@@ -1,15 +1,25 @@
 import { BrowserRouter, Routes, Route, useParams } from 'react-router-dom';
+import { DesignMediaLayer, type DesignMedia } from './lib/designMedia';
+import { OverlayLayer, newOverlay, overlaysFor, type Overlay } from './lib/overlays';
+import { OverlaysPanel } from './components/OverlaysPanel';
+import { OverlayDesignWorkspace } from './components/OverlayDesignWorkspace';
 import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { askConfirm, askText, showMessage, AppDialogHost } from './lib/appDialogs';
+import { DEFAULT_TIMER_PRESETS, LiveTimer, TimerPreset, setSharedTimer, timeLeft, timerBusy } from './lib/timers';
+import { TimersPanel } from './components/TimersPanel';
 import { 
-  Settings, MonitorPlay, Mic, BookOpen, Music, Image as ImageIcon, 
+  Settings, MonitorPlay, Mic, BookOpen, Music, Image as ImageIcon, Video, 
   Plus, Search, List, Grid, X, LayoutTemplate, Layers, Play,
   SquareSquare, MonitorOff, MonitorUp, EyeOff, FileText,
   Activity, Upload, ExternalLink, Edit2, Copy, Trash, GripVertical, Split,
   Pause, Volume2, VolumeX, Save, ChevronDown, ExternalLink as LaunchIcon, Clock, Lock, Unlock, PanelLeft, PanelLeftClose,
   Radio, Tv, Wifi, ListOrdered, Check, Sparkles, ChevronRight, ChevronLeft,
-  Folder, FolderPlus, RotateCcw, Eye, MoreHorizontal, MoreVertical, Calendar, Puzzle, Sliders, Info, Minus, Maximize2, Square, Wand2
+  Folder, FolderPlus, RotateCcw, Eye, MoreHorizontal, MoreVertical, Calendar, Puzzle, Sliders, Info, Minus, Maximize2, Square, Wand2,
+  Palette, Keyboard, Rocket, Timer as TimerIcon
 } from 'lucide-react';
+import { APP_THEMES, AppThemeId, DEFAULT_APP_THEME, applyAppTheme, themeSwatch } from './lib/themes';
 import { ndiService, NdiSource, NdiOutputChannel } from './lib/ndi';
+import { motion, AnimatePresence } from 'motion/react';
 import { SetlistManager } from './components/SetlistManager';
 import { ServiceSetlist, SetlistItem, DEFAULT_SAMPLE_SETLIST, ProjectsState, loadProjects, saveProjects } from './lib/setlist';
 import { ProjectsPanel, DRAG_SONG, DRAG_MEDIA, DRAG_SCRIPTURE } from './components/ProjectsPanel';
@@ -29,12 +39,15 @@ import { loadInstalledFonts } from './lib/fontStore';
 import { ProfileRecord, loadProfiles, saveProfiles, buildProfileFile, readProfileFile, PROFILE_EXTENSION } from './lib/profiles';
 import { ProfilesPanel, ProfilesApi } from './components/ProfilesPanel';
 import { ProfileMenu } from './components/ProfileMenu';
-import { TopMenu, ExportDialog, ExportChoice, ShortcutsDialog, QuickStartDialog, AboutDialog, DocumentationDialog } from './components/AppMenus';
+import { TopMenu, ExportDialog, ExportChoice, ShortcutsDialog, QuickStartDialog, AboutDialog, DocumentationDialog, ShortcutsContent, QuickStartContent, AboutContent } from './components/AppMenus';
 import { ExportTemplatesDialog, ImportTemplatesDialog } from './components/TemplatePackageDialogs';
 import { BACKUP_EXTENSION, buildBackup, restoreBackup, downloadBlob } from './lib/backup';
 import { IMPORT_ACCEPT, ImportedShow, isSongXml, showFromText } from './lib/importers';
 import { ImportChooser, ImportKind } from './components/ImportChooser';
 import { getMonitors, isTauri, openOutputOnMonitor } from './lib/tauriScreen';
+import { setNdiProblems, syncNdiOutputs } from './lib/nativeOutputs';
+import { FILE_SAVED_EVENT, SavedFile, revealFile, pickMediaFile, mediaUrl, isVideoPath, fileNameOf } from './lib/nativeFiles';
+import { NdiBadge, NdiDot, NdiStatusCard } from './components/NdiStatus';
 import { get, set } from 'idb-keyval';
 import { SmartTextLayout } from './components/SmartTextLayout';
 import { FixedStage } from './components/FixedStage';
@@ -53,6 +66,26 @@ import { DEFAULT_LYRICS_STAGE_LAYOUT, DEFAULT_SCRIPTURE_STAGE_LAYOUT, StageLayou
 
 export type SlideType = 'lyrics' | 'scripture' | 'blank' | 'media';
 
+/** A picture or video a slide starts using as the background */
+export interface SlideBackground {
+  url: string;
+  type: 'image' | 'video';
+  name?: string;
+  /** Where it is in an added media folder, so it is found again after a restart */
+  ref?: { folder: string; path: string[] };
+}
+
+/**
+ * Each slide's background media. Only the slide it was dropped on has it: selecting that slide puts it on,
+ * and it then stays on (for the slides after it, earlier slides and other songs) until another background replaces it.
+ */
+export const slideBackgrounds = (slides: SlideDefinition[]): ({ bg: SlideBackground; own: boolean } | null)[] =>
+  slides.map(s => s.background ? { bg: s.background, own: true } : null);
+
+/** Whether a slide has media: background media, or pictures/videos added in Design mode (on any screen) */
+export const slideHasMedia = (s: SlideDefinition | undefined | null) =>
+  !!s && (!!s.background || Object.values(s.designs || {}).some(d => (d.media?.length ?? 0) > 0));
+
 export type SlideDefinition = {
   id: string;
   text: string;
@@ -68,6 +101,8 @@ export type SlideDefinition = {
   group?: string;
   /** A slide of a Declaration show (not a song): screens use their style's Declarations template for it */
   declaration?: boolean;
+  /** Background media from this slide on (until a later slide has its own): dropped from the Media tab */
+  background?: SlideBackground;
   animation?: AnimationConfig;
   styleOverrides?: {
     global?: React.CSSProperties & { '--font-scale'?: number };
@@ -79,6 +114,8 @@ export type SlideDefinition = {
     /** Where the text sits in its box when it doesn't fill it (from the template) */
     verticalAlign?: TextPosition;
     sourceVerticalAlign?: TextPosition;
+    /** Pictures and videos from the template */
+    media?: DesignMedia[];
   };
 };
 
@@ -179,6 +216,8 @@ export interface OutputSettings {
   ndiResolution?: '1920x1080' | '1280x720' | '3840x2160';
   ndiFrameRate?: number;
   ndiTransparent?: boolean;
+  /** How strongly the background picture, video or colour shows (0–100, over black). Lower = darker, easier to read */
+  backgroundOpacity?: number;
   ndiAlphaChannel?: boolean;
 }
 
@@ -187,6 +226,16 @@ export interface GlobalSettings {
   styles: PresentationStyle[];
   /** Stage layouts made in the Stage tab (the ready-made ones aren't stored) */
   stageLayouts?: StageLayout[];
+  /** The app's colour theme (a ready-made palette) */
+  appTheme?: AppThemeId;
+  /** Countdown timers to start from the Timers tab */
+  timerPresets?: TimerPreset[];
+  /** TIME UP keeps flashing on the stage screen until Stop (default on) */
+  timeUpFlicker?: boolean;
+  /** Overlays made in the Overlays tab */
+  overlays?: Overlay[];
+  /** Overlay group names (kept even when empty) */
+  overlayGroups?: string[];
 }
 
 const DEFAULT_SETTINGS: GlobalSettings = {
@@ -238,8 +287,13 @@ export type PresentState = {
   globalBackground: { url: string; type: 'image' | 'video', fileName?: string } | null;
   clearText: boolean;
   clearedOutputs?: Record<string, boolean>; 
-  lockedOutputs?: Record<string, boolean>; 
-  frozenStates?: Record<string, { slide: SlideDefinition | null; bg: any; clearText: boolean }>; 
+  /** true = paused; 'held' = unpaused but still showing its paused picture until the next slide, background or clear is sent */
+  lockedOutputs?: Record<string, boolean | 'held'>; 
+  frozenStates?: Record<string, { slide: SlideDefinition | null; bg: any; clearText: boolean; overlays?: Overlay[] }>;
+  /** Overlays switched on (several at once); only F3 / Clear overlays takes them off */
+  overlays?: string[];
+  /** The countdown in use (Timers tab), shown by stage layouts' Timer items */
+  timer?: LiveTimer | null;
   videoInitState?: {
     time: number;
     muted: boolean;
@@ -300,7 +354,7 @@ const CHANNEL_NAME = 'flowshow_presence_channel';
 const UNDO_MERGE_MS = 500;
 const UNDO_LIMIT = 100;
 
-import { getTemplateById, DEFAULT_SCRIPTURE_TEMPLATE_ID } from './lib/templates';
+import { getTemplateById, DEFAULT_SCRIPTURE_TEMPLATE_ID, DEFAULT_DECLARATION_TEMPLATE_ID } from './lib/templates';
 
 type SongTemplateRefs = { id?: string; templateId?: string; outputTemplates?: { [outputId: string]: string } };
 export type TemplateSource = 'style' | 'slide-output' | 'slide' | 'song-output' | 'song' | 'output-default' | 'screen-scripture' | 'screen-declaration' | 'none';
@@ -324,7 +378,7 @@ export const resolveTemplateSource = (
   const scripture = slide?.type === 'scripture';
   const styleTemplateId = presentationStyle
     ? (scripture ? presentationStyle.scriptureTemplateId
-      : slide?.declaration ? (presentationStyle.declarationTemplateId || presentationStyle.lyricsTemplateId)
+      : slide?.declaration ? presentationStyle.declarationTemplateId
       : presentationStyle.lyricsTemplateId)
     : undefined;
 
@@ -335,7 +389,7 @@ export const resolveTemplateSource = (
     [song?.outputTemplates?.[outputId], 'song-output'],
     [song?.templateId, 'song'],
     scripture ? [screenScriptureTemplateId(outputConfig), 'screen-scripture']
-      : slide?.declaration && outputConfig?.declarationTemplateId ? [outputConfig.declarationTemplateId, 'screen-declaration']
+      : slide?.declaration ? [outputConfig?.declarationTemplateId || DEFAULT_DECLARATION_TEMPLATE_ID, 'screen-declaration']
       : [outputConfig?.defaultTemplateId, 'output-default'],
   ];
   const hit = chain.find(([id]) => !!id);
@@ -372,6 +426,8 @@ export interface SlideDesign {
   words?: { [wordIndex: number]: React.CSSProperties };
   /** Where the lyrics sit in their box when they don't fill it */
   verticalAlign?: TextPosition;
+  /** Pictures and videos on this slide for this output (under the words) */
+  media?: DesignMedia[];
 }
 
 type ResolvedLook = { styleOverrides: SlideDefinition['styleOverrides']; animation?: AnimationConfig };
@@ -444,6 +500,7 @@ const resolveBaseLook = (
         sourceLayout: template.styles.sourceLayout,
         verticalAlign: template.styles.verticalAlign,
         sourceVerticalAlign: template.styles.sourceVerticalAlign,
+        media: template.styles.media,
       },
       animation: template.animation
     };
@@ -472,24 +529,10 @@ const resolveBaseLook = (
     sourceLayout: slide.styleOverrides?.sourceLayout || template?.styles.sourceLayout,
     verticalAlign: slide.styleOverrides?.verticalAlign || template?.styles.verticalAlign,
     sourceVerticalAlign: slide.styleOverrides?.sourceVerticalAlign || template?.styles.sourceVerticalAlign,
+    media: slide.styleOverrides?.media || template?.styles.media,
   };
 
-  // Legacy style overrides if explicitly toggled on
-  if (slide.type === 'lyrics' && outputConfig?.lyricsStyleEnabled) {
-    const legacy = (outputConfig.lyricsStyle as any)?.global || outputConfig.lyricsStyle;
-    mergedStyle.global = { ...mergedStyle.global, ...legacy };
-    if ((outputConfig.lyricsStyle as any)?.layout) {
-      mergedStyle.layout = (outputConfig.lyricsStyle as any).layout;
-    }
-  }
-  if (slide.type === 'scripture' && outputConfig?.bibleStyleEnabled) {
-    const bibleStyle = outputConfig.bibleStyle as any;
-    mergedStyle.global = { ...mergedStyle.global, ...bibleStyle?.global || bibleStyle };
-    if (bibleStyle?.layout) mergedStyle.layout = bibleStyle.layout;
-    mergedStyle.sourceGlobal = { ...mergedStyle.sourceGlobal, ...bibleStyle?.sourceGlobal };
-    if (bibleStyle?.sourceLayout) mergedStyle.sourceLayout = bibleStyle.sourceLayout;
-  }
-
+  // (The old per-output "Override Lyrics / Bible Style" switches are gone: templates, styles and Design mode do this now)
   return { styleOverrides: mergedStyle, animation };
 };
 
@@ -507,7 +550,7 @@ const linkSlideToTemplate = (s: SlideDefinition, templateId: string): SlideDefin
 
 /** A design with nothing in it is dropped, so the slide shows its template */
 const hasDesignContent = (d: SlideDesign | undefined): d is SlideDesign => !!d && (
-  !!d.layout || !!d.hideLyrics || !!d.verticalAlign || (d.customBoxes?.length ?? 0) > 0 ||
+  !!d.layout || !!d.hideLyrics || !!d.verticalAlign || (d.customBoxes?.length ?? 0) > 0 || (d.media?.length ?? 0) > 0 ||
   Object.keys(d.global || {}).length > 0 || Object.keys(d.animation || {}).length > 0 ||
   Object.keys(d.words || {}).length > 0
 );
@@ -518,11 +561,16 @@ const withoutOwnLook = (d: SlideDesign): SlideDesign => ({ ...d, global: undefin
 /** The slide with its waiting text boxes put on the screens (the same slide object when none are waiting) */
 const releaseWaitingBoxes = (slide: SlideDefinition): SlideDefinition => {
   const designs = slide.designs;
-  if (!designs || !Object.values(designs).some(d => d.customBoxes?.some(b => b.waiting))) return slide;
+  const isWaiting = (d: SlideDesign) => !!d.customBoxes?.some(b => b.waiting) || !!d.media?.some(m => m.waiting);
+  if (!designs || !Object.values(designs).some(isWaiting)) return slide;
   const released: { [outputId: string]: SlideDesign } = {};
   for (const [outputId, d] of Object.entries(designs)) {
-    released[outputId] = d.customBoxes?.some(b => b.waiting)
-      ? { ...d, customBoxes: d.customBoxes.map(b => b.waiting ? { ...b, waiting: undefined } : b) }
+    released[outputId] = isWaiting(d)
+      ? {
+        ...d,
+        customBoxes: d.customBoxes?.map(b => b.waiting ? { ...b, waiting: undefined } : b),
+        media: d.media?.map(m => m.waiting ? { ...m, waiting: undefined } : m),
+      }
       : d;
   }
   return { ...slide, designs: released };
@@ -605,6 +653,47 @@ const normaliseSettings = (val: any): GlobalSettings => {
 import { OutputStyleEditor, OutputStyleConfig } from './components/OutputStyleEditor';
 import { StylesManager } from './components/StylesManager';
 
+/** A name shown as text; click it to rename it in place */
+function InlineName({ value, onRename, className = '', inputClassName = '', title = 'Click to rename' }: {
+  value: string; onRename: (name: string) => void; className?: string; inputClassName?: string; title?: string;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [text, setText] = useState(value);
+  const done = (keep: boolean) => {
+    setEditing(false);
+    const name = text.trim();
+    if (keep && name && name !== value) onRename(name);
+  };
+  if (editing) {
+    return (
+      <input
+        autoFocus
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onFocus={(e) => e.currentTarget.select()}
+        onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Enter') done(true); if (e.key === 'Escape') done(false); }}
+        onBlur={() => done(true)}
+        onClick={(e) => e.stopPropagation()}
+        className={`bg-black/40 border border-pink-500 rounded px-1.5 outline-none text-white ${inputClassName}`}
+        data-inline-name-input
+      />
+    );
+  }
+  return (
+    <span
+      role="button"
+      tabIndex={0}
+      title={title}
+      onClick={(e) => { e.stopPropagation(); setText(value); setEditing(true); }}
+      onKeyDown={(e) => { if (e.key === 'Enter') { setText(value); setEditing(true); } }}
+      className={`cursor-text rounded hover:bg-white/10 px-1 -mx-1 ${className}`}
+      data-inline-name
+    >
+      {value}
+    </span>
+  );
+}
+
 function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogglePresenting, onToggleLockOutput, profilesApi, profileId, openTab }: any) {
   const [activeTab, setActiveTab] = useState('outputs');
   useEffect(() => { if (isOpen && openTab) setActiveTab(openTab); }, [isOpen, openTab]);
@@ -623,6 +712,7 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
 
   // While open, only pull in styles (saved instantly) so other unsaved edits survive.
   const wasOpenRef = useRef(false);
+  const openedWith = useRef<GlobalSettings | null>(null);
   const shownProfileRef = useRef(profileId);
   useEffect(() => {
     // Another profile: everything changes
@@ -633,6 +723,7 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
       setLocal(prev => ({ ...prev, styles: settings.styles }));
     } else {
       setLocal(settings);
+      if (isOpen) openedWith.current = settings;
     }
     wasOpenRef.current = isOpen;
   }, [settings, isOpen, profileId]);
@@ -649,12 +740,39 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
 
   if (!isOpen) return null;
 
+  const applyOutputLive = (id: string, fields: Partial<OutputSettings>) => {
+    updateOutput(id, fields);
+    onSave((prev: GlobalSettings) => ({ ...prev, outputs: prev.outputs.map(o => o.id === id ? { ...o, ...fields } : o) }));
+  };
+  const cancelSettings = () => {
+    const was = openedWith.current;
+    if (was) {
+      onSave((prev: GlobalSettings) => ({
+        ...prev,
+        outputs: prev.outputs.map(o => {
+          const before = was.outputs.find(x => x.id === o.id);
+          return before && before.backgroundOpacity !== o.backgroundOpacity ? { ...o, backgroundOpacity: before.backgroundOpacity } : o;
+        }),
+      }));
+    }
+    onClose();
+  };
   const updateOutput = (id: string, updatedFields: Partial<OutputSettings>) => {
     setLocal(prev => ({ ...prev, outputs: prev.outputs.map(o => o.id === id ? { ...o, ...updatedFields } : o) }));
   };
 
   const activeOutput = local.outputs.find(o => o.id === activeOutputId);
 
+  // Desktop app: the picture or video stays where it is on the computer; only its place is kept
+  const chooseBackgroundFile = async () => {
+    try {
+      const path = await pickMediaFile('media');
+      if (!path) return;
+      updateOutput(activeOutputId, { defaultBackground: { type: isVideoPath(path) ? 'video' : 'image', url: mediaUrl(path), fileName: fileNameOf(path) } });
+    } catch (err) {
+      void showMessage(`Couldn't choose the file: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
   const handleMediaUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -670,18 +788,18 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
         if (isTauri()) {
             const monitors = await getMonitors();
             setDetectedScreens(monitors.map((m, i) => ({ label: m.name || `Display ${i + 1}`, width: m.size.width, height: m.size.height })));
-            if (!monitors.length) alert('No screens were found.');
+            if (!monitors.length) void showMessage('No screens were found.');
             return;
         }
         if ('getScreenDetails' in window) {
             const details = await (window as any).getScreenDetails();
             setDetectedScreens(details.screens);
         } else {
-            alert('Screen detection not supported in this browser or iframe.');
+            void showMessage('Screens can only be detected in the FlowShow desktop app.');
         }
     } catch (err: any) {
         console.warn(err);
-        alert('Could not detect screens. ' + err.message);
+        void showMessage('Could not detect screens. ' + err.message);
     }
   };
 
@@ -710,7 +828,7 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
       <div className="bg-[#121214] border border-white/5 p-6 rounded-xl mb-4 shadow-sm">
         <div className="flex items-center justify-between">
           <label className="flex items-center gap-3 cursor-pointer group">
-             <input type="checkbox" checked={enabled} onChange={(e) => onToggle(e.target.checked)} className="w-4 h-4 accent-blue-500 rounded cursor-pointer" />
+             <input type="checkbox" checked={enabled} onChange={(e) => onToggle(e.target.checked)} className="w-4 h-4 accent-pink-500 rounded cursor-pointer" />
              <span className="font-bold uppercase tracking-wider text-sm text-neutral-300 group-hover:text-white transition-colors">{title}</span>
           </label>
           <button 
@@ -734,6 +852,12 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
 
     return (
       <div className="space-y-6">
+        {/* The output's name: click it to rename */}
+        <div className="flex items-baseline gap-2" data-output-name-heading>
+          <InlineName value={activeOutput.name} onRename={(name) => updateOutput(activeOutputId, { name })} className="text-lg font-bold text-white" inputClassName="text-lg font-bold py-0.5 w-72" title="Click to rename this output" />
+          <span className="text-[11px] text-neutral-500">Click the name to rename it</span>
+        </div>
+
         {/* Enabled Toggle */}
         <div className="bg-[#121214] border border-white/5 rounded-xl p-5">
           <div className="flex items-center justify-between">
@@ -745,14 +869,14 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
                 onChange={(e) => updateOutput(activeOutputId, { enabled: e.target.checked })}
                 className="sr-only peer" 
               />
-              <div className="w-11 h-6 bg-neutral-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+              <div className="w-11 h-6 bg-neutral-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-pink-600"></div>
             </label>
           </div>
         </div>
 
         {/* What the screen is for (chosen when it was made) */}
         <div className="bg-[#121214] border border-white/5 rounded-xl px-5 py-3 flex items-center gap-3">
-          {isStage ? <Tv size={16} className="text-amber-400 shrink-0" /> : <MonitorPlay size={16} className="text-blue-400 shrink-0" />}
+          {isStage ? <Tv size={16} className="text-amber-400 shrink-0" /> : <MonitorPlay size={16} className="text-pink-400 shrink-0" />}
           <div className="text-xs">
             <span className="font-semibold text-white">{isStage ? 'Stage output' : 'Normal output'}</span>
             <span className="text-neutral-500"> · {isStage ? 'for the people on stage: current and next slide, section name and time' : 'for the audience: lyrics and scripture in your templates and designs'}</span>
@@ -762,11 +886,11 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
         {/* Style selector — pick which PresentationStyle this output uses (only styles of the same kind) */}
         <div className="bg-[#121214] border border-white/5 rounded-xl p-5 space-y-3">
           <div className="flex items-center justify-between">
-            <span className="text-[11px] font-bold uppercase tracking-wider text-blue-400">{isStage ? 'Stage style' : 'Style'}</span>
+            <span className="text-[11px] font-bold uppercase tracking-wider text-pink-400">{isStage ? 'Stage style' : 'Style'}</span>
             <select
               value={activeOutput.styleId || ''}
               onChange={(e) => updateOutput(activeOutputId, { styleId: e.target.value || undefined })}
-              className="bg-[#1e1e28] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white outline-none focus:border-blue-500 cursor-pointer min-w-[160px]"
+              className="bg-[#1e1e28] border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white outline-none focus:border-pink-500 cursor-pointer min-w-[160px]"
             >
               <option value="">{isStage ? '(None — ready-made stage layouts)' : '(None — use output defaults)'}</option>
               {local.styles.filter(s => styleKind(s) === (isStage ? 'stage' : 'normal')).map(s => (
@@ -802,11 +926,13 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
               <span className="text-sm font-bold">NDI®</span>
             </div>
 
+            <NdiStatusCard output={activeOutput as any} />
+
             <div className="bg-[#121214] border border-white/5 rounded-xl overflow-hidden">
               {/* Size & Frame Rate Row */}
               <div className="grid grid-cols-2 divide-x divide-white/5">
                 <div className="p-4">
-                  <span className="text-[11px] font-bold uppercase tracking-wider text-blue-400 block mb-1.5">Size</span>
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-pink-400 block mb-1.5">Size</span>
                   <select 
                     value={activeOutput.ndiResolution || '1920x1080'} 
                     onChange={(e) => updateOutput(activeOutputId, { ndiResolution: e.target.value as any })}
@@ -818,7 +944,7 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
                   </select>
                 </div>
                 <div className="p-4">
-                  <span className="text-[11px] font-bold uppercase tracking-wider text-blue-400 block mb-1.5">Frame rate</span>
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-pink-400 block mb-1.5">Frame rate</span>
                   <select 
                     value={activeOutput.ndiFrameRate || 30} 
                     onChange={(e) => updateOutput(activeOutputId, { ndiFrameRate: parseInt(e.target.value) })}
@@ -835,7 +961,7 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
               {/* Name & Group Row */}
               <div className="grid grid-cols-2 divide-x divide-white/5 border-t border-white/5">
                 <div className="p-4">
-                  <span className="text-[11px] font-bold uppercase tracking-wider text-blue-400 block mb-1.5">Name</span>
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-pink-400 block mb-1.5">Name</span>
                   <input 
                     type="text" 
                     value={activeOutput.ndiStreamName || `FlowShow NDI - ${activeOutput.name}`}
@@ -868,7 +994,7 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
                     onChange={(e) => updateOutput(activeOutputId, { ndiTransparent: e.target.checked })}
                     className="sr-only peer" 
                   />
-                  <div className="w-11 h-6 bg-neutral-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                  <div className="w-11 h-6 bg-neutral-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-pink-600"></div>
                 </label>
               </div>
               <p className="text-xs text-neutral-500 mt-1.5">Enable 32-bit RGBA alpha channel for clean lower-thirds overlay in OBS/vMix</p>
@@ -886,7 +1012,7 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
 
             <div className="bg-[#121214] border border-white/5 rounded-xl p-5">
               <div className="flex items-center justify-between mb-3">
-                <span className="text-[11px] font-bold uppercase tracking-wider text-blue-400">Target Display</span>
+                <span className="text-[11px] font-bold uppercase tracking-wider text-pink-400">Target Display</span>
                 <button onClick={detectScreens} className="text-xs bg-white/5 hover:bg-white/10 text-neutral-300 hover:text-white px-3 py-1.5 rounded-lg transition-all border border-white/10 font-medium">
                   Detect Screens
                 </button>
@@ -894,7 +1020,7 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
               <select 
                 value={activeOutput.displayId || ''} 
                 onChange={(e) => updateOutput(activeOutputId, { displayId: e.target.value })}
-                className="bg-[#09090B] border border-white/10 rounded-lg text-sm px-3 py-2.5 text-white outline-none focus:border-blue-500 w-full"
+                className="bg-[#09090B] border border-white/10 rounded-lg text-sm px-3 py-2.5 text-white outline-none focus:border-pink-500 w-full"
               >
                 <option value="">-- No Display Selected --</option>
                 {activeOutput.displayId && !detectedScreens.some(s => s.label === activeOutput.displayId) && <option value={activeOutput.displayId}>{activeOutput.displayId}</option>}
@@ -918,7 +1044,7 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
           <h3 className="text-[11px] font-bold uppercase tracking-wider text-neutral-400 mb-3">Default Background</h3>
           <div className="flex flex-wrap items-center gap-3">
             <select 
-              className="bg-[#09090B] border border-white/10 text-white rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500 font-medium min-w-[180px]" 
+              className="bg-[#09090B] border border-white/10 text-white rounded-lg px-3 py-2 text-sm outline-none focus:border-pink-500 font-medium min-w-[180px]" 
               value={activeOutput.defaultBackground ? activeOutput.defaultBackground.type : 'none'} 
               onChange={(e) => { 
                 const val = e.target.value; 
@@ -957,7 +1083,7 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
                   type="button"
                   onClick={async () => { setIsScanningNdi(true); const found = await ndiService.scanNetworkSources(); setNdiSources([...found]); setIsScanningNdi(false); }}
                   disabled={isScanningNdi}
-                  className="text-[10px] text-blue-400 hover:text-blue-300 font-bold shrink-0"
+                  className="text-[10px] text-pink-400 hover:text-pink-300 font-bold shrink-0"
                 >
                   {isScanningNdi ? 'Scanning...' : 'Scan'}
                 </button>
@@ -965,18 +1091,34 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
             )}
             {(activeOutput.defaultBackground?.type === 'image' || activeOutput.defaultBackground?.type === 'video') && (
               <div className="flex items-center gap-3 bg-[#09090B] px-3 py-2 rounded-lg border border-white/5 flex-1">
-                <label className="bg-white/10 hover:bg-white/20 text-white px-3 py-1.5 rounded text-xs font-medium cursor-pointer transition-colors shrink-0">Browse... <input type="file" accept="image/*,video/*" onChange={handleMediaUpload} className="hidden" /></label>
+                {isTauri() ? (
+                  <button type="button" onClick={() => void chooseBackgroundFile()} className="bg-white/10 hover:bg-white/20 text-white px-3 py-1.5 rounded text-xs font-medium transition-colors shrink-0" title="Choose a picture or video on this computer. It stays where it is; FlowShow only remembers where." data-choose-background>Browse...</button>
+                ) : (
+                  <label className="bg-white/10 hover:bg-white/20 text-white px-3 py-1.5 rounded text-xs font-medium cursor-pointer transition-colors shrink-0">Browse... <input type="file" accept="image/*,video/*" onChange={handleMediaUpload} className="hidden" /></label>
+                )}
                 {activeOutput.defaultBackground.url ? (
                   <span className="text-xs text-neutral-300 truncate flex-1 font-mono">{activeOutput.defaultBackground.fileName || 'Local Media File'}</span>
                 ) : ( <span className="text-xs text-red-400 italic">No media selected yet</span> )}
               </div>
             )}
           </div>
+          {/* How strongly the background shows (over black): lower makes the words easier to read */}
+          <div className="mt-4 flex items-center gap-3" data-bg-opacity-setting>
+            <span className="text-xs font-medium text-white w-36 shrink-0">Background opacity</span>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              step={1}
+              value={activeOutput.backgroundOpacity ?? 80}
+              onChange={(e) => applyOutputLive(activeOutputId, { backgroundOpacity: Number(e.target.value) })}
+              className="flex-1 accent-pink-500 cursor-pointer"
+            />
+            <span className="text-xs font-mono text-neutral-300 w-10 text-right">{activeOutput.backgroundOpacity ?? 80}%</span>
+          </div>
+          <p className="text-[11px] text-neutral-500 mt-1.5">Lower it to darken the background picture or video behind the words. The screens follow the slider as you drag (Cancel puts it back). It applies to every background shown on this output, including media you send from the Media tab.</p>
         </div>
 
-        {/* Style Overrides */}
-        <StyleConfigurator title="Override Lyrics Style" enabled={activeOutput.lyricsStyleEnabled} onToggle={(val: boolean) => updateOutput(activeOutputId, { lyricsStyleEnabled: val })} onEdit={() => setEditingStyleType('lyrics')} />
-        <StyleConfigurator title="Override Bible Style" enabled={activeOutput.bibleStyleEnabled} onToggle={(val: boolean) => updateOutput(activeOutputId, { bibleStyleEnabled: val })} onEdit={() => setEditingStyleType('scripture')} />
         </>}
       </div>
     );
@@ -991,9 +1133,10 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
     { id: 'connection', name: 'Connection', icon: Wifi, hidden: true },
     { id: 'files', name: 'Files', icon: FileText, hidden: true },
     { id: 'profiles', name: 'Profiles', icon: Layers },
-    { id: 'theme', name: 'Theme', icon: LayoutTemplate, hidden: true },
+    { id: 'theme', name: 'Themes', icon: Palette },
     { id: 'smart', name: 'Smart', icon: Activity, hidden: true },
-    { id: 'help', name: 'Help', icon: BookOpen }
+    { id: 'help', name: 'Help', icon: BookOpen },
+    { id: 'about', name: 'About', icon: Info },
   ].filter(item => !item.hidden);
 
   return (
@@ -1012,7 +1155,7 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
                    onClick={() => setActiveTab(item.id)}
                    className={`text-left px-3.5 py-2 rounded-lg text-xs font-semibold transition-all flex items-center gap-2.5 ${
                      isActive 
-                       ? 'bg-blue-600/20 text-blue-400 shadow-sm' 
+                       ? 'bg-pink-600/20 text-pink-400 shadow-sm' 
                        : 'text-neutral-400 hover:bg-white/5 hover:text-neutral-200'
                    }`}
                  >
@@ -1036,7 +1179,7 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
                             <span className="text-xs text-neutral-500 font-normal">({local.outputs.length} active)</span>
                           </h2>
                           <div className="flex items-center gap-2 text-neutral-500">
-                            <button onClick={() => alert("FlowShow Output Engine: Supports multi-screen HDMI displays and low-latency network NDI streams with 32-bit alpha transparency.")} className="p-1 hover:text-white transition-colors" title="Output Information">
+                            <button onClick={() => void showMessage('Outputs are the screens FlowShow sends to: projectors and TVs (HDMI, DisplayPort or any screen), NDI video over the network (with transparency for overlays), and stage screens.')} className="p-1 hover:text-white transition-colors" title="Output Information">
                               <span className="text-xs font-mono font-bold border border-white/20 rounded-full w-4 h-4 flex items-center justify-center">i</span>
                             </button>
                           </div>
@@ -1069,13 +1212,13 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
                                 onClick={() => setActiveOutputId(out.id)}
                                 className={`rounded-xl border transition-all cursor-pointer p-2 ${
                                   isSelected 
-                                    ? 'border-blue-500 bg-blue-600/10' 
+                                    ? 'border-pink-500 bg-pink-600/10' 
                                     : 'border-white/10 bg-[#030303] hover:border-white/20'
                                 }`}
                               >
                                 <div className="flex items-center justify-between mb-1.5 px-1">
                                   <div className="flex items-center gap-1.5 min-w-0">
-                                    <div className={`w-2 h-2 rounded-full ${out.enabled ? (isNdi ? 'bg-emerald-400 animate-pulse' : 'bg-blue-400') : 'bg-neutral-600'}`} />
+                                    {isNdi ? <NdiDot output={out as any} /> : <div className={`w-2 h-2 rounded-full ${out.enabled ? 'bg-pink-400' : 'bg-neutral-600'}`} />}
                                     <span className="text-xs font-bold text-white truncate">{out.name}</span>
                                   </div>
                                   <span className="flex items-center gap-1 shrink-0">
@@ -1111,9 +1254,9 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
 
                         {/* Transport / Monitor Toolbar */}
                         <div className="pt-2 border-t border-white/5 flex items-center justify-around text-neutral-400 text-xs">
-                          <button onClick={() => alert("Previous Output")} className="p-1.5 rounded hover:bg-white/5 hover:text-white" title="Previous"><ChevronLeft size={14} /></button>
-                          <button onClick={() => alert("Next Output")} className="p-1.5 rounded hover:bg-white/5 hover:text-white" title="Next"><ChevronRight size={14} /></button>
-                          <button onClick={() => onTogglePresenting?.()} className={`p-1.5 rounded hover:bg-white/5 transition-colors ${isPresenting ? 'text-red-400' : 'text-blue-400'}`} title="Play / Go Live"><Play size={14} /></button>
+                          <button onClick={() => { const ids = local.outputs.map(o => o.id); setActiveOutputId(ids[(ids.indexOf(activeOutputId) - 1 + ids.length) % ids.length]); }} className="p-1.5 rounded hover:bg-white/5 hover:text-white" title="Previous"><ChevronLeft size={14} /></button>
+                          <button onClick={() => { const ids = local.outputs.map(o => o.id); setActiveOutputId(ids[(ids.indexOf(activeOutputId) + 1) % ids.length]); }} className="p-1.5 rounded hover:bg-white/5 hover:text-white" title="Next"><ChevronRight size={14} /></button>
+                          <button onClick={() => onTogglePresenting?.()} className={`p-1.5 rounded hover:bg-white/5 transition-colors ${isPresenting ? 'text-red-400' : 'text-pink-400'}`} title="Play / Go Live"><Play size={14} /></button>
                           <button onClick={() => onToggleLockOutput?.(activeOutputId)} className="p-1.5 rounded hover:bg-white/5 hover:text-white" title="Lock Screen"><Lock size={14} /></button>
                         </div>
                      </div>
@@ -1130,9 +1273,65 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
                   />
                )}
                {activeTab === 'help' && (
-                  <div>
-                     <h2 className="text-2xl font-bold text-white mb-4 tracking-tight">Help & Documentation</h2>
-                     <p className="text-neutral-400 leading-relaxed text-sm">Documentation and shortcut keys are coming soon.</p>
+                  <div className="space-y-8" data-settings-help>
+                     <div>
+                        <h2 className="text-2xl font-bold text-white mb-1 tracking-tight">Help</h2>
+                        <p className="text-neutral-400 text-sm">Getting started, and the keys that run a service. The online documentation is coming soon.</p>
+                     </div>
+                     <section>
+                        <h3 className="text-sm font-bold text-white mb-3 flex items-center gap-2"><Rocket size={15} className="text-pink-400" /> Quick start</h3>
+                        <QuickStartContent />
+                     </section>
+                     <section>
+                        <h3 className="text-sm font-bold text-white mb-3 flex items-center gap-2"><Keyboard size={15} className="text-pink-400" /> Keyboard shortcuts</h3>
+                        <ShortcutsContent />
+                     </section>
+                  </div>
+               )}
+               {activeTab === 'about' && (
+                  <div className="max-w-lg" data-settings-about>
+                     <h2 className="text-2xl font-bold text-white mb-4 tracking-tight">About</h2>
+                     <AboutContent />
+                  </div>
+               )}
+               {activeTab === 'theme' && (
+                  <div data-settings-themes>
+                     <h2 className="text-2xl font-bold text-white mb-1 tracking-tight">Themes</h2>
+                     <p className="text-neutral-400 text-sm mb-5">The colour of FlowShow's buttons and highlights. It changes at once; the screens your audience sees are not affected.</p>
+                     <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
+                        {APP_THEMES.map(theme => {
+                           const chosen = (local.appTheme || DEFAULT_APP_THEME) === theme.id;
+                           const sw = themeSwatch(theme);
+                           return (
+                              <button
+                                 key={theme.id}
+                                 type="button"
+                                 onClick={() => {
+                                    // Saved straight away (like styles), so the whole app shows it at once
+                                    commitStyleChange(prev => ({ ...prev, appTheme: theme.id }));
+                                 }}
+                                 className={`text-left rounded-xl border p-3 transition-colors ${chosen ? 'border-white/60 bg-white/[0.06]' : 'border-white/10 hover:border-white/30 bg-white/[0.02]'}`}
+                                 data-theme-choice={theme.id}
+                                 data-chosen={chosen ? 'yes' : 'no'}
+                              >
+                                 <div className="h-14 rounded-lg mb-2.5 flex overflow-hidden border border-white/5" style={{ background: '#09090b' }}>
+                                    <div className="flex-1 flex items-center justify-center gap-1.5">
+                                       <span className="px-2 py-1 rounded-md text-[11px] font-bold" style={{ background: theme.second.bg, color: theme.second.text }} title="Second colour: the screen you are designing">Output 1</span>
+                                       <span className="px-2 py-1 rounded-md text-[11px] font-bold text-white" style={{ background: sw[6] }}>Go live</span>
+                                    </div>
+                                    <div className="w-1/3 flex flex-col">
+                                       {[3, 4, 5, 6, 7].map(i => <div key={i} className="flex-1" style={{ background: sw[i] }} />)}
+                                    </div>
+                                 </div>
+                                 <div className="flex items-center justify-between">
+                                    <span className="text-sm font-semibold text-white">{theme.name}</span>
+                                    {chosen && <Check size={15} className="text-white" />}
+                                 </div>
+                                 <span className="text-[11px] text-neutral-500">{theme.description}</span>
+                              </button>
+                           );
+                        })}
+                     </div>
                   </div>
                )}
                {activeTab === 'style' && (
@@ -1169,7 +1368,7 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
                     }))}
                   />
                )}
-               {activeTab !== 'outputs' && activeTab !== 'style' && activeTab !== 'help' && (
+               {!['outputs', 'style', 'help', 'about', 'theme', 'profiles'].includes(activeTab) && (
                   <div className="py-12 text-center text-neutral-500">
                      <p className="text-base font-semibold text-neutral-400 capitalize">{activeTab} Settings</p>
                      <p className="text-xs text-neutral-500 mt-1">Options and preferences for {activeTab} will appear here.</p>
@@ -1190,13 +1389,15 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
                          onClick={() => setActiveOutputId(out.id)}
                          className={`group px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-2 transition-all relative
                            ${isActive 
-                             ? 'bg-[#121214] text-white border border-blue-500/50 shadow-sm' 
+                             ? 'bg-[#121214] text-white border border-pink-500/50 shadow-sm' 
                              : 'text-neutral-500 hover:text-neutral-300 hover:bg-white/5 border border-transparent'
                            }`}
                        >
                          {/* Checkmark icon as shown in Image c & e */}
-                         <Check size={12} className={out.enabled ? (isNdi ? 'text-emerald-400' : 'text-blue-400') : 'text-neutral-600'} />
-                         <span className="truncate">{out.name}</span>
+                         <Check size={12} className={out.enabled ? (isNdi ? 'text-emerald-400' : 'text-pink-400') : 'text-neutral-600'} />
+                         {isActive
+                           ? <InlineName value={out.name} onRename={(name) => updateOutput(out.id, { name })} className="truncate" inputClassName="w-28 text-xs py-0.5" title="Click to rename this output" />
+                           : <span className="truncate">{out.name}</span>}
                          {isStageOutput(out) && <Tv size={10} className="text-amber-400 shrink-0" />}
                          {isNdi && <Wifi size={10} className="text-neutral-500 shrink-0" />}
                          {local.outputs.length > 1 && (
@@ -1214,7 +1415,7 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
                    })}
                    <button
                      onClick={() => setShowNewOutputModal(true)}
-                     className="px-3 py-1.5 text-blue-400 hover:text-blue-300 hover:bg-blue-600/10 rounded-lg text-xs font-bold transition-all flex items-center gap-1 ml-1 shrink-0"
+                     className="px-3 py-1.5 text-pink-400 hover:text-pink-300 hover:bg-pink-600/10 rounded-lg text-xs font-bold transition-all flex items-center gap-1 ml-1 shrink-0"
                    >
                      <Plus size={14} />
                      New output
@@ -1233,8 +1434,8 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
              )}
 
              <div className="p-4 border-t border-white/5 bg-[#030303] flex justify-end gap-3 shrink-0">
-                <button onClick={onClose} className="px-5 py-2 hover:bg-white/5 text-neutral-300 transition-colors rounded-lg text-xs font-medium">Cancel</button>
-                <button onClick={() => { onSave(local); onClose(); }} className="px-6 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-bold transition-colors flex items-center gap-2 shadow-lg"><Save size={14} /> Save Settings</button>
+                <button onClick={cancelSettings} className="px-5 py-2 hover:bg-white/5 text-neutral-300 transition-colors rounded-lg text-xs font-medium">Cancel</button>
+                <button onClick={() => { onSave(local); onClose(); }} className="px-6 py-2 bg-pink-600 hover:bg-pink-500 text-white rounded-lg text-xs font-bold transition-colors flex items-center gap-2 shadow-lg"><Save size={14} /> Save Settings</button>
              </div>
           </div>
        </div>
@@ -1265,11 +1466,11 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
                     onClick={() => setSelectedNewOutputKind(kind)}
                     className={`p-4 rounded-xl border-2 flex flex-col items-center gap-2 text-center transition-all ${
                       selectedNewOutputKind === kind
-                        ? 'border-blue-500 bg-blue-600/10 text-white'
+                        ? 'border-pink-500 bg-pink-600/10 text-white'
                         : 'border-white/10 bg-[#09090B] text-neutral-400 hover:border-white/30 hover:text-white'
                     }`}
                   >
-                    <Icon size={28} className={selectedNewOutputKind === kind ? 'text-blue-400' : ''} />
+                    <Icon size={28} className={selectedNewOutputKind === kind ? 'text-pink-400' : ''} />
                     <span className="font-bold text-sm">{title}</span>
                     <span className="text-[11px] text-neutral-500 leading-snug">{text}</span>
                   </button>
@@ -1285,11 +1486,11 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
                   onClick={() => setSelectedNewOutputType('hdmi')}
                   className={`p-6 rounded-xl border-2 flex flex-col items-center gap-3 transition-all ${
                     selectedNewOutputType === 'hdmi' 
-                      ? 'border-blue-500 bg-blue-600/10 text-white' 
+                      ? 'border-pink-500 bg-pink-600/10 text-white' 
                       : 'border-white/10 bg-[#09090B] text-neutral-400 hover:border-white/30 hover:text-white'
                   }`}
                 >
-                  <MonitorPlay size={36} className={selectedNewOutputType === 'hdmi' ? 'text-blue-400' : ''} />
+                  <MonitorPlay size={36} className={selectedNewOutputType === 'hdmi' ? 'text-pink-400' : ''} />
                   <div className="text-center">
                     <span className="font-bold text-sm block">Window</span>
                     <span className="text-[11px] text-neutral-500">HDMI, DisplayPort</span>
@@ -1314,11 +1515,11 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
                   onClick={() => setSelectedNewOutputType('ndi')}
                   className={`p-4 rounded-xl border-2 flex flex-col items-center gap-2 transition-all ${
                     selectedNewOutputType === 'ndi' 
-                      ? 'border-blue-500 bg-blue-600/10 text-white' 
+                      ? 'border-pink-500 bg-pink-600/10 text-white' 
                       : 'border-white/10 bg-[#09090B] text-neutral-400 hover:border-white/30 hover:text-white'
                   }`}
                 >
-                  <Wifi size={24} className={selectedNewOutputType === 'ndi' ? 'text-blue-400' : ''} />
+                  <Wifi size={24} className={selectedNewOutputType === 'ndi' ? 'text-pink-400' : ''} />
                   <div className="text-center">
                     <span className="font-bold text-xs block">NDI®</span>
                     <span className="text-[9px] text-neutral-500">IP, OBS</span>
@@ -1353,7 +1554,7 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
             <button
               onClick={() => { if (selectedNewOutputType && selectedNewOutputKind) addNewOutput(selectedNewOutputType, selectedNewOutputKind); }}
               disabled={!selectedNewOutputType || !selectedNewOutputKind}
-              className="w-full py-3 bg-blue-600 hover:bg-blue-500 disabled:opacity-30 disabled:hover:bg-blue-600 text-white font-bold text-sm rounded-xl transition-all shadow-lg"
+              className="w-full py-3 bg-pink-600 hover:bg-pink-500 disabled:opacity-30 disabled:hover:bg-pink-600 text-white font-bold text-sm rounded-xl transition-all shadow-lg"
               title={!selectedNewOutputKind ? 'Choose Normal or Stage first' : !selectedNewOutputType ? 'Choose how it connects' : undefined}
             >
               Confirm
@@ -1480,11 +1681,7 @@ function ControlPanel() {
   useEffect(() => { loadProfiles().then(({ profiles, activeId }) => { setProfiles(profiles); setActiveProfileId(activeId); profilesLoadedRef.current = true; }); }, []);
   useEffect(() => { if (profilesLoadedRef.current) void saveProfiles(profiles, activeProfileId); }, [profiles, activeProfileId]);
   const downloadFile = (blob: Blob, name: string) => {
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = name.replace(/[\\/:*?"<>|]/g, '');
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    downloadBlob(blob, name).catch(err => setUndoToast({ text: `Couldn't save "${name}": ${err instanceof Error ? err.message : String(err)}`, at: Date.now(), kind: 'error', noUndo: true }));
   };
   const now = () => new Date().toISOString();
   // `current`: the setup as it is now (with unsaved Settings changes); the active profile keeps it
@@ -1580,11 +1777,24 @@ function ControlPanel() {
     }
   };
   const toast = (text: string, error = false) => setUndoToast({ text, at: Date.now(), kind: error ? 'error' : 'info', noUndo: true });
+  // An export was saved (Documents\FlowShow\…): show where, with a button to open the folder
+  const [savedFile, setSavedFile] = useState<SavedFile | null>(null);
+  useEffect(() => {
+    const onSaved = (e: Event) => { setUndoToast(null); setSavedFile((e as CustomEvent<SavedFile>).detail); };
+    window.addEventListener(FILE_SAVED_EVENT, onSaved);
+    return () => window.removeEventListener(FILE_SAVED_EVENT, onSaved);
+  }, []);
+  useEffect(() => {
+    if (!savedFile) return;
+    const t = setTimeout(() => setSavedFile(null), 20000);
+    return () => clearTimeout(t);
+  }, [savedFile]);
+
 
   // FlowShow's own song files (one song or all of them, with their designs and groups)
   const SONGS_EXTENSION = '.flowshow-songs';
   const exportSongs = (songs: PresentationItem[], name: string) => {
-    downloadBlob(new Blob([JSON.stringify({ format: 'flowshow-songs', formatVersion: 1, exportedAt: new Date().toISOString(), songs }, null, 1)], { type: 'application/json' }), `${name}${SONGS_EXTENSION}`);
+    downloadFile(new Blob([JSON.stringify({ format: 'flowshow-songs', formatVersion: 1, exportedAt: new Date().toISOString(), songs }, null, 1)], { type: 'application/json' }), `${name}${SONGS_EXTENSION}`);
   };
   const importSongsFile = async (file: File) => {
     let data: any;
@@ -1606,7 +1816,11 @@ function ControlPanel() {
     else if (choice === 'profile') profilesApi.onExport(activeProfileId, globalSettings);
     else if (choice === 'database') {
       toast('Preparing the backup…');
-      downloadBlob(await buildBackup(), `FlowShow backup ${new Date().toISOString().slice(0, 10)}${BACKUP_EXTENSION}`);
+      try {
+        downloadFile(await buildBackup(), `FlowShow backup ${new Date().toISOString().slice(0, 10)}${BACKUP_EXTENSION}`);
+      } catch (err) {
+        toast(`Couldn't make the backup: ${err instanceof Error ? err.message : String(err)}`, true);
+      }
     }
   };
 
@@ -1618,7 +1832,7 @@ function ControlPanel() {
       if (ext === '.fstemplates') setTemplateImportFile(file);
       else if (ext === '.flowshow-profile') toast((await profilesApi.onImport(file)).replace('Click "Switch to" to use it.', 'Choose it in the Profile menu to use it.'));
       else if (ext === BACKUP_EXTENSION) {
-        if (!window.confirm(`Restore the backup "${file.name}"? Everything in FlowShow now (songs, projects, settings, profiles, templates, Bibles) is replaced by the backup. Export a backup first if you might need what's here.`)) continue;
+        if (!(await askConfirm(`Restore the backup "${file.name}"? Everything in FlowShow now (songs, projects, settings, profiles, templates, Bibles) is replaced by the backup. Export a backup first if you might need what's here.`, { okLabel: 'Restore', danger: true }))) continue;
         try { await restoreBackup(file); window.location.reload(); } catch (err) { toast(err instanceof Error ? err.message : String(err), true); }
       }
       else if (ext === SONGS_EXTENSION) await importSongsFile(file);
@@ -1659,17 +1873,20 @@ function ControlPanel() {
   };
   // Design mode designs the song slides, or how scripture looks on the screen
   const [designFor, setDesignFor] = useState<DesignFor>('lyrics');
+  // The overlay open in Design mode (For overlays)
+  const [designOverlayId, setDesignOverlayId] = useState<string | null>(null);
   // Open Design mode on a slide, or (null) on whatever is on air: a Bible verse on air opens the scripture design
   const openDesign = (slideId: string | null = null) => {
     setDesignSlideId(slideId);
     const live = liveState.slide;
-    setDesignFor(slideId ? 'lyrics'
+    const picked = slideId ? findSlideById(slideId) : null;
+    setDesignFor(picked ? (picked.declaration ? 'declaration' : 'lyrics')
       : live?.type === 'scripture' && !songsList.some(song => song.slides.some(s => s.id === live.id)) ? 'scripture'
       : live?.declaration ? 'declaration' : 'lyrics');
     setAppMode('design');
   };
   const [activeTab, setActiveTab] = useState<'shows' | 'songs' | 'setlist' | 'bibles' | 'media' | 'audio'>('songs');
-  const [bottomTab, setBottomTab] = useState<'shows' | 'media' | 'audio' | 'overlays' | 'templates' | 'scripture' | 'calendar' | 'functions'>('shows');
+  const [bottomTab, setBottomTab] = useState<'shows' | 'media' | 'audio' | 'overlays' | 'templates' | 'scripture' | 'timers' | 'calendar' | 'functions'>('shows');
   const [selectedCategory, setSelectedCategory] = useState<'all' | 'Presentations' | 'Songs' | 'Declarations'>('all');
   const [rightInspectorTab, setRightInspectorTab] = useState<'groups' | 'metadata'>('groups');
   const [selectedProjectFolder, setSelectedProjectFolder] = useState<string>('11/18/26');
@@ -1834,9 +2051,9 @@ function ControlPanel() {
       goLive(item.slides[0]);
     }
   };
-  const newProject = (folder?: string) => {
+  const newProject = async (folder?: string) => {
     const date = new Date().toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
-    const name = window.prompt('Name for the new project (one service)', `Service ${date}`)?.trim();
+    const name = await askText('Name for the new project (one service)', `Service ${date}`, { okLabel: 'Create' });
     if (!name) return;
     const project: ServiceSetlist = { id: `project-${Date.now().toString(36)}`, name, date, items: [], folder };
     setProjectsState(prev => ({ ...prev, projects: [...prev.projects, project], activeId: project.id }));
@@ -1844,8 +2061,8 @@ function ControlPanel() {
     setSetlistViewMode('manager');
     setActiveTab('setlist');
   };
-  const newFolder = () => {
-    const name = window.prompt('Name for the new folder (for example Sunday Services, Youth)')?.trim();
+  const newFolder = async () => {
+    const name = await askText('Name for the new folder (for example Sunday Services, Youth)', '', { okLabel: 'Create' });
     if (name) setProjectsState(prev => prev.folders.includes(name) ? prev : { ...prev, folders: [...prev.folders, name] });
   };
 
@@ -1992,6 +2209,10 @@ function ControlPanel() {
   }, []);
   
   const [contextMenu, setContextMenu] = useState<{ x: number, y: number, type: 'song'|'bible'|'slide', id: string | number } | null>(null);
+  // Slides marked on the main grid (Ctrl+click / Shift+click) for right-click actions; a plain click still goes live
+  const [gridChosen, setGridChosen] = useState<Set<string>>(() => new Set());
+  const gridAnchor = useRef<number | null>(null);
+  useEffect(() => { setGridChosen(prev => prev.size ? new Set() : prev); gridAnchor.current = null; }, [activeItemIndex, activeSetlistItemId, activeTab]);
 
   useEffect(() => {
     const handleGlobalClick = () => setContextMenu(null);
@@ -2070,9 +2291,30 @@ function ControlPanel() {
   const [draggedSlideIndex, setDraggedSlideIndex] = useState<number | null>(null);
   const [dragOverSlideIndex, setDragOverSlideIndex] = useState<number | null>(null);
   
+  useEffect(() => {
+    applyAppTheme(globalSettings.appTheme);
+    try { localStorage.setItem('flowshow_app_theme', globalSettings.appTheme || DEFAULT_APP_THEME); } catch { /* fine */ }
+  }, [globalSettings.appTheme]);
   const [liveState, setLiveState] = useState<PresentState>({
     slide: null, globalBackground: null, clearText: false, settings: globalSettings, isPresenting: false, clearedOutputs: {}, lockedOutputs: {}, frozenStates: {}
   });
+
+  // Desktop app: while presenting, every enabled NDI output is a real NDI source (they stop when presenting stops);
+  // changes to their settings restart them
+  const ndiKey = JSON.stringify([liveState.isPresenting, ...globalSettings.outputs.filter((o: any) => o.outputType === 'ndi').map((o: any) => [o.id, o.name, o.enabled, o.ndiStreamName, o.ndiGroup, o.ndiResolution, o.ndiFrameRate, o.ndiTransparent])]);
+  const ndiProblemsShown = useRef('');
+  useEffect(() => {
+    if (!isTauri()) return;
+    const t = setTimeout(() => {
+      syncNdiOutputs((globalSettings.outputs as any[]).map(o => ({ ...o, enabled: o.enabled && !!liveState.isPresenting }))).then(problems => {
+        setNdiProblems(problems);
+        const text = Object.entries(problems).map(([id, p]) => `${globalSettings.outputs.find((o: any) => o.id === id)?.name || id}: ${p}`).join(' · ');
+        if (text && text !== ndiProblemsShown.current) setUndoToast({ text: `NDI: ${text}`, at: Date.now(), kind: 'error', noUndo: true });
+        ndiProblemsShown.current = text;
+      });
+    }, 500);
+    return () => clearTimeout(t);
+  }, [ndiKey]);
 
   const liveVideoRef = useRef<HTMLVideoElement>(null);
   const [videoDuration, setVideoDuration] = useState(0);
@@ -2080,7 +2322,38 @@ function ControlPanel() {
   const [isVideoPlaying, setIsVideoPlaying] = useState(true);
   const [isVideoMuted, setIsVideoMuted] = useState(true);
 
-  const togglePresenting = () => setLiveState(prev => ({ ...prev, isPresenting: !prev.isPresenting }));
+  const togglePresenting = () => {
+    const starting = !liveState.isPresenting;
+    setLiveState(prev => ({ ...prev, isPresenting: !prev.isPresenting }));
+    // Starting opens each enabled screen output on its screen; stopping closes them (NDI sources stop too)
+    if (starting) void openScreenOutputs();
+    else void closeScreenOutputs();
+  };
+  /** Close every screen output window (projectors, TVs, stage screens) */
+  const closeScreenOutputs = async () => {
+    if (!isTauri()) return;
+    const { invoke } = await import('@tauri-apps/api/core');
+    for (const o of globalSettings.outputs as OutputSettings[]) {
+      if (o.outputType === 'ndi') continue;
+      try { await invoke('close_output_window', { label: `projector-${o.id}` }); } catch { /* not open */ }
+    }
+  };
+  /** Open every enabled screen (HDMI…) output that has a screen chosen, except one on FlowShow's own screen */
+  const openScreenOutputs = async () => {
+    if (!isTauri()) return;
+    const outs = (globalSettings.outputs as OutputSettings[]).filter(o => o.enabled && o.outputType !== 'ndi' && o.displayId);
+    if (!outs.length) return;
+    const skipped: string[] = [];
+    for (const o of outs) {
+      try {
+        const r = await openOutputOnMonitor(`projector-${o.id}`, `/projector/${o.id}`, o.name, o.displayId!, () => false);
+        if (r === 'cancelled') skipped.push(o.name);
+      } catch (err) {
+        setUndoToast({ text: `Couldn't open ${o.name}: ${err instanceof Error ? err.message : String(err)}`, at: Date.now(), kind: 'error', noUndo: true });
+      }
+    }
+    if (skipped.length) setUndoToast({ text: `${skipped.join(', ')} ${skipped.length === 1 ? 'is' : 'are'} set to the screen FlowShow is on, so ${skipped.length === 1 ? 'it was' : 'they were'} not opened. Use its monitor (or plug in the projector) to show it.`, at: Date.now(), kind: 'info', noUndo: true });
+  };
 
   const toggleClearOutput = (outputId: string) => {
     setLiveState(prev => ({
@@ -2091,29 +2364,77 @@ function ControlPanel() {
 
   const toggleLockOutput = (outputId: string) => {
     setLiveState(prev => {
-        const isCurrentlyLocked = !!prev.lockedOutputs?.[outputId];
-        if (isCurrentlyLocked) {
-            const newLocked = { ...prev.lockedOutputs };
-            delete newLocked[outputId];
-            const newFrozen = { ...prev.frozenStates };
-            delete newFrozen[outputId];
-            return { ...prev, lockedOutputs: newLocked, frozenStates: newFrozen };
-        } else {
-            const outputConfig = prev.settings?.outputs.find(o => o.id === outputId);
-            let currentActiveBg = outputConfig?.defaultBackground;
-            if (outputId === 'main' && prev.globalBackground) {
-                currentActiveBg = prev.globalBackground;
-            }
-            return {
-                ...prev,
-                lockedOutputs: { ...prev.lockedOutputs, [outputId]: true },
-                frozenStates: {
-                    ...prev.frozenStates,
-                    [outputId]: { slide: prev.slide, bg: currentActiveBg, clearText: prev.clearText }
-                }
-            };
+        const state = prev.lockedOutputs?.[outputId];
+        // Unpausing: keep the paused picture on this screen; it changes with the next thing you send
+        if (state === true) return { ...prev, lockedOutputs: { ...prev.lockedOutputs, [outputId]: 'held' } };
+        // Pausing again while held: the same picture stays
+        if (state === 'held') return { ...prev, lockedOutputs: { ...prev.lockedOutputs, [outputId]: true } };
+        const outputConfig = prev.settings?.outputs.find(o => o.id === outputId);
+        let currentActiveBg = outputConfig?.defaultBackground;
+        if (outputId === 'main' && prev.globalBackground) {
+            currentActiveBg = prev.globalBackground;
         }
+        return {
+            ...prev,
+            lockedOutputs: { ...prev.lockedOutputs, [outputId]: true },
+            frozenStates: {
+                ...prev.frozenStates,
+                [outputId]: { slide: prev.slide, bg: currentActiveBg, clearText: prev.clearText, overlays: overlaysFor(prev.settings?.overlays, prev.overlays, outputId) }
+            }
+        };
     });
+  };
+
+  // ─── Overlays: several can be on at once; they stay through slide, background and Clear all; F3 takes them off ───
+  const toggleOverlay = (id: string) => setLiveState(prev => {
+    const on = prev.overlays || [];
+    return { ...prev, ...releaseHeld(prev), overlays: on.includes(id) ? on.filter(x => x !== id) : [...on, id] };
+  });
+  const clearOverlays = () => setLiveState(prev => prev.overlays?.length ? { ...prev, ...releaseHeld(prev), overlays: [] } : prev);
+  const setOverlays = (overlays: Overlay[]) => setGlobalSettings(prev => ({ ...prev, overlays }));
+  const saveOverlay = (o: Overlay) => setGlobalSettings(prev => ({ ...prev, overlays: (prev.overlays || []).map(x => x.id === o.id ? o : x) }));
+  const editOverlay = (id: string) => { setDesignOverlayId(id); setDesignFor('overlay'); setAppMode('design'); };
+  const createOverlay = async () => {
+    const name = await askText('Name for the new overlay (for example Logo, Lower third, Live bug)', '', { okLabel: 'Create' });
+    if (!name?.trim()) return;
+    const o = newOverlay(name.trim());
+    setGlobalSettings(prev => ({ ...prev, overlays: [...(prev.overlays || []), o] }));
+    setDesignOverlayId(o.id);
+  };
+
+  // ─── Timers: one at a time; to start another, stop the one in use or let it end ───
+  const startTimer = (p: TimerPreset) => setLiveState(prev => timerBusy(prev.timer) ? prev
+    : { ...prev, timer: { presetId: p.id, name: p.name, durationMs: p.seconds * 1000, startedAt: Date.now(), remainingMs: p.seconds * 1000, flicker: globalSettings.timeUpFlicker !== false } });
+  // The flicker choice is kept, and also applies at once to the timer in use
+  const setTimeUpFlicker = (on: boolean) => {
+    setGlobalSettings(prev => ({ ...prev, timeUpFlicker: on }));
+    setLiveState(prev => prev.timer ? { ...prev, timer: { ...prev.timer, flicker: on } } : prev);
+  };
+  const pauseResumeTimer = () => setLiveState(prev => {
+    const t = prev.timer;
+    if (!t) return prev;
+    return t.startedAt === null
+      ? { ...prev, timer: { ...t, startedAt: Date.now() } }
+      : { ...prev, timer: { ...t, startedAt: null, remainingMs: timeLeft(t) } };
+  });
+  const stopTimer = () => setLiveState(prev => ({ ...prev, timer: null }));
+  const adjustTimer = (deltaMs: number) => setLiveState(prev => {
+    const t = prev.timer;
+    if (!t) return prev;
+    const left = Math.max(0, timeLeft(t) + deltaMs);
+    return { ...prev, timer: { ...t, remainingMs: left, startedAt: t.startedAt === null ? null : Date.now(), durationMs: Math.max(t.durationMs, left) } };
+  });
+  // Stage screens drawn in this window read the timer from here
+  useEffect(() => { setSharedTimer(liveState.timer); }, [liveState.timer]);
+
+  /** Sending something new (a slide, a background, a clear) releases the screens that were held after unpausing */
+  const releaseHeld = (prev: PresentState): Partial<PresentState> => {
+    const held = Object.entries(prev.lockedOutputs || {}).filter(([, v]) => v === 'held').map(([k]) => k);
+    if (!held.length) return {};
+    const lockedOutputs = { ...prev.lockedOutputs };
+    const frozenStates = { ...prev.frozenStates };
+    held.forEach(id => { delete lockedOutputs[id]; delete frozenStates[id]; });
+    return { lockedOutputs, frozenStates };
   };
 
   useEffect(() => {
@@ -2186,10 +2507,28 @@ function ControlPanel() {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement) return;
 
-      // Global Production Hotkeys
-      if (e.key === 'F1' || ((e.key === 'b' || e.key === 'B') && !e.ctrlKey && !e.metaKey)) {
+      // Ctrl+O: start / stop presenting (the screens on or off)
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.code === 'KeyO') {
         e.preventDefault();
         togglePresenting();
+        return;
+      }
+      // Pause / unpause an output: Ctrl+1, Ctrl+2… (normal outputs in order), Ctrl+` (stage screens).
+      // A paused output keeps what it shows; what is sent next goes only to the others until it is unpaused.
+      // (Screens are switched off only with the Presenting button, never by a key.)
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && (/^Digit[1-9]$/.test(e.code) || e.code === 'Backquote')) {
+        e.preventDefault();
+        const outs = (liveState.settings?.outputs || globalSettings.outputs) as OutputSettings[];
+        const targets = e.code === 'Backquote'
+          ? outs.filter(o => isStageOutput(o))
+          : [outs.filter(o => !isStageOutput(o))[Number(e.code.slice(5)) - 1]].filter(Boolean);
+        if (!targets.length) {
+          setUndoToast({ text: e.code === 'Backquote' ? 'There is no stage screen to pause.' : `There is no Output ${e.code.slice(5)} to pause.`, at: Date.now(), kind: 'info', noUndo: true });
+          return;
+        }
+        const pausing = liveState.lockedOutputs?.[targets[0].id] !== true;
+        targets.forEach(o => { if ((liveState.lockedOutputs?.[o.id] === true) !== pausing) toggleLockOutput(o.id); });
+        setUndoToast({ text: `${targets.map(o => o.name).join(', ')} ${pausing ? 'paused: what you send next won’t go there' : 'unpaused: keeps its picture until you send the next slide'}`, at: Date.now(), kind: 'info', noUndo: true });
         return;
       }
       if (e.key === 'F2' || ((e.key === 'c' || e.key === 'C') && !e.ctrlKey && !e.metaKey)) {
@@ -2197,14 +2536,21 @@ function ControlPanel() {
         toggleClearText();
         return;
       }
-      if (e.key === 'F3' || ((e.key === 'l' || e.key === 'L') && !e.ctrlKey && !e.metaKey)) {
+      if (e.key === 'F1') {
         e.preventDefault();
         setGlobalBackground(null);
+        return;
+      }
+      // Overlays come off only with F3 (Clear all leaves them)
+      if (e.key === 'F3') {
+        e.preventDefault();
+        clearOverlays();
         return;
       }
       if (e.key === 'Escape') {
         e.preventDefault();
         clearAll();
+        setGridChosen(prev => prev.size ? new Set() : prev);
         return;
       }
 
@@ -2442,8 +2788,12 @@ function ControlPanel() {
 
   const openProjector = async (outputId: string) => {
     const config = liveState.settings?.outputs.find(o => o.id === outputId);
+    if (config?.outputType === 'ndi') {
+      setUndoToast({ text: isTauri() ? `${config.name} is sent over NDI automatically while it's enabled. Its status is in Settings → Outputs.` : 'NDI outputs are sent by the FlowShow desktop app.', at: Date.now(), kind: 'info', noUndo: true });
+      return;
+    }
     if (!config?.displayId) {
-        alert(`You must select a display screen for ${config?.name || outputId} before it can go LIVE. Please check Settings > Outputs.`);
+        void showMessage(`Choose a screen for ${config?.name || outputId} first: Settings → Outputs → Target display.`);
         return;
     }
 
@@ -2465,10 +2815,18 @@ function ControlPanel() {
 
     if (isTauri()) {
       try {
-        await openOutputOnMonitor(label, url, config.name || outputId, config.displayId);
+        const name = config.name || outputId;
+        const result = await openOutputOnMonitor(label, url, name, config.displayId, () => askConfirm(
+          `${name} will fill the screen FlowShow is on, so you won't see FlowShow until you close it.\n\nPress Esc (or click the output) to close it again.\n\nOpen it anyway?`,
+          { okLabel: 'Open it' }
+        ));
+        // A black screen with no explanation: say why when nothing is being presented
+        if (result === 'opened' && !liveState.isPresenting) {
+          setUndoToast({ text: `${name} is open. It stays black until you start presenting (the Presenting button, top right).`, at: Date.now(), kind: 'info', noUndo: true });
+        }
         return;
       } catch (err) {
-        alert(`Couldn't open ${config.name || outputId} on "${config.displayId}": ${err instanceof Error ? err.message : String(err)}`);
+        void showMessage(`Couldn't open ${config.name || outputId} on "${config.displayId}": ${err instanceof Error ? err.message : String(err)}`);
         return;
       }
     }
@@ -2477,14 +2835,127 @@ function ControlPanel() {
   };
 
   const goLive = (slide: SlideDefinition) => {
+      // A slide with background media (its own or carried on from an earlier slide) changes the background
+      applySlideBackground(slide.id);
       // Text boxes added in Design mode wait off the screens until their slide goes live
       const released = releaseWaitingBoxes(slide);
       if (released !== slide) updateSlidesById(new Set([slide.id]), releaseWaitingBoxes);
-      setLiveState(prev => ({ ...prev, slide: released, clearText: false, clearedOutputs: {} }));
+      setLiveState(prev => ({ ...prev, ...releaseHeld(prev), slide: released, clearText: false, clearedOutputs: {} }));
       setPreviewSlide(released);
   };
   
-  const setGlobalBackground = (url: string | null, type: 'image' | 'video' = 'image') => setLiveState(prev => ({ ...prev, globalBackground: url ? { url, type } : null, clearedOutputs: {} }));
+  const setGlobalBackground = (url: string | null, type: 'image' | 'video' = 'image') => setLiveState(prev => ({ ...prev, ...releaseHeld(prev), globalBackground: url ? { url, type } : null, clearedOutputs: {} }));
+
+  // ─── Slide backgrounds (drop media from the Media tab onto a slide) ───
+  /** The slides a slide belongs to (the open setlist item's, or its song's) */
+  const slideListOf = (slideId: string): SlideDefinition[] | null => {
+    const shown = getShownSlides().slides;
+    if (shown.some(s => s.id === slideId)) return shown;
+    return songsList.find(song => song.slides.some(s => s.id === slideId))?.slides || null;
+  };
+  /** Change slides in the song library and in every setlist that has a copy of them (by slide id) */
+  const updateSlidesEverywhere = (ids: Set<string>, fn: (s: SlideDefinition) => SlideDefinition) => {
+    updateSlidesById(ids, fn);
+    setProjectsState(prev => {
+      let changed = false;
+      const projects = prev.projects.map(p => {
+        if (!p.items.some(it => it.slides?.some(s => ids.has(s.id)))) return p;
+        changed = true;
+        return { ...p, items: p.items.map(it => it.slides?.some(s => ids.has(s.id)) ? { ...it, slides: it.slides.map(s => ids.has(s.id) ? fn(s) : s) } : it) };
+      });
+      return changed ? { ...prev, projects } : prev;
+    });
+  };
+  /** Take all media off slides: their background media and the pictures/videos added in Design mode (every screen) */
+  const removeSlideMedia = (ids: string[]) => {
+    if (!ids.length) return;
+    updateSlidesEverywhere(new Set(ids), s => {
+      const { background: _bg, ...rest } = s;
+      let out: SlideDefinition = rest;
+      for (const [outputId, d] of Object.entries(s.designs || {})) {
+        if (d.media?.length) { const { media: _m, ...d2 } = d; out = withDesign(out, outputId, d2); }
+      }
+      return out;
+    });
+    setUndoToast({ text: `Media removed from ${ids.length === 1 ? 'the slide' : `${ids.length} slides`}`, at: Date.now(), kind: 'info', noUndo: true });
+  };
+  const setSlideBackground = (slideId: string, background: SlideBackground | undefined) =>
+    updateSlidesEverywhere(new Set([slideId]), s => {
+      const { background: _old, ...rest } = s;
+      return background ? { ...rest, background } : rest;
+    });
+  /** Put the slide's background on the screens (nothing changes when the song has none up to this slide) */
+  const applySlideBackground = (slideId: string) => {
+    const slides = slideListOf(slideId);
+    if (!slides) return;
+    const at = slides.findIndex(s => s.id === slideId);
+    const entry = at >= 0 ? slideBackgrounds(slides)[at] : null;
+    if (!entry) return;
+    // (Only this slide's own media: the background then stays until something replaces it)
+    const { bg } = entry;
+    const show = (url: string) => setLiveState(prev => prev.globalBackground?.url === url ? prev : { ...prev, globalBackground: { url, type: bg.type, fileName: bg.name } });
+    if (bg.ref) {
+      // From an added folder: find the file there again (a link from an earlier session no longer works)
+      const ref = bg.ref;
+      void resolveMediaRef(ref).then(url => {
+        if (!url) { setUndoToast({ text: `Couldn't show the background "${bg.name || 'media'}": the folder "${ref.folder}" isn't added, or the file was moved`, at: Date.now(), kind: 'error' }); return; }
+        show(url);
+        // Remember the working link so the slide cards can show it
+        const owner = slides[at];
+        if (owner?.background && owner.background.url !== url) setSlideBackground(owner.id, { ...owner.background, url });
+      });
+      return;
+    }
+    show(bg.url);
+  };
+  /** Media dropped on a slide card: it becomes the background from that slide on */
+  const dropMediaOnSlide = (e: React.DragEvent, slide: SlideDefinition | undefined) => {
+    const raw = e.dataTransfer.getData(DRAG_MEDIA);
+    if (!raw || !slide) return false;
+    try {
+      const m = JSON.parse(raw) as { name?: string; url: string; type: 'image' | 'video'; ref?: SlideBackground['ref'] };
+      if (!m.url) return false;
+      setSlideBackground(slide.id, { url: m.url, type: m.type === 'video' ? 'video' : 'image', name: m.name, ref: m.ref });
+      setUndoToast({ text: `"${m.name || 'Media'}" added to this slide: it goes on when you select the slide`, at: Date.now(), kind: 'info', noUndo: true });
+      // Already on the screens: the background changes now
+      if (liveState.slide?.id === slide.id) setTimeout(() => applySlideBackground(slide.id), 0);
+    } catch { return false; }
+    return true;
+  };
+  const isMediaDrag = (e: React.DragEvent) => Array.from(e.dataTransfer.types || []).includes(DRAG_MEDIA);
+
+  // ─── Marking several slides on the main grid ───
+  /** Ctrl+click marks/unmarks a slide, Shift+click marks a run of slides; a plain click unmarks all and goes live */
+  const clickGridSlide = (e: React.MouseEvent, slides: SlideDefinition[], i: number) => {
+    const slide = slides[i];
+    if (e.ctrlKey || e.metaKey) {
+      setGridChosen(prev => { const next = new Set(prev); if (next.has(slide.id)) next.delete(slide.id); else next.add(slide.id); return next; });
+      gridAnchor.current = i;
+      return;
+    }
+    if (e.shiftKey) {
+      const from = gridAnchor.current ?? slides.findIndex(s => s.id === (previewSlide?.id || liveState.slide?.id));
+      const a = from >= 0 ? from : i;
+      setGridChosen(new Set(slides.slice(Math.min(a, i), Math.max(a, i) + 1).map(s => s.id)));
+      return;
+    }
+    gridAnchor.current = i;
+    setGridChosen(prev => prev.size ? new Set() : prev);
+    if (!slide.disabled) { setPreviewSlide(slide); goLive(slide); }
+  };
+  /** The slides a right-click acts on: all marked slides when the one clicked is marked, otherwise just that one */
+  const gridMenuTargets = (index: number): SlideDefinition[] => {
+    const slides = getShownSlides().slides;
+    const s = slides[index];
+    if (!s) return [];
+    return gridChosen.has(s.id) && gridChosen.size > 1 ? slides.filter(x => gridChosen.has(x.id)) : [s];
+  };
+  const rightClickGridSlide = (e: React.MouseEvent, i: number) => {
+    const s = getShownSlides().slides[i];
+    // Right-clicking a slide that isn't marked works on that slide alone
+    if (s && !gridChosen.has(s.id) && gridChosen.size) setGridChosen(new Set());
+    handleContextMenu(e, 'slide', i);
+  };
 
   const handleJumpToVerse = (slide: SlideDefinition, isDoubleClick: boolean = false) => {
       if (activeBibleData && slide.source) {
@@ -2753,11 +3224,11 @@ function ControlPanel() {
   };
 
   const toggleClearText = () => {
-     setLiveState(prev => ({ ...prev, clearText: !prev.clearText }));
+     setLiveState(prev => ({ ...prev, ...releaseHeld(prev), clearText: !prev.clearText }));
      setPreviewSlide(null);
   };
   const clearAll = () => {
-     setLiveState(prev => ({ ...prev, slide: undefined, globalBackground: null, clearText: false, clearedOutputs: {} }));
+     setLiveState(prev => ({ ...prev, ...releaseHeld(prev), slide: undefined, globalBackground: null, clearText: false, clearedOutputs: {} }));
      setPreviewSlide(null);
   };
 
@@ -3319,7 +3790,7 @@ function ControlPanel() {
            {/* Slide Grid */}
            <div className="flex-1 overflow-y-auto p-3 bg-[#09090B] custom-scrollbar z-0">
               <div className="grid grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 2xl:grid-cols-10 gap-3 content-start">
-                 {activeSong.slides.map((slide, i) => {
+                 {(() => { const slideBgs = slideBackgrounds(activeSong.slides); return activeSong.slides.map((slide, i) => {
                     const isLive = liveState.slide?.id === slide.id;
                     const isPreview = previewSlide?.id === slide.id;
                     
@@ -3330,8 +3801,8 @@ function ControlPanel() {
                     return (
                        <div 
                          key={slide.id} draggable
-                         onDragStart={(e) => { setDraggedSlideIndex(i); e.dataTransfer.effectAllowed = 'move'; }} onDragOver={(e) => { e.preventDefault(); setDragOverSlideIndex(i); }} onDrop={(e) => { e.preventDefault(); handleDropSlide(i); }}
-                         onContextMenu={(e) => handleContextMenu(e, 'slide', i)} onClick={() => { if (!slide.disabled) { setPreviewSlide(slide); goLive(slide); } }}
+                         onDragStart={(e) => { setDraggedSlideIndex(i); e.dataTransfer.effectAllowed = 'move'; }} onDragOver={(e) => { e.preventDefault(); if (isMediaDrag(e)) e.dataTransfer.dropEffect = 'copy'; setDragOverSlideIndex(i); }} onDragLeave={() => setDragOverSlideIndex(prev => prev === i ? null : prev)} onDrop={(e) => { e.preventDefault(); if (dropMediaOnSlide(e, slide)) { setDraggedSlideIndex(null); setDragOverSlideIndex(null); return; } handleDropSlide(i); }}
+                         onContextMenu={(e) => rightClickGridSlide(e, i)} onClick={(e) => clickGridSlide(e, activeSong.slides, i)} data-grid-slide={slide.id}
                          className={`group aspect-[16/9] rounded-xl cursor-pointer flex flex-col justify-center items-center text-center transition-all border-2 relative select-none overflow-hidden
                            ${slide.disabled ? 'opacity-30 cursor-not-allowed' : ''} ${isLive ? 'border-red-500 shadow-[0_0_20px_rgba(239,68,68,0.2)]' : isPreview ? 'border-blue-500 shadow-[0_0_20px_rgba(59,130,246,0.15)]' : isNextLogical ? 'border-dashed border-white/30 bg-[#0a0a0a]' : 'bg-[#030303] border-white/5 hover:border-white/20 shadow-lg'} ${dragOverSlideIndex === i ? 'border-dashed border-blue-400 opacity-70' : ''}
                          `}
@@ -3340,11 +3811,32 @@ function ControlPanel() {
                             <SmartTextLayout text={slide.text} source={slide.source} type={slide.type} styleOverrides={applyGlobalStyles(slide, liveState.settings?.outputs.find(o => o.id === 'main'), liveState.settings)} />
                          </FixedStage>
                          
+                         {/* Background media: this slide's own (from here on), or carried on from an earlier slide */}
+                         {slideBgs[i] && (
+                           <>
+                             {slideBgs[i]!.bg.type === 'image' && (
+                               <img src={slideBgs[i]!.bg.url} alt="" draggable={false} className={`absolute inset-0 w-full h-full object-cover pointer-events-none ${slideBgs[i]!.own ? 'opacity-50' : 'opacity-25'}`} onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }} />
+                             )}
+                             <div
+                               className={`absolute bottom-1.5 left-1.5 z-10 max-w-[85%] flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-semibold border backdrop-blur-sm ${slideBgs[i]!.own ? 'bg-emerald-600/80 border-emerald-400/40 text-white' : 'bg-black/60 border-white/10 text-neutral-400'}`}
+                               title={`Background media: ${slideBgs[i]!.bg.name || 'media'}. Selecting this slide puts it on, and it stays on until another background replaces it. Right-click → Remove media.`}
+                               data-slide-bg={slideBgs[i]!.own ? 'own' : 'carried'}
+                             >
+                               {slideBgs[i]!.bg.type === 'video' ? <Video size={9} className="shrink-0" /> : <ImageIcon size={9} className="shrink-0" />}
+                               {slideBgs[i]!.own && <span className="truncate">{slideBgs[i]!.bg.name || 'Background'}</span>}
+                             </div>
+                           </>
+                         )}
+                         {gridChosen.has(slide.id) && (
+                           <div className="absolute inset-0 z-20 pointer-events-none rounded-[10px] ring-2 ring-inset ring-sky-400 bg-sky-400/10" data-grid-chosen>
+                             <span className="absolute top-1.5 right-1.5 w-4 h-4 rounded-full bg-sky-500 text-white flex items-center justify-center"><Check size={10} /></span>
+                           </div>
+                         )}
                          {/* Slide Number Badge */}
                          <div className="absolute top-3 left-3 text-[10px] font-bold text-neutral-500 bg-[#09090B]/80 px-2 py-1 rounded shadow-sm border border-white/10 backdrop-blur-md z-10">{i + 1}</div>
                        </div>
                     );
-                 })}
+                 }); })()}
               </div>
            </div>
         </div>
@@ -3402,7 +3894,7 @@ function ControlPanel() {
                     <div className="flex items-center gap-2">
                         <button 
                           onClick={() => toggleLockOutput('main')} 
-                          className={`text-[10px] font-bold uppercase tracking-widest transition-colors flex items-center gap-1 ${liveState.lockedOutputs?.['main'] ? 'text-red-500' : 'text-neutral-500 hover:text-white'}`}
+                          className={`text-[10px] font-bold uppercase tracking-widest transition-colors flex items-center gap-1 ${liveState.lockedOutputs?.['main'] === true ? 'text-red-500' : 'text-neutral-500 hover:text-white'}`}
                           title="Lock Screen"
                         >
                           Lock
@@ -3478,6 +3970,7 @@ function ControlPanel() {
               <div className="w-48 xl:w-56 2xl:w-64 flex flex-col gap-2 shrink-0 h-full overflow-y-auto custom-scrollbar pr-1">
                  {otherOutputs.map(out => {
                     const isOutLocked = !!liveState.lockedOutputs?.[out.id];
+                    const isOutPaused = liveState.lockedOutputs?.[out.id] === true;
                     const isOutCleared = !!liveState.clearedOutputs?.[out.id];
 
                     return (
@@ -3485,7 +3978,7 @@ function ControlPanel() {
                            <div className="flex justify-between items-center mb-1.5 px-1">
                               <span className="text-[10px] uppercase font-bold tracking-widest text-[#a1a1aa]">{out.name}</span>
                               <div className="flex items-center gap-1">
-                                 <button onClick={() => toggleLockOutput(out.id)} className={`text-[10px] uppercase font-bold tracking-widest px-1 ${isOutLocked ? 'text-red-500' : 'text-neutral-600 hover:text-white transition-colors'}`}>Lock</button>
+                                 <button onClick={() => toggleLockOutput(out.id)} className={`text-[10px] uppercase font-bold tracking-widest px-1 ${isOutPaused ? 'text-red-500' : 'text-neutral-600 hover:text-white transition-colors'}`}>{isOutPaused ? 'Paused' : 'Pause'}</button>
                                  <button onClick={() => toggleClearOutput(out.id)} className={`p-0.5 rounded transition-colors text-neutral-600 hover:text-white hover:bg-white/10 ${isOutCleared ? 'text-red-500' : ''}`}><EyeOff size={10} /></button>
                                  <button onClick={() => openProjector(out.id)} className="text-neutral-600 hover:text-white p-0.5 rounded hover:bg-white/10 transition-colors"><LaunchIcon size={10} /></button>
                               </div>
@@ -3551,7 +4044,7 @@ function ControlPanel() {
                                           {isOutCleared && (
                                              <div className="absolute inset-0 flex items-center justify-center bg-[#0a0a0a]/80 backdrop-blur-sm z-20"><span className="text-neutral-500 flex items-center gap-1"><EyeOff size={24}/></span></div>
                                           )}
-                                          {isOutLocked && (
+                                          {isOutPaused && (
                                              <div className="absolute inset-0 flex items-center justify-center bg-red-900/40 backdrop-blur-[2px] z-30"><Lock size={32} className="text-red-500 bg-black/60 p-2 rounded-full shadow-[0_0_15px_rgba(239,68,68,0.8)]" /></div>
                                           )}
                                           {liveState.isPresenting && !isOutCleared && !isOutLocked && (
@@ -3600,6 +4093,7 @@ function ControlPanel() {
 
   const renderOutputMonitorCard = (out: OutputSettings) => {
     const isOutLocked = !!liveState.lockedOutputs?.[out.id];
+    const isOutHeld = liveState.lockedOutputs?.[out.id] === 'held';
     const isOutCleared = !!liveState.clearedOutputs?.[out.id];
     const frozenState = liveState.frozenStates?.[out.id];
     const displaySlide = isOutLocked ? frozenState?.slide : liveState.slide;
@@ -3618,15 +4112,13 @@ function ControlPanel() {
           </div>
           <div className="flex items-center gap-1 shrink-0">
             {isStage && <span className="text-[9px] font-bold px-1 py-0.5 bg-amber-500/15 text-amber-400 rounded">STAGE</span>}
-            {out.outputType === 'ndi' && (
-              <span className="text-[9px] font-bold px-1 py-0.5 bg-purple-500/20 text-purple-400 rounded">NDI</span>
-            )}
+            {out.outputType === 'ndi' && <NdiBadge output={out as any} />}
           </div>
         </div>
         <div 
           onClick={() => openProjector(out.id)}
           className={`aspect-video w-full rounded-lg border-2 overflow-hidden relative bg-black cursor-pointer shadow-md transition-all ${
-            isLive ? 'border-pink-500 shadow-[0_0_12px_rgba(236,72,153,0.35)]' : 'border-white/10 hover:border-pink-500/50'
+            isLive ? 'border-pink-500 shadow-[0_0_12px_color-mix(in_srgb,var(--color-pink-500)_35%,transparent)]' : 'border-white/10 hover:border-pink-500/50'
           }`}
           title={`Click to launch ${out.name} projector window`}
         >
@@ -3644,6 +4136,7 @@ function ControlPanel() {
                 background={displayBg}
                 hideBackground={isOutCleared && out.id !== 'main'}
                 hideText={isOutCleared || !!displayClearText}
+                overlays={isOutLocked ? (frozenState?.overlays || []) : overlaysFor(globalSettings.overlays, liveState.overlays, out.id)}
                 muted
               />
             )}
@@ -3651,9 +4144,24 @@ function ControlPanel() {
             {isOutCleared && (
               <div className="absolute inset-0 flex items-center justify-center bg-black/60"><EyeOff size={16} className="text-neutral-500" /></div>
             )}
-            {isOutLocked && (
-              <div className="absolute inset-0 flex items-center justify-center bg-red-950/40"><Lock size={16} className="text-red-500" /></div>
+            {isOutHeld && (
+              <div className="absolute inset-0 z-30 pointer-events-none" data-output-held={out.id}>
+                <span className="absolute top-1 left-1 bg-white/90 text-black text-[8px] font-bold tracking-widest px-1 py-0.5 rounded" title="Unpaused: it keeps this picture until you send the next slide, background or clear">
+                  WAITS FOR NEXT SLIDE
+                </span>
+              </div>
             )}
+            {isOutLocked && !isOutHeld && (() => {
+              const normal = globalSettings.outputs.filter((o: OutputSettings) => !isStageOutput(o));
+              const key = isStage ? 'Ctrl+`' : normal.findIndex((o: OutputSettings) => o.id === out.id) >= 0 && normal.findIndex((o: OutputSettings) => o.id === out.id) < 9 ? `Ctrl+${normal.findIndex((o: OutputSettings) => o.id === out.id) + 1}` : '';
+              return (
+                <div className="absolute inset-0 ring-2 ring-inset ring-amber-500 z-30 pointer-events-none" data-output-paused={out.id}>
+                  <span className="absolute top-1 left-1 bg-amber-500 text-black text-[8px] font-bold tracking-widest px-1 py-0.5 rounded flex items-center gap-1">
+                    <Lock size={8} /> PAUSED{key ? ` · ${key}` : ''}
+                  </span>
+                </div>
+              );
+            })()}
             {isLive && (
               <div className="absolute top-1.5 right-1.5 bg-red-600 text-white text-[8px] tracking-widest font-bold px-1 py-0.5 rounded shadow z-30">LIVE</div>
             )}
@@ -3842,7 +4350,7 @@ function ControlPanel() {
             </div>
           ) : (
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 content-start">
-              {currentSlides.map((slide, i) => {
+              {(() => { const slideBgs = slideBackgrounds(currentSlides); return currentSlides.map((slide, i) => {
                 const isLive = liveState.slide?.id === slide.id;
                 const isPreview = previewSlide?.id === slide.id;
                 const currentSlideId = previewSlide?.id || liveState.slide?.id;
@@ -3857,20 +4365,17 @@ function ControlPanel() {
                   <div
                     draggable
                     onDragStart={(e) => { setDraggedSlideIndex(i); e.dataTransfer.effectAllowed = 'move'; }}
-                    onDragOver={(e) => { e.preventDefault(); setDragOverSlideIndex(i); }}
-                    onDrop={(e) => { e.preventDefault(); handleDropSlide(i); }}
-                    onContextMenu={(e) => handleContextMenu(e, 'slide', i)}
-                    onClick={() => {
-                      if (!slide.disabled) {
-                        setPreviewSlide(slide);
-                        goLive(slide);
-                      }
-                    }}
+                    onDragOver={(e) => { e.preventDefault(); if (isMediaDrag(e)) e.dataTransfer.dropEffect = 'copy'; setDragOverSlideIndex(i); }}
+                    onDragLeave={() => setDragOverSlideIndex(prev => prev === i ? null : prev)}
+                    onDrop={(e) => { e.preventDefault(); if (dropMediaOnSlide(e, slide)) { setDraggedSlideIndex(null); setDragOverSlideIndex(null); return; } handleDropSlide(i); }}
+                    onContextMenu={(e) => rightClickGridSlide(e, i)}
+                    onClick={(e) => clickGridSlide(e, currentSlides, i)}
+                    data-grid-slide={slide.id}
                     className={`group aspect-video rounded-xl cursor-pointer flex flex-col justify-center items-center text-center transition-all border-2 relative select-none overflow-hidden bg-black shadow-lg ${
                       slide.disabled ? 'opacity-30 cursor-not-allowed' : ''
                     } ${
                       isLive 
-                        ? 'border-pink-500 shadow-[0_0_20px_rgba(236,72,153,0.35)] ring-1 ring-pink-500' 
+                        ? 'border-pink-500 shadow-[0_0_20px_color-mix(in_srgb,var(--color-pink-500)_35%,transparent)] ring-1 ring-pink-500' 
                         : isPreview 
                         ? 'border-blue-500 shadow-[0_0_15px_rgba(59,130,246,0.25)]' 
                         : isNextLogical 
@@ -3887,6 +4392,27 @@ function ControlPanel() {
                       />
                     </FixedStage>
 
+                    {/* Background media: this slide's own (from here on), or carried on from an earlier slide */}
+                    {slideBgs[i] && (
+                      <>
+                        {slideBgs[i]!.bg.type === 'image' && (
+                          <img src={slideBgs[i]!.bg.url} alt="" draggable={false} className={`absolute inset-0 w-full h-full object-cover pointer-events-none ${slideBgs[i]!.own ? 'opacity-50' : 'opacity-25'}`} onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }} />
+                        )}
+                        <div
+                          className={`absolute bottom-1.5 left-1.5 z-10 max-w-[85%] flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-semibold border backdrop-blur-sm ${slideBgs[i]!.own ? 'bg-emerald-600/80 border-emerald-400/40 text-white' : 'bg-black/60 border-white/10 text-neutral-400'}`}
+                          title={`Background media: ${slideBgs[i]!.bg.name || 'media'}. Selecting this slide puts it on, and it stays on until another background replaces it. Right-click → Remove media.`}
+                          data-slide-bg={slideBgs[i]!.own ? 'own' : 'carried'}
+                        >
+                          {slideBgs[i]!.bg.type === 'video' ? <Video size={9} className="shrink-0" /> : <ImageIcon size={9} className="shrink-0" />}
+                          {slideBgs[i]!.own && <span className="truncate">{slideBgs[i]!.bg.name || 'Background'}</span>}
+                        </div>
+                      </>
+                    )}
+                    {gridChosen.has(slide.id) && (
+                      <div className="absolute inset-0 z-20 pointer-events-none rounded-[10px] ring-2 ring-inset ring-sky-400 bg-sky-400/10" data-grid-chosen>
+                        <span className="absolute top-1.5 right-1.5 w-4 h-4 rounded-full bg-sky-500 text-white flex items-center justify-center"><Check size={10} /></span>
+                      </div>
+                    )}
                     {/* Slide Number Badge */}
                     <div className="absolute top-2 left-2 z-10">
                       <span className="text-[10px] font-bold text-neutral-400 bg-black/80 px-1.5 py-0.5 rounded border border-white/10 backdrop-blur-sm">
@@ -3906,7 +4432,7 @@ function ControlPanel() {
                   )}
                   </div>
                 );
-              })}
+              }); })()}
             </div>
           )}
         </div>
@@ -3933,14 +4459,18 @@ function ControlPanel() {
   // Design mode works on the slide picked in its strip, otherwise it follows what's on air.
   // A Bible verse on air isn't a song slide: it is designed under "For scripture", so the lyrics side keeps the open song.
   const getDesignSlide = (outputId: string): SlideDefinition | null => {
+    // A song slide: in a show that is a song (not a declaration), and not a Bible verse
+    const isSongSlide = (sl: SlideDefinition | null | undefined): sl is SlideDefinition =>
+      !!sl && !sl.declaration && songsList.some(song => song.category !== 'Declarations' && song.slides.some(x => x.id === sl.id));
     const picked = findSlideById(designSlideId);
-    if (picked) return picked;
+    if (isSongSlide(picked)) return picked;
     const onAir = getOnAirSlide(outputId);
     const found = findSlideById(onAir?.id) || onAir;
-    if (found?.type === 'scripture' && !songsList.some(song => song.slides.some(s => s.id === found.id))) {
-      return songsList[activeItemIndex]?.slides?.[0] ?? null;
-    }
-    return found;
+    if (isSongSlide(found)) return found;
+    // Otherwise the open show if it's a song, else the first song
+    const open = songsList[activeItemIndex];
+    if (open && open.category !== 'Declarations' && open.slides?.length) return open.slides[0];
+    return songsList.find(song => song.category !== 'Declarations' && song.slides?.length)?.slides[0] ?? null;
   };
 
   // --- SCRIPTURE LOOK: each screen's scripture template, or its style's when the style sets one ---
@@ -3953,10 +4483,9 @@ function ControlPanel() {
   // Declarations: the style's template when the style sets one (it would win anyway), otherwise the screen's own
   const declarationSlotFor = (out: OutputSettings) => {
     const style = getStyleForOutput(out, globalSettings);
-    if (style?.declarationTemplateId || style?.lyricsTemplateId) {
-      return { style, templateId: style.declarationTemplateId || style.lyricsTemplateId! };
-    }
-    return { style: undefined, templateId: out.declarationTemplateId || out.defaultTemplateId || 'cinematic-ambient' };
+    // Declarations have their own template: the style's, else the screen's, else the ready-made one (never the lyrics one)
+    if (style?.declarationTemplateId) return { style, templateId: style.declarationTemplateId };
+    return { style: undefined, templateId: out.declarationTemplateId || DEFAULT_DECLARATION_TEMPLATE_ID };
   };
   const setDeclarationTemplateFor = (out: OutputSettings, templateId: string) => {
     const { style } = declarationSlotFor(out);
@@ -3970,6 +4499,10 @@ function ControlPanel() {
       ? { ...prev, styles: prev.styles.map(st => st.id === style.id ? { ...st, scriptureTemplateId: templateId } : st) }
       : { ...prev, outputs: prev.outputs.map(o => o.id === out.id ? { ...o, scriptureTemplateId: templateId } : o) });
   };
+
+  // One screen's background opacity (Design mode → Screen row), live on that screen only
+  const setOutputBackgroundOpacity = (outputId: string, v: number) =>
+    setGlobalSettings(prev => ({ ...prev, outputs: prev.outputs.map(o => o.id === outputId ? { ...o, backgroundOpacity: Math.round(v) } : o) }));
 
   const getOutputTemplateInfo = (outputId: string, slide: SlideDefinition | null): OutputTemplateInfo => {
     const out = globalSettings.outputs.find(o => o.id === outputId);
@@ -4036,6 +4569,7 @@ function ControlPanel() {
       return targets.reduce((acc, id) => withDesign(acc, id, {
         ...(acc.designs?.[id] || {}),
         customBoxes: source?.customBoxes,
+        media: source?.media,
         hideLyrics: source?.hideLyrics,
       }), s);
     });
@@ -4200,14 +4734,34 @@ function ControlPanel() {
     const status = {
       presenting: !!liveState.isPresenting,
       textCleared: !!(liveState.clearedOutputs?.[out.id] || liveState.clearText),
-      locked,
+      locked: liveState.lockedOutputs?.[out.id] === true,
     };
+
+    // Overlays: designed over what this screen shows now
+    if (designFor === 'overlay') {
+      const list = globalSettings.overlays || [];
+      const current = list.find(o => o.id === designOverlayId) || list[0];
+      const onAir = getOnAirSlide(out.id);
+      return (
+        <OverlayDesignWorkspace
+          overlays={list}
+          overlayId={current?.id || null}
+          onPick={setDesignOverlayId}
+          onChange={saveOverlay}
+          onNew={() => void createOverlay()}
+          isOn={!!current && (liveState.overlays || []).includes(current.id)}
+          onToggleOn={() => current && toggleOverlay(current.id)}
+          onDesignFor={setDesignFor}
+          renderUnder={() => <AudienceOutputContent output={out} settings={globalSettings} slide={onAir} background={background} muted />}
+        />
+      );
+    }
 
     // For scripture / declarations: the screen's template for them, designed with one on air (or a sample)
     if (designFor === 'scripture' || designFor === 'declaration') {
       const declaration = designFor === 'declaration';
       const slot = declaration ? declarationSlotFor(out) : scriptureSlotFor(out);
-      const template = getTemplateById(slot.templateId) || getTemplateById(declaration ? 'cinematic-ambient' : DEFAULT_SCRIPTURE_TEMPLATE_ID)!;
+      const template = getTemplateById(slot.templateId) || getTemplateById(declaration ? DEFAULT_DECLARATION_TEMPLATE_ID : DEFAULT_SCRIPTURE_TEMPLATE_ID)!;
       const onAir = getOnAirSlide(out.id);
       const openShow = songsList[activeItemIndex];
       const verse = declaration
@@ -4229,6 +4783,8 @@ function ControlPanel() {
           onUseTemplate={(templateId) => declaration ? setDeclarationTemplateFor(out, templateId) : setScriptureTemplateFor(out, templateId)}
           textHidden={style?.activeLayers.slide === false}
           styleName={style?.name}
+          backgroundOpacity={out.backgroundOpacity ?? 80}
+          onBackgroundOpacity={(v) => setOutputBackgroundOpacity(out.id, v)}
           status={status}
           verse={verse}
           verseOnAir={!!verse && verse.id === onAirId}
@@ -4255,6 +4811,9 @@ function ControlPanel() {
         templates={inlineTemplates}
         templateInfo={getOutputTemplateInfo(out.id, slide)}
         onAssignTemplate={(templateId) => handleAssignLiveTemplate(out.id, templateId, slide)}
+        isDeclarationSlide={!!slide?.declaration}
+        backgroundOpacity={out.backgroundOpacity ?? 80}
+        onBackgroundOpacity={(v) => setOutputBackgroundOpacity(out.id, v)}
         look={{
           global: { ...(resolved.styleOverrides?.global || {}) },
           layout: { x: 0.05, y: 0.05, width: 0.9, height: 0.9, ...(resolved.styleOverrides?.layout || {}) },
@@ -4267,6 +4826,7 @@ function ControlPanel() {
         onChangeDesign={(fn) => { if (slide) updateSlidesById(new Set([slide.id]), s => withDesign(s, out.id, fn(s.designs?.[out.id] || {}))); }}
         onCopyDesign={(toIds) => { if (slide) setDesignOn(toIds, slide.designs?.[out.id]); }}
         onResetDesign={(ids) => setDesignOn(ids, undefined)}
+        onRemoveMedia={removeSlideMedia}
         textHidden={style?.activeLayers.slide === false}
         status={status}
         slideIsOnAir={!!slide && slide.id === onAirId}
@@ -4281,6 +4841,7 @@ function ControlPanel() {
             muted
             scrollPreviewPos={scrollPreviewPos}
             highlightWordIndex={highlightWordIndex}
+            overlays={locked ? (liveState.frozenStates?.[out.id]?.overlays || []) : overlaysFor(globalSettings.overlays, liveState.overlays, out.id)}
             designPreview
           />
         )}
@@ -4448,7 +5009,7 @@ function ControlPanel() {
           <button onClick={handlePrevSlide} className="p-1 hover:text-white hover:bg-white/10 rounded transition-colors" title="Previous Slide (ArrowLeft)"><ChevronLeft size={16} /></button>
           <button onClick={handleNextSlide} className="p-1 hover:text-white hover:bg-white/10 rounded transition-colors" title="Next Slide (ArrowRight)"><ChevronRight size={16} /></button>
           <button onClick={() => { if (previewSlide) goLive(previewSlide); }} className="p-1 hover:text-white hover:bg-white/10 rounded transition-colors" title="Replay Current Slide"><RotateCcw size={14} /></button>
-          <button onClick={() => toggleLockOutput('main')} className={`p-1 rounded transition-colors ${liveState.lockedOutputs?.['main'] ? 'text-red-500 bg-red-500/10' : 'hover:text-white hover:bg-white/10'}`} title="Freeze Output"><Lock size={14} /></button>
+          <button onClick={() => toggleLockOutput('main')} className={`p-1 rounded transition-colors ${liveState.lockedOutputs?.['main'] === true ? 'text-red-500 bg-red-500/10' : 'hover:text-white hover:bg-white/10'}`} title="Pause Output 1 (Ctrl+1): it keeps what it shows while you send to the others"><Lock size={14} /></button>
           <button onClick={togglePresenting} className={`p-1 rounded transition-colors ${liveState.isPresenting ? 'text-pink-500 bg-pink-500/10' : 'hover:text-white hover:bg-white/10'}`} title="Master Live Toggle"><Eye size={15} /></button>
         </div>
 
@@ -4465,9 +5026,9 @@ function ControlPanel() {
 
         {/* Layer Clear Icons Row */}
         <div className="px-4 py-2 border-b border-[#262635] flex items-center justify-between text-neutral-400 shrink-0 bg-[#0d0d12]">
-          <button onClick={() => setGlobalBackground(null)} title="Clear Background" className={`p-1.5 rounded transition-colors ${!liveState.globalBackground ? 'text-neutral-600' : 'text-neutral-300 hover:text-pink-400 hover:bg-white/5'}`}><ImageIcon size={15} /></button>
+          <button onClick={() => setGlobalBackground(null)} title="Clear Background (F1)" className={`p-1.5 rounded transition-colors ${!liveState.globalBackground ? 'text-neutral-600' : 'text-neutral-300 hover:text-pink-400 hover:bg-white/5'}`}><ImageIcon size={15} /></button>
           <button onClick={toggleClearText} title="Clear Slide Text" className={`p-1.5 rounded transition-colors ${liveState.clearText ? 'text-pink-500 bg-pink-500/20 font-bold' : 'text-neutral-300 hover:text-pink-400 hover:bg-white/5'}`}><FileText size={15} /></button>
-          <button title="Clear Overlays" className="p-1.5 rounded text-neutral-400 hover:text-pink-400 hover:bg-white/5 transition-colors"><Layers size={15} /></button>
+          <button onClick={clearOverlays} title="Clear Overlays (F3)" data-toolbar-clear-overlays className={`p-1.5 rounded transition-colors ${liveState.overlays?.length ? 'text-neutral-300 hover:text-pink-400 hover:bg-white/5' : 'text-neutral-600'}`}><Layers size={15} /></button>
           <button onClick={toggleMute} title="Mute Audio" className={`p-1.5 rounded transition-colors ${isVideoMuted ? 'text-neutral-600' : 'text-neutral-300 hover:text-pink-400 hover:bg-white/5'}`}><Music size={15} /></button>
           <button title="Timer" className="p-1.5 rounded text-neutral-400 hover:text-pink-400 hover:bg-white/5 transition-colors"><Clock size={15} /></button>
         </div>
@@ -4481,9 +5042,11 @@ function ControlPanel() {
         {appMode === 'design' && designFor !== 'lyrics' ? (
           // Designing a template (scripture or declarations): no groups here, so the panel says what is being designed
           <div className="flex-1 p-3 space-y-1.5 text-[11px] leading-relaxed" data-scripture-panel>
-            <div className="text-[10px] uppercase font-bold text-neutral-500">{designFor === 'scripture' ? 'Scripture' : 'Declarations'}</div>
+            <div className="text-[10px] uppercase font-bold text-neutral-500">{designFor === 'scripture' ? 'Scripture' : designFor === 'overlay' ? 'Overlays' : 'Declarations'}</div>
             <p className="text-neutral-400">{designFor === 'scripture'
               ? 'Scripture has no groups. Here you design how every Bible verse and its reference look on the screen.'
+              : designFor === 'overlay'
+              ? 'Here you design an overlay: pictures, videos and text that stay on the screens while slides and backgrounds change. Switch overlays on and off in the Overlays tab; F3 takes them all off.'
               : 'Here you design the Declarations template: how the slides of every Declaration show look on the screen.'}</p>
           </div>
         ) : (<>
@@ -4560,9 +5123,11 @@ function ControlPanel() {
             {[
               { id: 'shows', label: 'Shows', icon: FileText },
               { id: 'media', label: 'Media', icon: ImageIcon },
+              { id: 'overlays', label: 'Overlays', icon: Layers },
               { id: 'templates', label: 'Templates', icon: Sparkles },
               { id: 'scripture', label: 'Scripture', icon: BookOpen },
-              // hidden until needed: audio, overlays, calendar, functions
+              { id: 'timers', label: 'Timers', icon: TimerIcon },
+              // hidden until needed: audio, calendar, functions
             ].map(tab => {
               const Icon = tab.icon;
               const isActive = bottomTab === tab.id;
@@ -4662,9 +5227,9 @@ function ControlPanel() {
               </button>
 
               <button 
-                onClick={() => {
-                  const cat = prompt('New Category Name:');
-                  if (cat) alert(`Category created: ${cat}`);
+                onClick={async () => {
+                  const cat = await askText('Name for the new category', '', { okLabel: 'Create' });
+                  if (cat) void showMessage(`Category "${cat}" created.`);
                 }}
                 className="mt-3 text-xs text-pink-400 hover:text-pink-300 flex items-center gap-1 px-1 font-semibold transition-colors"
               >
@@ -4795,6 +5360,34 @@ function ControlPanel() {
         ) : bottomTab === 'audio' ? (
           <div className="flex-1 min-h-0 bg-[#0d0d12]">
             <AudioModule onVerseDetected={handleVerseDetected} />
+          </div>
+        ) : bottomTab === 'overlays' ? (
+          <div className="flex-1 min-h-0 bg-[#0d0d12]">
+            <OverlaysPanel
+              overlays={globalSettings.overlays || []}
+              groups={globalSettings.overlayGroups || []}
+              activeIds={liveState.overlays || []}
+              screens={globalSettings.outputs.filter(o => !isStageOutput(o)).map(o => ({ id: o.id, name: o.name }))}
+              onChange={setOverlays}
+              onChangeGroups={(overlayGroups) => setGlobalSettings(prev => ({ ...prev, overlayGroups }))}
+              onToggle={toggleOverlay}
+              onClearAll={clearOverlays}
+              onEdit={editOverlay}
+            />
+          </div>
+        ) : bottomTab === 'timers' ? (
+          <div className="flex-1 min-h-0 bg-[#0d0d12]">
+            <TimersPanel
+              presets={globalSettings.timerPresets ?? DEFAULT_TIMER_PRESETS}
+              onChangePresets={(timerPresets) => setGlobalSettings(prev => ({ ...prev, timerPresets }))}
+              timer={liveState.timer}
+              onStart={startTimer}
+              onPauseResume={pauseResumeTimer}
+              onStop={stopTimer}
+              onAdjust={adjustTimer}
+              flicker={globalSettings.timeUpFlicker !== false}
+              onFlicker={setTimeUpFlicker}
+            />
           </div>
         ) : bottomTab === 'scripture' ? (
           <div className="flex-1 min-h-0 bg-[#0d0d12]">
@@ -4940,13 +5533,13 @@ function ControlPanel() {
               profiles={profiles}
               activeId={activeProfileId}
               onSwitch={(id) => switchProfile(id, globalSettings)}
-              onDuplicate={() => {
+              onDuplicate={async () => {
                 const current = profiles.find(p => p.id === activeProfileId);
-                const name = window.prompt('Name for the copy (it becomes the profile in use, ready to change)', `${current?.name || 'Main'} (copy)`)?.trim();
+                const name = await askText('Name for the copy (it becomes the profile in use, ready to change)', `${current?.name || 'Main'} (copy)`, { okLabel: 'Make copy' });
                 if (name) { profilesApi.onCreate(name, true, globalSettings); setUndoToast({ text: `Profile "${name}" in use (a copy of "${current?.name || 'Main'}")`, at: Date.now(), kind: 'info', noUndo: true }); }
               }}
-              onNew={() => {
-                const name = window.prompt('Name for the new profile (FlowShow\u2019s starting setup)', 'New venue')?.trim();
+              onNew={async () => {
+                const name = await askText('Name for the new profile (FlowShow\u2019s starting setup)', 'New venue', { okLabel: 'Create' });
                 if (name) profilesApi.onCreate(name, false, globalSettings);
               }}
               onExport={() => profilesApi.onExport(activeProfileId, globalSettings)}
@@ -4994,7 +5587,7 @@ function ControlPanel() {
         <div className="flex items-center gap-2">
           {/* Remote / Squiggle icon */}
           <button 
-            onClick={() => alert('FlowShow Remote is connected and listening.')}
+            onClick={() => void showMessage('FlowShow Remote is connected and listening.')}
             className="p-1 text-pink-400 hover:text-pink-300 transition-colors" 
             title="Remote Connection"
           >
@@ -5016,19 +5609,10 @@ function ControlPanel() {
             className={`p-1 rounded transition-colors ${
               liveState.isPresenting ? 'text-red-500 animate-pulse' : 'text-neutral-400 hover:text-white'
             }`}
-            title={liveState.isPresenting ? 'Output LIVE (Presenting)' : 'Output Offline'}
+            title={liveState.isPresenting ? 'Presenting: click (or Ctrl+O) to turn the screens off' : 'Not presenting: click (or Ctrl+O) to turn the screens on'}
           >
             <MonitorPlay size={16} />
           </button>
-
-          <div className="w-px h-3.5 bg-white/10 mx-1" />
-
-          {/* Window Buttons */}
-          <div className="flex items-center text-neutral-500">
-            <button className="p-1 hover:text-white transition-colors"><Minus size={13} /></button>
-            <button className="p-1 hover:text-white transition-colors"><Square size={11} /></button>
-            <button className="p-1 hover:text-red-400 transition-colors"><X size={13} /></button>
-          </div>
         </div>
       </header>
 
@@ -5066,6 +5650,33 @@ function ControlPanel() {
         {renderBottomBrowser()}
       </div>
 
+      {/* FlowShow's own dialogs (names, yes / no questions, messages) */}
+      <AppDialogHost />
+
+      {/* Saved export: where it is */}
+      {savedFile && (
+        <div className="fixed bottom-5 right-5 z-[200] w-[380px] rounded-xl border border-white/10 bg-[#18181b] shadow-2xl p-4" role="status" data-saved-file>
+          <div className="flex items-start gap-3">
+            <Check size={18} className="text-emerald-400 shrink-0 mt-0.5" />
+            <div className="min-w-0 flex-1">
+              <div className="text-sm font-semibold text-white truncate" title={savedFile.name}>Saved {savedFile.name}</div>
+              <div className="text-[11px] text-neutral-400 mt-0.5 break-all" data-saved-path>{savedFile.path.replace(/[\\/][^\\/]+$/, '')}</div>
+            </div>
+            <button type="button" onClick={() => setSavedFile(null)} className="p-1 rounded text-neutral-500 hover:text-white hover:bg-white/10" title="Close"><X size={14} /></button>
+          </div>
+          <div className="mt-3 flex justify-end">
+            <button
+              type="button"
+              onClick={() => revealFile(savedFile.path).catch(err => toast(String(err), true))}
+              className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-pink-600 hover:bg-pink-500 text-white flex items-center gap-1.5"
+              data-show-in-folder
+            >
+              <Folder size={13} /> Show in folder
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* CONTEXT MENUS */}
       {contextMenu && (
         <div className="fixed z-50 bg-[#18181B] border border-white/10 rounded-lg shadow-2xl overflow-hidden py-1.5 w-48 backdrop-blur-xl" style={{ top: contextMenu.y, left: contextMenu.x }} onClick={(e) => e.stopPropagation()}>
@@ -5074,6 +5685,15 @@ function ControlPanel() {
                <button className="w-full text-left px-4 py-2 hover:bg-white/5 text-neutral-300 hover:text-white text-sm transition-colors flex items-center gap-2" onClick={() => { openDesign(getShownSlides().slides[contextMenu.id as number]?.id ?? null); setContextMenu(null); }}><Edit2 size={14}/> Edit</button>
                <button className="w-full text-left px-4 py-2 hover:bg-white/5 text-neutral-300 hover:text-white text-sm transition-colors flex items-center gap-2" onClick={() => { handleDuplicateSlide(contextMenu.id as number); setContextMenu(null); }}><Copy size={14}/> Duplicate</button>
                <button className="w-full text-left px-4 py-2 hover:bg-white/5 text-neutral-300 hover:text-white text-sm transition-colors flex items-center gap-2" onClick={() => { handleSplitSlide(contextMenu.id as number); setContextMenu(null); }}><Split size={14}/> Split</button>
+               {(() => {
+                 const targets = gridMenuTargets(contextMenu.id as number);
+                 const withMedia = targets.filter(slideHasMedia);
+                 return withMedia.length > 0 && (
+                   <button className="w-full text-left px-4 py-2 hover:bg-white/5 text-neutral-300 hover:text-white text-sm transition-colors flex items-center gap-2" data-remove-slide-media onClick={() => { removeSlideMedia(withMedia.map(s => s.id)); setGridChosen(new Set()); setContextMenu(null); }}>
+                     <ImageIcon size={14}/> Remove media{targets.length > 1 ? ` (${withMedia.length} slide${withMedia.length === 1 ? '' : 's'})` : ''}
+                   </button>
+                 );
+               })()}
                <div className="h-px w-full bg-white/5 my-1" />
                <button className="w-full text-left px-4 py-2 hover:bg-white/5 text-neutral-300 hover:text-white text-sm transition-colors flex items-center gap-2" onClick={() => { handleRemoveTemplate('slide', contextMenu.id as number); setContextMenu(null); }}><X size={14}/> Remove template (this slide)</button>
                <button className="w-full text-left px-4 py-2 hover:bg-white/5 text-neutral-300 hover:text-white text-sm transition-colors flex items-center gap-2" onClick={() => { handleRemoveTemplate('song', contextMenu.id as number); setContextMenu(null); }}><X size={14}/> Remove template (whole song)</button>
@@ -5082,13 +5702,13 @@ function ControlPanel() {
              </>
           ) : (
             <>
-               <button className="w-full text-left px-4 py-2 hover:bg-white/5 text-neutral-300 hover:text-white text-sm transition-colors flex items-center gap-2" onClick={() => {
+               <button className="w-full text-left px-4 py-2 hover:bg-white/5 text-neutral-300 hover:text-white text-sm transition-colors flex items-center gap-2" onClick={async () => {
                    if (contextMenu.type === 'song') {
                       const song = songsList.find(s => s.id === contextMenu.id);
-                      if (song) { const newName = prompt("Rename Song:", song.title); if (newName && newName.trim()) setSongsList(prev => prev.map(s => s.id === contextMenu.id ? { ...s, title: newName.trim() } : s)); }
+                      if (song) { const newName = await askText('Song name', song.title, { okLabel: 'Rename' }); if (newName && newName.trim()) setSongsList(prev => prev.map(s => s.id === contextMenu.id ? { ...s, title: newName.trim() } : s)); }
                    } else if (contextMenu.type === 'bible') {
                       const b = bibleList.find(b => b.id === contextMenu.id);
-                      if (b) { const newName = prompt("Rename Bible:", b.name); if (newName && newName.trim()) { getBible(contextMenu.id as string).then(bibleData => { if (bibleData) { bibleData.name = newName.trim(); saveBible(bibleData).then(() => { getBibleList().then(list => setBibleList(list)); if (activeBibleId === contextMenu.id) setActiveBibleData(bibleData); }); }}); }}
+                      if (b) { const newName = await askText('Bible name', b.name, { okLabel: 'Rename' }); if (newName && newName.trim()) { getBible(contextMenu.id as string).then(bibleData => { if (bibleData) { bibleData.name = newName.trim(); saveBible(bibleData).then(() => { getBibleList().then(list => setBibleList(list)); if (activeBibleId === contextMenu.id) setActiveBibleData(bibleData); }); }}); }}
                    }
                    setContextMenu(null);
                  }}><Edit2 size={14}/> Rename {contextMenu.type === 'song' ? 'Song' : 'Bible'}</button>
@@ -5157,7 +5777,9 @@ function ControlPanel() {
  * What an audience output draws inside its FixedStage. The projector window and the Design canvas
  * both render through this, so the canvas is always exactly what the screen shows.
  */
-function AudienceOutputContent({ output, settings, slide, background, hideBackground = false, hideText = false, videoRef, muted = false, scrollPreviewPos, highlightWordIndex, designPreview = false, templateOverride }: {
+function AudienceOutputContent({ output, settings, slide, background, hideBackground = false, hideText = false, videoRef, muted = false, scrollPreviewPos, highlightWordIndex, designPreview = false, templateOverride, overlays = [] }: {
+  /** Overlays on this screen (they stay through clears; only F3 takes them off) */
+  overlays?: Overlay[];
   output: OutputSettings | undefined;
   settings: GlobalSettings | undefined;
   slide: SlideDefinition | null | undefined;
@@ -5176,13 +5798,36 @@ function AudienceOutputContent({ output, settings, slide, background, hideBackgr
 }) {
   const style = getStyleForOutput(output, settings);
   const bg = hideBackground ? null : background;
-  const resolved = slide ? resolveSlideForOutput(slide, output, undefined, style, templateOverride) : null;
-  const design = slide?.designs?.[output?.id || 'main'];
+  // When the slide is taken away (Clear all), its words stay just long enough to fade out
+  const lastSlide = useRef(slide);
+  if (slide) lastSlide.current = slide;
+  const shownSlide = slide || lastSlide.current;
+  const resolved = shownSlide ? resolveSlideForOutput(shownSlide, output, undefined, style, templateOverride) : null;
+  const design = shownSlide?.designs?.[output?.id || 'main'];
   const showText = !hideText && !!slide && style?.activeLayers.slide !== false;
+  // Clearing fades (or uses the slide's own exit animation, when its design has one)
+  const pageHidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
+  const slideExit = resolved?.animation?.exit;
+  const clearSeconds = pageHidden ? 0 : slideExit && slideExit.type !== 'none' ? (slideExit.duration ?? 0.35) : 0.6;
+  const bgKey = bg ? `${bg.type}|${bg.url || ''}|${bg.color || ''}|${(bg as any).ndiSourceId || ''}` : '';
+  // How strongly the background shows over black (Settings → Outputs → Background opacity)
+  const bgOpacity = Math.min(100, Math.max(0, output?.backgroundOpacity ?? 80)) / 100;
 
   return (
     <>
-      {bg?.type === 'color' && <div className="absolute inset-0 w-full h-full pointer-events-none" style={{ backgroundColor: bg.color || '#000' }} />}
+      {/* The background fades out when cleared and crossfades when it changes */}
+      <AnimatePresence initial={false}>
+      {bg && (
+      <motion.div
+        key={bgKey}
+        className="absolute inset-0 w-full h-full pointer-events-none"
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
+        transition={{ duration: clearSeconds, ease: 'easeOut' }}
+        data-bg-layer
+      >
+      {bg?.type === 'color' && <div className="absolute inset-0 w-full h-full pointer-events-none" style={{ backgroundColor: bg.color || '#000', opacity: bgOpacity }} />}
 
       {bg?.type === 'ndi' && (
         <div className="absolute inset-0 w-full h-full bg-slate-950 flex items-center justify-center overflow-hidden pointer-events-none">
@@ -5195,28 +5840,39 @@ function AudienceOutputContent({ output, settings, slide, background, hideBackgr
       )}
 
       {bg?.url && bg.type === 'video' ? (
-        <video ref={videoRef} src={bg.url} className="absolute inset-0 w-full h-full object-cover opacity-80 pointer-events-none" autoPlay loop muted={muted} playsInline />
+        <video ref={videoRef} src={bg.url} className="absolute inset-0 w-full h-full object-cover pointer-events-none" style={{ opacity: bgOpacity }} autoPlay loop muted={muted} playsInline data-bg-media />
       ) : bg?.url ? (
-        <img src={bg.url} className="absolute inset-0 w-full h-full object-cover opacity-80 pointer-events-none" alt="bg" />
+        <img src={bg.url} className="absolute inset-0 w-full h-full object-cover pointer-events-none" style={{ opacity: bgOpacity }} alt="bg" data-bg-media />
       ) : null}
+      </motion.div>
+      )}
+      </AnimatePresence>
+
+      {/* Overlays drawn under the words */}
+      <OverlayLayer overlays={overlays} above={false} />
+
+      {/* Pictures and videos: the template's, then this slide's own (above the background, under the words). They go with the words: Clear text and Clear all fade them out; clearing the background leaves them */}
+      {shownSlide && <DesignMediaLayer items={[...(resolved?.styleOverrides?.media || []), ...(design?.media || [])]} preview={designPreview} cleared={!showText} fadeSeconds={clearSeconds} />}
 
       {/* data-text-layer lets the Design canvas tell which words belong to the lyrics */}
-      {showText && slide && resolved && !design?.hideLyrics && (
+      {/* Cleared words stay in place and fade (or leave with the slide's exit), so clearing never cuts */}
+      {shownSlide && resolved && !design?.hideLyrics && (
         <div data-text-layer="lyrics" style={{ display: 'contents' }}>
           <SmartTextLayout
-            text={slide.text}
-            source={slide.source}
-            type={slide.type}
+            text={shownSlide.text}
+            source={shownSlide.source}
+            type={shownSlide.type}
             animation={resolved.animation}
             styleOverrides={resolved.styleOverrides}
             scrollPreviewPos={scrollPreviewPos}
             highlightWordIndex={highlightWordIndex}
             className="relative z-10 w-full h-full"
+            cleared={!showText}
           />
         </div>
       )}
 
-      {showText && design?.customBoxes?.filter(box => designPreview || isBoxOnScreen(box)).map(box => (
+      {shownSlide && design?.customBoxes?.filter(box => designPreview || isBoxOnScreen(box)).map(box => (
         <div key={box.id} data-text-layer={box.id} style={{ display: 'contents' }}>
           <SmartTextLayout
             text={box.text}
@@ -5224,9 +5880,13 @@ function AudienceOutputContent({ output, settings, slide, background, hideBackgr
             animation={resolveCustomBoxAnimation(box)}
             styleOverrides={{ global: box.style, layout: box.layout, verticalAlign: box.verticalAlign }}
             className={`relative z-10 w-full h-full ${box.hidden ? 'opacity-30' : ''}`}
+            cleared={!showText}
           />
         </div>
       ))}
+
+      {/* Overlays drawn over the words */}
+      <OverlayLayer overlays={overlays} above />
     </>
   );
 }
@@ -5240,6 +5900,28 @@ function ProjectorView() {
   
   const projectorVideoRef = useRef<HTMLVideoElement>(null);
   const lockedRef = useRef(false);
+
+  // Opened on the operator's own screen: show how to get back, and let a click close it too
+  const onOperatorScreen = new URLSearchParams(window.location.search).get('operator') === '1';
+  const [showHint, setShowHint] = useState(onOperatorScreen);
+  const closeOutput = () => {
+    if (isTauri()) {
+      import('@tauri-apps/api/core').then(({ invoke }) => invoke('close_output_window', { label: `projector-${outputId}` })).catch(() => {});
+    } else {
+      window.close();
+    }
+  };
+  // Esc always closes an output window (only the operator's keyboard can reach it)
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); closeOutput(); } };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [outputId]);
+  useEffect(() => {
+    if (!onOperatorScreen) return;
+    const t = setTimeout(() => setShowHint(false), 6000);
+    return () => clearTimeout(t);
+  }, []);
 
   useEffect(() => {
     lockedRef.current = !!liveState.lockedOutputs?.[outputId];
@@ -5302,6 +5984,7 @@ function ProjectorView() {
     return () => channel.close();
   }, [outputId]);
 
+  useEffect(() => { setSharedTimer(liveState.timer); }, [liveState.timer]);
   const outputConfig = liveState.settings?.outputs.find(o => o.id === outputId);
   const isCleared = !!liveState.clearedOutputs?.[outputId];
   const isLocked = !!liveState.lockedOutputs?.[outputId];
@@ -5318,7 +6001,17 @@ function ProjectorView() {
   const stageStyle = getStyleForOutput(outputConfig, liveState.settings);
 
   return (
-    <div className="w-screen h-screen bg-transparent flex flex-col items-center justify-center overflow-hidden relative cursor-none select-none">
+    <div
+      className={`w-screen h-screen bg-transparent flex flex-col items-center justify-center overflow-hidden relative select-none ${onOperatorScreen ? 'cursor-pointer' : 'cursor-none'}`}
+      onClick={onOperatorScreen ? closeOutput : undefined}
+      data-output-page
+    >
+      {onOperatorScreen && (showHint || !liveState.isPresenting) && (
+        <div className="absolute top-6 left-1/2 -translate-x-1/2 z-50 px-5 py-3 rounded-xl bg-black/80 border border-white/20 text-center shadow-2xl pointer-events-none" data-output-hint>
+          <div className="text-white text-base font-semibold">Press Esc or click to close {outputConfig?.name || 'this output'}</div>
+          {!liveState.isPresenting && <div className="text-neutral-400 text-sm mt-1">Nothing is being presented yet: in FlowShow, click the Presenting button (top right) and pick a slide.</div>}
+        </div>
+      )}
       <div className={`w-full h-full transition-opacity duration-700 ease-in-out ${liveState.isPresenting ? 'opacity-100' : 'opacity-0'}`}>
         <FixedStage className="w-full h-full relative">
           {isStageOutput(outputConfig) ? (
@@ -5338,6 +6031,7 @@ function ProjectorView() {
               background={displayBg}
               hideBackground={hideBg}
               hideText={hideText || !!displayClearText}
+              overlays={isLocked ? (frozenState?.overlays || []) : overlaysFor(liveState.settings?.overlays, liveState.overlays, outputId)}
               videoRef={projectorVideoRef}
             />
           )}

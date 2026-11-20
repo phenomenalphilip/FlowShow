@@ -152,8 +152,8 @@ export function DesignBox({ rect, scale, label, movable, selected = false, onSel
 
   return (
     <>
-      {snaps.x && <div className="absolute top-0 bottom-0 pointer-events-none z-30" style={{ left: '50%', borderLeft: `${px(1)}px solid #f472b6` }} />}
-      {snaps.y && <div className="absolute left-0 right-0 pointer-events-none z-30" style={{ top: '50%', borderTop: `${px(1)}px solid #f472b6` }} />}
+      {snaps.x && <div className="absolute top-0 bottom-0 pointer-events-none z-30" style={{ left: '50%', borderLeft: `${px(1)}px solid var(--color-pink-400)` }} />}
+      {snaps.y && <div className="absolute left-0 right-0 pointer-events-none z-30" style={{ top: '50%', borderTop: `${px(1)}px solid var(--color-pink-400)` }} />}
       <div
         className="absolute z-20 group"
         style={{
@@ -163,7 +163,7 @@ export function DesignBox({ rect, scale, label, movable, selected = false, onSel
           height: `${rect.height * 100}%`,
           cursor: movable ? 'move' : 'text',
           outline: active || selected
-            ? `${px(active ? 2 : 1.5)}px solid #ec4899`
+            ? `${px(active ? 2 : 1.5)}px solid var(--color-pink-500)`
             : `${px(1.5)}px dashed rgba(255,255,255,0.45)`,
         }}
         onPointerDown={begin('move')}
@@ -179,7 +179,7 @@ export function DesignBox({ rect, scale, label, movable, selected = false, onSel
             fontSize: px(11),
             padding: `${px(2)}px ${px(6)}px`,
             borderRadius: px(4),
-            background: '#ec4899',
+            background: 'var(--color-pink-500)',
             color: '#fff',
           }}
         >
@@ -209,7 +209,7 @@ export function DesignBox({ rect, scale, label, movable, selected = false, onSel
               left, top, cursor,
               width: px(10), height: px(10),
               marginLeft: -px(5), marginTop: -px(5),
-              border: `${px(1.5)}px solid #ec4899`,
+              border: `${px(1.5)}px solid var(--color-pink-500)`,
               borderRadius: px(2),
             }}
           />
@@ -281,7 +281,7 @@ export function InlineTextEditor({ rect, scale, initialText, placeholder, hint =
           lineHeight: 1.4,
           padding: px(12),
           background: 'rgba(9,9,11,0.94)',
-          border: `${px(2)}px solid #ec4899`,
+          border: `${px(2)}px solid var(--color-pink-500)`,
           borderRadius: px(8),
         }}
       />

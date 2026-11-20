@@ -32,3 +32,9 @@
     background-color: #555;
   }
 }
+/* TIME UP flashing on the stage screen */
+@keyframes fs-flicker {
+  0%, 55% { opacity: 1; }
+  56%, 100% { opacity: 0.12; }
+}
+.fs-flicker { animation: fs-flicker 0.9s steps(1, end) infinite; }

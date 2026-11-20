@@ -5,6 +5,7 @@ import {
   PACKAGE_EXTENSION, TemplatePackage, buildPackage, fontsUsedBy, installPackage, isFlowShowFont, readPackage, installAction,
 } from '../lib/templatePackages';
 import { FixedStage } from './FixedStage';
+import { downloadBlob } from '../lib/backup';
 import { SmartTextLayout } from './SmartTextLayout';
 
 const field = 'w-full bg-white/5 border border-white/10 rounded-lg text-sm px-3 py-2 text-white focus:outline-none focus:border-pink-500';
@@ -61,12 +62,9 @@ export function ExportTemplatesDialog({ templates, initialIds, onClose }: { temp
     setBusy(true);
     try {
       const blob = await buildPackage({ ...info, name: info.name.trim(), author: info.author.trim() }, picked, fontFiles);
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = `${info.name.trim().replace(/[\\/:*?"<>|]/g, '')}${PACKAGE_EXTENSION}`;
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(a.href), 4000);
-      setMessage(`Saved "${a.download}" with ${picked.length} template${picked.length === 1 ? '' : 's'}.`);
+      const fileName = `${info.name.trim()}${PACKAGE_EXTENSION}`;
+      const path = await downloadBlob(blob, fileName);
+      setMessage(`Saved "${path ? path.split(/[\\/]/).pop() : fileName}" with ${picked.length} template${picked.length === 1 ? '' : 's'}${path ? ` in ${path.replace(/[\\/][^\\/]+$/, '')}` : ''}.`);
     } catch (err) {
       setMessage(`Couldn't save the package: ${err instanceof Error ? err.message : String(err)}`);
     } finally { setBusy(false); }
@@ -130,10 +128,16 @@ export function ImportTemplatesDialog({ onClose, onInstalled, initialFile }: { o
   const [problem, setProblem] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // The templates to install: everything new or changed is ticked to start with
+  const [chosen, setChosen] = useState<Set<string>>(new Set());
 
   const readFile = async (file: File) => {
     setProblem(null); setDone(null); setPkg(null);
-    try { setPkg(await readPackage(file)); } catch (err) { setProblem(err instanceof Error ? err.message : String(err)); }
+    try {
+      const p = await readPackage(file);
+      setPkg(p);
+      setChosen(new Set(p.templates.filter(t => installAction(p, t) !== 'same').map(t => t.id)));
+    } catch (err) { setProblem(err instanceof Error ? err.message : String(err)); }
   };
   const open = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -145,7 +149,7 @@ export function ImportTemplatesDialog({ onClose, onInstalled, initialFile }: { o
     if (!pkg) return;
     setBusy(true);
     try {
-      const r = await installPackage(pkg);
+      const r = await installPackage(pkg, chosen);
       setDone(`Installed "${pkg.package.name}": ${r.added} new, ${r.updated} updated${r.unchanged ? `, ${r.unchanged} already up to date` : ''}${r.fonts ? `, ${r.fonts} font${r.fonts === 1 ? '' : 's'}` : ''}.`);
       onInstalled?.();
     } catch (err) {
@@ -153,15 +157,26 @@ export function ImportTemplatesDialog({ onClose, onInstalled, initialFile }: { o
     } finally { setBusy(false); }
   };
   const actions = pkg ? pkg.templates.map(t => installAction(pkg, t)) : [];
-  const updating = actions.filter(a => a !== 'add').length;
+  const actionOf = (t: PresentationTemplate) => actions[pkg!.templates.indexOf(t)];
   const nothingToDo = !!pkg && actions.every(a => a === 'same');
+  // Only templates that would change something can be picked
+  const pickable = pkg ? pkg.templates.filter(t => actionOf(t) !== 'same') : [];
+  const picked = pickable.filter(t => chosen.has(t.id));
+  const updating = picked.filter(t => actionOf(t) === 'update').length;
+  const toggle = (id: string) => setChosen(prev => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; });
+  // Fonts the picked templates need
+  const neededFonts = useMemo(() => new Set(fontsUsedBy(picked)), [pkg, chosen]);
 
   return (
     <Shell title="Import templates" onClose={onClose} footer={<>
       {done && <span className="mr-auto self-center text-xs text-emerald-300 flex items-center gap-1" data-import-message><Check size={13} /> {done}</span>}
       <button onClick={onClose} className="px-5 py-2 rounded-lg text-sm text-neutral-300 hover:text-white hover:bg-white/5">Close</button>
       {pkg && !done && nothingToDo && <span className="mr-auto self-center text-xs text-neutral-400">Every template in this package is already installed and up to date.</span>}
-      {pkg && !done && !nothingToDo && <button onClick={install} disabled={busy} className="px-6 py-2 rounded-lg text-sm font-bold bg-pink-600 hover:bg-pink-500 text-white flex items-center gap-2 disabled:opacity-50"><Download size={15} /> {updating ? 'Install / update' : 'Install'}</button>}
+      {pkg && !done && !nothingToDo && (
+        <button onClick={install} disabled={busy || picked.length === 0} className="px-6 py-2 rounded-lg text-sm font-bold bg-pink-600 hover:bg-pink-500 text-white flex items-center gap-2 disabled:opacity-40" data-install-picked>
+          <Download size={15} /> {picked.length === 0 ? 'Pick templates to install' : `${updating === picked.length ? 'Update' : updating ? 'Install / update' : 'Install'} ${picked.length} template${picked.length === 1 ? '' : 's'}`}
+        </button>
+      )}
     </>}>
       <label className="w-full py-3 rounded-lg flex items-center justify-center gap-2 text-sm font-bold bg-white/5 hover:bg-white/10 text-white cursor-pointer border border-white/10">
         <Upload size={16} /> Choose a template package ({PACKAGE_EXTENSION})…
@@ -176,18 +191,48 @@ export function ImportTemplatesDialog({ onClose, onInstalled, initialFile }: { o
             {pkg.package.description && <p className="text-xs text-neutral-300 mt-1.5 whitespace-pre-wrap">{pkg.package.description}</p>}
           </div>
           {pkg.package.license && <div className="rounded-lg border border-white/10 bg-white/[0.03] p-3 text-[11px] text-neutral-300 whitespace-pre-wrap"><span className="font-bold text-neutral-400 uppercase text-[10px] block mb-0.5">Licence</span>{pkg.package.license}</div>}
+          <div className="flex items-center gap-3">
+            <span className={`${label} mb-0`}>Templates · {picked.length} of {pickable.length} picked</span>
+            {pickable.length > 1 && (
+              <span className="ml-auto flex gap-1">
+                <button type="button" onClick={() => setChosen(new Set(pickable.map(t => t.id)))} className="px-2 py-1 rounded text-[11px] font-semibold text-neutral-300 hover:text-white bg-white/5 hover:bg-white/10" data-pick-all>All</button>
+                <button type="button" onClick={() => setChosen(new Set())} className="px-2 py-1 rounded text-[11px] font-semibold text-neutral-300 hover:text-white bg-white/5 hover:bg-white/10" data-pick-none>None</button>
+              </span>
+            )}
+          </div>
           <div className="grid grid-cols-4 gap-2">
-            {pkg.templates.map(t => (
-              <div key={t.id}>
-                <Thumb t={t} />
-                <div className="text-[10px] text-neutral-200 mt-1 truncate">{t.name}{actions[pkg.templates.indexOf(t)] === 'update' ? ' · update' : actions[pkg.templates.indexOf(t)] === 'same' ? ' · already installed' : ''}</div>
-              </div>
-            ))}
+            {pkg.templates.map(t => {
+              const action = actionOf(t);
+              const same = action === 'same';
+              const on = !same && chosen.has(t.id);
+              return (
+                <button
+                  key={t.id}
+                  type="button"
+                  disabled={same || !!done}
+                  onClick={() => toggle(t.id)}
+                  title={same ? 'Already installed and up to date' : on ? 'Click to leave this one out' : 'Click to install this one'}
+                  className={`relative rounded-lg border p-1 text-left transition-colors ${same ? 'border-white/5 opacity-50 cursor-default' : on ? 'border-pink-500 bg-pink-500/10' : 'border-white/10 hover:border-white/30'}`}
+                  data-pick-template={t.name}
+                  data-picked={on ? 'yes' : 'no'}
+                >
+                  <Thumb t={t} />
+                  {!same && (
+                    <span className={`absolute top-2 right-2 w-4 h-4 rounded flex items-center justify-center border ${on ? 'bg-pink-600 border-pink-500' : 'bg-black/60 border-white/30'}`}>
+                      {on && <Check size={11} className="text-white" />}
+                    </span>
+                  )}
+                  <div className="text-[10px] text-neutral-200 mt-1 truncate">{t.name}</div>
+                  <div className={`text-[9px] ${action === 'update' ? 'text-sky-300' : same ? 'text-neutral-500' : 'text-emerald-300'}`}>{action === 'update' ? 'Update to this version' : same ? 'Already installed' : 'New'}</div>
+                </button>
+              );
+            })}
           </div>
           {pkg.fonts.length > 0 && (
             <div className="text-xs space-y-1">
               <span className={label}>Fonts</span>
-              {pkg.fonts.map(f => (
+              {pkg.fonts.filter(f => neededFonts.has(f.family)).length === 0 && <div className="text-neutral-500">None needed by the templates picked.</div>}
+              {pkg.fonts.filter(f => neededFonts.has(f.family)).map(f => (
                 <div key={f.family} className="flex items-center gap-2">
                   <Type size={12} className="text-neutral-500" /> <span className="text-neutral-200 flex-1">{f.family}</span>
                   {f.file ? <span className="text-emerald-300">included, will be installed</span> : <span className="text-amber-300">not included: install it on this computer</span>}

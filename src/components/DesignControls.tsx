@@ -1,6 +1,7 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { Info, Layers, Minus, Plus, X } from 'lucide-react';
-import { AnimationConfig, AnimationType, EXIT_OPTIONS, ExitType, MAX_MOTIONS, SCROLL_POS_MAX, SCROLL_POS_MIN, TextPosition, getScrollPositions, motionsClash } from '../lib/templates';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { askText } from '../lib/appDialogs';
+import { ChevronDown, ChevronRight, Info, Layers, Minus, Plus, Sparkles, X } from 'lucide-react';
+import { AnimationConfig, AnimationType, EXIT_OPTIONS, ExitType, MAX_MOTIONS, SCROLL_POS_MAX, SCROLL_POS_MIN, TextPosition, getScrollPositions, motionsClash, PresentationTemplate, TemplateKind, TEMPLATE_KINDS, TEMPLATE_KIND_LABEL, templateKind } from '../lib/templates';
 import { GENERIC_MOTION_DEFAULTS, MOTION_DEFAULTS, MOTION_PRESETS } from './TemplateEditor';
 import {
   FONT_OPTIONS, canListLocalFonts, fontLabel, getLocalFonts, loadLocalFonts, loadLocalFontsIfAllowed, localFontValue, subscribeLocalFonts,
@@ -13,7 +14,7 @@ import { getInstalledFontFamilies, subscribeInstalledFonts } from '../lib/fontSt
 export type Phase = 'draft' | 'commit';
 
 /** What Design mode is designing: the song slides, or how scripture looks on the screen */
-export type DesignFor = 'lyrics' | 'scripture' | 'declaration';
+export type DesignFor = 'lyrics' | 'scripture' | 'declaration' | 'overlay';
 
 export interface DesignStatus {
   presenting: boolean;
@@ -162,10 +163,13 @@ export function FontSelect({ value, onChange, className = `${selectCls} w-36`, f
   useEffect(() => { void loadLocalFontsIfAllowed(); }, []);
 
   const known = FONT_OPTIONS.some(f => f.value === value) || [...(local || []), ...installed].some(f => localFontValue(f) === value);
+  // The lists (a hundred or more computer fonts) are built once and reused, not on every redraw
+  const builtIn = useMemo(() => FONT_OPTIONS.map(f => <option key={f.value} value={f.value} style={{ fontFamily: f.value }}>{f.label}</option>), []);
+  const installedOptions = useMemo(() => installed.map(f => <option key={`i-${f}`} value={localFontValue(f)} style={{ fontFamily: localFontValue(f) }}>{f}</option>), [installed]);
+  const localOptions = useMemo(() => (local || []).map(f => <option key={f} value={localFontValue(f)} style={{ fontFamily: localFontValue(f) }}>{f}</option>), [local]);
   const choose = (v: string) => {
     if (v === '__type') {
-      const name = window.prompt('Type the name of a font installed on this computer (for example Segoe UI or Calibri)')?.trim();
-      if (name) onChange(localFontValue(name));
+      void askText('Type the name of a font installed on this computer (for example Segoe UI or Calibri)').then(name => { if (name) onChange(localFontValue(name)); });
       return;
     }
     onChange(v);
@@ -181,16 +185,16 @@ export function FontSelect({ value, onChange, className = `${selectCls} w-36`, f
       <select value={value} onChange={(e) => choose(e.target.value)} onPointerDown={listFonts} onKeyDown={listFonts} className={className} title={problem || 'Font'} style={{ fontFamily: value }}>
         {!known && <option value={value}>{fontLabel(value)}</option>}
         <optgroup label="FlowShow fonts">
-          {FONT_OPTIONS.map(f => <option key={f.value} value={f.value} style={{ fontFamily: f.value }}>{f.label}</option>)}
+          {builtIn}
         </optgroup>
         {installed.length > 0 && (
           <optgroup label="Installed with templates">
-            {installed.map(f => <option key={`i-${f}`} value={localFontValue(f)} style={{ fontFamily: localFontValue(f) }}>{f}</option>)}
+            {installedOptions}
           </optgroup>
         )}
         {local && local.length > 0 && (
           <optgroup label="On this computer">
-            {local.map(f => <option key={f} value={localFontValue(f)} style={{ fontFamily: localFontValue(f) }}>{f}</option>)}
+            {localOptions}
           </optgroup>
         )}
         <option value="__type">Type a font name…</option>
@@ -310,20 +314,60 @@ export function TextPositionSwitch({ value, onChange }: { value?: TextPosition; 
 /** Design mode's choice between designing the song slides and designing how scripture looks */
 export function DesignForSwitch({ value, onChange }: { value: DesignFor; onChange: (v: DesignFor) => void }) {
   return (
-    <div className="flex rounded overflow-hidden shrink-0" title="Design the song slides, the Declarations template, or how Bible verses look on this screen">
-      <button type="button" onClick={() => onChange('lyrics')} className={segBtn(value === 'lyrics')}>For lyrics</button>
+    <div className="flex rounded overflow-hidden shrink-0" title="Design song slides, declarations, or how Bible verses look on this screen">
+      <button type="button" onClick={() => onChange('lyrics')} className={segBtn(value === 'lyrics')}>For songs</button>
       <button type="button" onClick={() => onChange('declaration')} className={segBtn(value === 'declaration')}>For declarations</button>
       <button type="button" onClick={() => onChange('scripture')} className={segBtn(value === 'scripture')}>For scripture</button>
+      <button type="button" onClick={() => onChange('overlay')} className={segBtn(value === 'overlay')} data-design-for-overlay>For overlays</button>
     </div>
+  );
+}
+
+/**
+ * The template in use, as a small chip with its name; clicking it opens the full (grouped) list.
+ * Where the template comes from is in the tooltip, so the header stays short.
+ */
+export function TemplateChip({ name, value, onChange, title, disabled = false, children, ...rest }: {
+  name: string;
+  value: string;
+  onChange: (id: string) => void;
+  title?: string;
+  disabled?: boolean;
+  children: React.ReactNode;
+  [data: `data-${string}`]: unknown;
+}) {
+  return (
+    <label
+      className={`relative flex items-center gap-1.5 h-7 pl-2 pr-1.5 rounded-md bg-[#1e1e28] border border-white/10 max-w-[180px] min-w-0 shrink ${disabled ? 'opacity-40' : 'hover:border-white/25 cursor-pointer'}`}
+      title={title}
+      data-template-chip
+    >
+      <Sparkles size={11} className="text-pink-400 shrink-0" />
+      <span className="truncate text-xs font-medium text-white">{name}</span>
+      <ChevronDown size={12} className="text-neutral-400 shrink-0" />
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        disabled={disabled}
+        className="absolute inset-0 w-full h-full opacity-0 cursor-pointer disabled:cursor-default bg-[#1e1e28] text-white text-xs"
+        // The list that opens keeps the dark look (the select itself is invisible over the chip)
+        style={{ colorScheme: 'dark' }}
+        title={title}
+        {...rest}
+      >
+        {children}
+      </select>
+    </label>
   );
 }
 
 /** Why the screen may not be showing what the canvas shows */
 export function StatusBadges({ status }: { status: DesignStatus }) {
   const badges: { text: string; cls: string; title: string }[] = [];
-  if (!status.presenting) badges.push({ text: 'Screens off', cls: 'bg-neutral-700/60 text-neutral-300', title: 'Not presenting, so the screens are blank. Press Present (B) to show them.' });
-  if (status.locked) badges.push({ text: 'Locked', cls: 'bg-red-500/15 text-red-400', title: 'This screen is frozen on its current slide' });
+  // (No "Screens off" badge: the Presenting button already shows that)
+  if (status.locked) badges.push({ text: 'Locked', cls: 'bg-red-500/15 text-red-400', title: 'This screen is paused on its current slide (Ctrl+1, Ctrl+2… to unpause)' });
   if (status.textCleared) badges.push({ text: 'Text cleared', cls: 'bg-amber-500/15 text-amber-400', title: 'Text is cleared on this screen, so it is not showing right now' });
+  if (!badges.length) return null;
   return (
     <div className="flex items-center gap-1">
       {badges.map(b => (
@@ -398,6 +442,127 @@ export function MotionLayers({ anim, onChange }: { anim?: AnimationConfig; onCha
           <Layers size={12} /> Add motion ({layers.length + 1}/{MAX_MOTIONS})
         </button>
       )}
+    </>
+  );
+}
+
+/** Template choices grouped by what they're for: the kind being designed first, then the others */
+export function TemplateOptions({ templates, first }: { templates: PresentationTemplate[]; first: TemplateKind }) {
+  return useMemo(() => <TemplateOptionGroups templates={templates} first={first} />, [templates, first]);
+}
+function TemplateOptionGroups({ templates, first }: { templates: PresentationTemplate[]; first: TemplateKind }) {
+  const order: TemplateKind[] = [first, ...TEMPLATE_KINDS.filter(k => k !== first)];
+  return (
+    <>
+      {order.map(kind => {
+        const list = templates.filter(t => templateKind(t) === kind).sort((a, b) => a.name.localeCompare(b.name));
+        if (!list.length) return null;
+        return (
+          <optgroup key={kind} label={TEMPLATE_KIND_LABEL[kind]}>
+            {list.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </optgroup>
+        );
+      })}
+    </>
+  );
+}
+
+/** Saving a new template: its name, and what it is for (lyrics and declarations never share templates) */
+export function SaveTemplateDialog({ initialName, initialKind, onSave, onCancel }: {
+  initialName: string;
+  initialKind: TemplateKind;
+  onSave: (name: string, kind: TemplateKind) => void;
+  onCancel: () => void;
+}) {
+  const [name, setName] = useState(initialName);
+  const [kind, setKind] = useState<TemplateKind>(initialKind);
+  const save = () => { if (name.trim()) onSave(name.trim(), kind); };
+  return (
+    <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4" onPointerDown={(e) => { if (e.target === e.currentTarget) onCancel(); }} data-save-template-dialog>
+      <div className="w-full max-w-sm rounded-xl border border-white/10 bg-[#09090B] shadow-2xl p-5 space-y-4">
+        <h3 className="text-sm font-bold text-white">Save as template</h3>
+        <label className="block">
+          <span className="block text-[10px] font-bold uppercase tracking-widest text-neutral-500 mb-1">Name</span>
+          <input
+            autoFocus
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') save(); if (e.key === 'Escape') onCancel(); }}
+            className="w-full bg-white/5 border border-white/10 rounded-lg text-sm px-3 py-2 text-white outline-none focus:border-pink-500"
+            data-template-name
+          />
+        </label>
+        <div>
+          <span className="block text-[10px] font-bold uppercase tracking-widest text-neutral-500 mb-1">This template is for</span>
+          <div className="flex rounded-lg overflow-hidden border border-white/10" data-template-kind>
+            {TEMPLATE_KINDS.map(k => (
+              <button key={k} type="button" onClick={() => setKind(k)} className={`flex-1 py-2 text-xs font-semibold transition-colors ${kind === k ? 'bg-pink-600 text-white' : 'bg-white/5 text-neutral-400 hover:text-white'}`} data-kind={k}>
+                {TEMPLATE_KIND_LABEL[k]}
+              </button>
+            ))}
+          </div>
+          <p className="text-[11px] text-neutral-500 mt-1.5">It will be listed under {TEMPLATE_KIND_LABEL[kind]}. Stage screens use stage layouts, made in the Stage tab.</p>
+        </div>
+        <div className="flex justify-end gap-2">
+          <button type="button" onClick={onCancel} className="px-4 py-2 rounded-lg text-xs text-neutral-300 hover:text-white hover:bg-white/5">Cancel</button>
+          <button type="button" disabled={!name.trim()} onClick={save} className="px-5 py-2 rounded-lg text-xs font-bold bg-pink-600 hover:bg-pink-500 text-white disabled:opacity-40" data-save-template>Save</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Foldable rows: a row's label folds it away, leaving a one-line summary (remembered on this computer) ───
+export type DesignRowId = 'text' | 'layout' | 'motion' | 'screen';
+const ROWS_KEY = 'flowshow_design_rows';
+const ROWS_DEFAULT: Record<DesignRowId, boolean> = { text: true, layout: true, motion: false, screen: false };
+const readRows = (): Record<DesignRowId, boolean> => {
+  try { return { ...ROWS_DEFAULT, ...JSON.parse(localStorage.getItem(ROWS_KEY) || '{}') }; } catch { return { ...ROWS_DEFAULT }; }
+};
+const rowListeners = new Set<(r: Record<DesignRowId, boolean>) => void>();
+
+/** Which rows are open; shared by every designer */
+export function useDesignRows() {
+  const [rows, setRows] = useState(readRows);
+  useEffect(() => { rowListeners.add(setRows); return () => { rowListeners.delete(setRows); }; }, []);
+  const toggle = (id: DesignRowId) => {
+    const next = { ...readRows(), [id]: !readRows()[id] };
+    try { localStorage.setItem(ROWS_KEY, JSON.stringify(next)); } catch { /* not saved: still works this time */ }
+    rowListeners.forEach(fn => fn(next));
+  };
+  return { isOpen: (id: DesignRowId) => rows[id], toggle };
+}
+
+/** The classes for a row: when folded, everything but its label and summary is hidden */
+export const rowClass = (open: boolean) => `flex flex-wrap items-center gap-2 ${open ? '' : '[&>*:not([data-row-head])]:hidden'}`;
+
+/** A row's label (click to fold or unfold) and, when folded, what's set in it */
+export function RowHead({ label, open, onToggle, summary }: { label: string; open: boolean; onToggle: () => void; summary?: string }) {
+  return (
+    <>
+      <button
+        type="button"
+        onClick={onToggle}
+        data-row-head
+        aria-expanded={open}
+        className="w-16 shrink-0 flex items-center gap-0.5 text-[10px] uppercase font-bold tracking-wider text-neutral-500 hover:text-white transition-colors"
+        title={open ? `Fold the ${label} row away` : `Show the ${label} row`}
+      >
+        {open ? <ChevronDown size={11} /> : <ChevronRight size={11} />} {label}
+      </button>
+      {!open && summary && <span data-row-head className="text-[11px] text-neutral-500 truncate min-w-0">{summary}</span>}
+    </>
+  );
+}
+
+/** How strongly this screen's background picture or video shows (0–100, over black) */
+export function ScreenBackgroundControl({ value, screenName, onChange }: { value: number; screenName: string; onChange: (v: number, phase: Phase) => void }) {
+  return (
+    <>
+      <span title={`How strongly the background picture, video or colour shows on ${screenName}. Lower = darker, words easier to read.`} data-screen-bg-opacity>
+        <MiniSlider label="Background opacity" min={0} max={100} step={1} value={value} format={(v) => `${Math.round(v)}%`} onChange={onChange} />
+      </span>
+      <span className="text-[11px] text-neutral-500">Only {screenName}, live</span>
     </>
   );
 }

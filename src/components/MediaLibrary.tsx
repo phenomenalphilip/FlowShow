@@ -394,29 +394,6 @@ export function MediaLibrary({ onSelectBackground }: { onSelectBackground: (url:
                 </div>
              </div>
              
-             <div className="p-4 border-t border-white/5 bg-[#09090B] shrink-0 mt-auto relative z-20 shadow-[0_-5px_15px_rgba(0,0,0,0.5)]">
-                  {canUseFileAccessApi ? (
-                    <button 
-                        onClick={handleAddFolder}
-                        className="flex items-center justify-center w-full gap-2 px-4 py-2.5 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-sm text-white font-medium transition-all shadow-sm"
-                    >
-                        <FolderPlus size={16} />
-                        Add folder from computer
-                    </button>
-                  ) : (
-                    <label className="flex items-center justify-center w-full gap-2 px-4 py-2.5 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border border-blue-500/30 rounded-lg text-sm font-medium transition-all cursor-pointer shadow-sm relative overflow-hidden">
-                        <FolderPlus size={16} />
-                        Add folder from computer
-                        <input 
-                            type="file" 
-                            {...({ webkitdirectory: "true", directory: "true" } as any)}
-                            multiple 
-                            className="absolute inset-0 opacity-0 cursor-pointer w-full h-full" 
-                            onChange={handleFallbackFolderSelect}
-                        />
-                    </label>
-                  )}
-             </div>
          </div>
 
          {/* Main View Area */}

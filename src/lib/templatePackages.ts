@@ -75,7 +75,9 @@ export async function buildPackage(
   const pkg: PackageInfo = { ...info, id: info.id || crypto.randomUUID(), createdAt: new Date().toISOString() };
   const cleanTemplates = templates.map(t => {
     const { isCustom: _custom, ...rest } = t as PresentationTemplate & { origin?: TemplateOrigin };
-    return { ...rest, id: (t as any).origin?.originalId || t.id };
+    // Pictures and videos point at files on this computer, so they don't go in a package
+    const { media: _media, ...styles } = rest.styles || {};
+    return { ...rest, styles, id: (t as any).origin?.originalId || t.id };
   });
   const fonts: PackageFont[] = [];
   for (const family of fontsUsedBy(templates).filter(f => !isFlowShowFont(f))) {
@@ -192,9 +194,12 @@ export const installAction = (pkg: TemplatePackage, t: PresentationTemplate): 'a
  * Install a package and any fonts it carries. A template already on this computer is updated in place (keeping
  * its id, so screens and styles using it show the new version); an identical one is left alone; only new ones are added.
  */
-export async function installPackage(pkg: TemplatePackage): Promise<{ added: number; updated: number; unchanged: number; fonts: number }> {
+export async function installPackage(pkg: TemplatePackage, onlyIds?: Iterable<string>): Promise<{ added: number; updated: number; unchanged: number; fonts: number }> {
   let added = 0, updated = 0, unchanged = 0;
-  for (const t of pkg.templates) {
+  // Just the templates picked (all of them when none are named)
+  const picked = onlyIds ? new Set(onlyIds) : null;
+  const templates = picked ? pkg.templates.filter(t => picked.has(t.id)) : pkg.templates;
+  for (const t of templates) {
     const here = existingTemplateFor(pkg, t);
     if (here && sameTemplate(here, t)) { unchanged++; continue; }
     const origin: TemplateOrigin = { packageId: pkg.package.id, packageName: pkg.package.name, author: pkg.package.author, version: pkg.package.version, originalId: t.id };
@@ -206,7 +211,11 @@ export async function installPackage(pkg: TemplatePackage): Promise<{ added: num
       await saveTemplate({ ...t, id: installedId(pkg.package, t.id), isCustom: true, badge: t.badge || pkg.package.name.slice(0, 14), origin } as PresentationTemplate);
     }
   }
-  const fonts: StoredFont[] = pkg.fonts.filter(f => f.file).map(f => ({ family: f.family, fileName: f.file!.name, type: f.file!.type, data: f.file!.data }));
+  // Only the fonts the picked templates use
+  const needed = new Set(fontsUsedBy(templates));
+  const fonts: StoredFont[] = pkg.fonts
+    .filter(f => f.file && (!picked || needed.has(f.family)))
+    .map(f => ({ family: f.family, fileName: f.file!.name, type: f.file!.type, data: f.file!.data }));
   await installFonts(fonts);
   return { added, updated, unchanged, fonts: fonts.length };
 }
