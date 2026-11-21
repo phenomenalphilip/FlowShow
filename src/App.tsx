@@ -1068,7 +1068,9 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
           <div className="flex flex-wrap items-center gap-3">
             <select 
               className="bg-[#09090B] border border-white/10 text-white rounded-lg px-3 py-2 text-sm outline-none focus:border-pink-500 font-medium min-w-[180px]" 
-              value={activeOutput.defaultBackground ? (activeOutput.defaultBackground.type === 'ndi' ? 'input' : activeOutput.defaultBackground.type) : 'none'} 
+              value={activeOutput.defaultBackground
+                ? (activeOutput.defaultBackground.type === 'ndi' ? 'input' : activeOutput.defaultBackground.type === 'video' ? 'image' : activeOutput.defaultBackground.type)
+                : 'none'}
               onChange={(e) => { 
                 const val = e.target.value; 
                 if (val === 'none') updateOutput(activeOutputId, { defaultBackground: null }); 
@@ -1077,7 +1079,7 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
                 else if (val === 'input') updateOutput(activeOutputId, { defaultBackground: { type: 'input' } });
               }}
             >
-              <option value="none">Transparent (None)</option>
+              <option value="none">None</option>
               <option value="color">Solid Color</option>
               <option value="image">Media (Image / Video)</option>
               <option value="input">Live input (camera, screen or NDI)</option>
@@ -1106,6 +1108,17 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
                   <span className="text-xs text-neutral-300 truncate flex-1 font-mono">{activeOutput.defaultBackground.fileName || 'Local Media File'}</span>
                 ) : ( <span className="text-xs text-red-400 italic">No media selected yet</span> )}
               </div>
+            )}
+            {activeOutput.defaultBackground && (
+              <button
+                type="button"
+                onClick={() => updateOutput(activeOutputId, { defaultBackground: null })}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold text-red-300 bg-red-500/10 hover:bg-red-500/20 transition-colors shrink-0"
+                title="Remove this screen's default background (it shows nothing behind the words until you send one)"
+                data-remove-default-background
+              >
+                <X size={13} /> Remove
+              </button>
             )}
           </div>
           {/* How strongly the background shows (over black): lower makes the words easier to read */}

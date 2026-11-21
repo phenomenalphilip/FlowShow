@@ -47,6 +47,11 @@
     "copyright": "© 2026 The Fort Church Media",
     "shortDescription": "Worship presentation software",
     "longDescription": "FlowShow: lyrics, scripture and declarations on screens, stage displays and NDI, with full live control of how the words look.",
-    "category": "Productivity"
+    "category": "Productivity",
+    "windows": {
+      "nsis": {
+        "installerHooks": "./installer-hooks.nsh"
+      }
+    }
   }
 }

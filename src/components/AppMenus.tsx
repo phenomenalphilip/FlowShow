@@ -212,6 +212,17 @@ export function QuickStartContent() {
   );
 }
 
+/** What FlowShow needs to run well (the installer checks the same: src-tauri/installer-hooks.nsh) */
+export const SYSTEM_REQUIREMENTS: { what: string; min: string; best: string }[] = [
+  { what: 'Windows', min: 'Windows 10 (64-bit), version 1809 or newer', best: 'Windows 11' },
+  { what: 'Processor', min: '4 cores (Intel Core i5 / AMD Ryzen 5, 2017 or newer)', best: '6 cores or more (Core i7 / Ryzen 7)' },
+  { what: 'Memory', min: '8 GB', best: '16 GB' },
+  { what: 'Graphics', min: 'DirectX 11 (built-in graphics)', best: 'A dedicated graphics card' },
+  { what: 'Storage', min: '500 MB free, plus your media', best: 'An SSD' },
+  { what: 'Screens', min: '1280 × 720 for FlowShow', best: '1920 × 1080, plus a screen or HDMI out per output' },
+  { what: 'NDI', min: 'NDI Runtime (free), wired network', best: 'Gigabit wired network' },
+];
+
 export function AboutDialog({ onClose }: { onClose: () => void }) {
   return (
     <Dialog title={`About ${APP_NAME}`} icon={Info} onClose={onClose}>
@@ -238,6 +249,22 @@ export function AboutContent() {
         >
           <ExternalLink size={14} /> {UPDATE_URL ? 'Check for updates on the website' : 'Updates from the website: coming soon'}
         </button>
+        <div data-system-requirements>
+          <div className="text-[10px] uppercase font-bold tracking-wider text-neutral-500 mb-1">System requirements</div>
+          <div className="grid grid-cols-[auto_1fr_1fr] gap-x-3 gap-y-1 text-[11px]">
+            <span />
+            <span className="text-neutral-500 font-semibold">Minimum</span>
+            <span className="text-neutral-500 font-semibold">Recommended</span>
+            {SYSTEM_REQUIREMENTS.map(r => (
+              <React.Fragment key={r.what}>
+                <span className="text-neutral-400">{r.what}</span>
+                <span className="text-neutral-300">{r.min}</span>
+                <span className="text-neutral-300">{r.best}</span>
+              </React.Fragment>
+            ))}
+          </div>
+          <p className="mt-1 text-[11px] text-neutral-500 leading-relaxed">Each extra screen, video layer, camera or NDI output adds work: for several screens with videos and live inputs, use the recommended setup.</p>
+        </div>
         <div>
           <div className="text-[10px] uppercase font-bold tracking-wider text-neutral-500 mb-1">Built with open-source software</div>
           <div className="grid grid-cols-2 gap-x-4 text-[11px] text-neutral-400">
