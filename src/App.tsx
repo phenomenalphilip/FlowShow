@@ -5017,7 +5017,7 @@ function ControlPanel() {
         onUseSavedMix={(id) => { if (show) useSavedMix(show, id); }}
         onRenameSavedMix={(id, name) => setGlobalSettings(prev => ({ ...prev, savedMixes: (prev.savedMixes || []).map(m => m.id === id ? { ...m, name } : m) }))}
         onDeleteSavedMix={(id) => setGlobalSettings(prev => ({ ...prev, savedMixes: (prev.savedMixes || []).filter(m => m.id !== id) }))}
-        renderScreen={(slide, layers) => out ? (
+        renderScreen={(slide, layers, hideWords) => out ? (
           <AudienceOutputContent
             output={out}
             settings={globalSettings}
@@ -5026,6 +5026,7 @@ function ControlPanel() {
             muted
             designPreview
             wordsFaint
+            noWords={!!hideWords}
             mix={{ layers }}
             overlays={overlaysFor(globalSettings.overlays, liveState.overlays, mainId)}
           />
@@ -6182,11 +6183,13 @@ function BackgroundVideo({ url, playback, videoRef, opacity }: { url: string; pl
 /** Mix mode's canvas: the words faint (a sheet of its own, still above the media) */
 const FAINT_WORDS: React.CSSProperties = { position: 'absolute', inset: 0, opacity: 0.35, zIndex: 10, pointerEvents: 'none' };
 
-function AudienceOutputContent({ output, settings, slide, background, hideBackground = false, hideText = false, videoRef, muted = false, scrollPreviewPos, highlightWordIndex, designPreview = false, templateOverride, overlays = [], mix, wordsFaint = false }: {
+function AudienceOutputContent({ output, settings, slide, background, hideBackground = false, hideText = false, videoRef, muted = false, scrollPreviewPos, highlightWordIndex, designPreview = false, templateOverride, overlays = [], mix, wordsFaint = false, noWords = false }: {
   /** The Media Mixer's layers (filtered here to the ones for this screen) */
   mix?: { layers: LiveMixLayer[]; exitFade?: number } | null;
   /** Mix mode's canvas: the words faint, so media can be placed around them */
   wordsFaint?: boolean;
+  /** Leave the words out (Mix: working on the media alone) */
+  noWords?: boolean;
   /** Overlays on this screen (they stay through clears; only F3 takes them off) */
   overlays?: Overlay[];
   output: OutputSettings | undefined;
@@ -6263,7 +6266,7 @@ function AudienceOutputContent({ output, settings, slide, background, hideBackgr
 
       {/* data-text-layer lets the Design canvas tell which words belong to the lyrics */}
       {/* Cleared words stay in place and fade (or leave with the slide's exit), so clearing never cuts */}
-      {shownSlide && resolved && !design?.hideLyrics && (
+      {shownSlide && resolved && !design?.hideLyrics && !noWords && (
         <div data-text-layer="lyrics" style={wordsFaint ? FAINT_WORDS : { display: 'contents' }}>
           <SmartTextLayout
             text={shownSlide.text}
@@ -6279,7 +6282,7 @@ function AudienceOutputContent({ output, settings, slide, background, hideBackgr
         </div>
       )}
 
-      {shownSlide && design?.customBoxes?.filter(box => designPreview || isBoxOnScreen(box)).map(box => (
+      {shownSlide && !noWords && design?.customBoxes?.filter(box => designPreview || isBoxOnScreen(box)).map(box => (
         <div key={box.id} data-text-layer={box.id} style={wordsFaint ? FAINT_WORDS : { display: 'contents' }}>
           <SmartTextLayout
             text={box.text}

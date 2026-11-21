@@ -33,7 +33,9 @@ export type MixSource =
   /** A camera, screen or NDI source, live */
   | { kind: 'input'; input: LiveInput }
   | { kind: 'color'; color: string }
-  | { kind: 'gradient'; from: string; to: string; angle: number };
+  | { kind: 'gradient'; from: string; to: string; angle: number }
+  /** A coloured frame round the screen (or round its box): thickness, glow and inner corner rounding in px on a 1920×1080 screen */
+  | { kind: 'border'; color: string; width: number; glow: number; radius: number };
 
 /** When a layer plays: a run of slides, every slide of one section (e.g. every Chorus), or the whole show */
 export type MixSpan =
@@ -62,6 +64,9 @@ export interface MixEffects {
   hue?: number;
   /** 0–100: darker edges */
   vignette?: number;
+  /** Colour the layer with this colour (tintAmount 0–100: how strongly) */
+  tint?: string;
+  tintAmount?: number;
 }
 
 export interface MixLayer {
@@ -304,6 +309,16 @@ function MixLayerView({ layer, preview }: { layer: LiveMixLayer; preview?: boole
   if (layer.source.kind === 'color') content = <div style={{ ...fill, background: layer.source.color }} />;
   else if (layer.source.kind === 'input') content = <LiveInputView input={layer.source.input} quality="high" fit={layer.fit || 'cover'} style={fill} showProblems={preview} />;
   else if (layer.source.kind === 'gradient') content = <div style={{ ...fill, background: `linear-gradient(${layer.source.angle}deg, ${layer.source.from}, ${layer.source.to})` }} />;
+  else if (layer.source.kind === 'border') {
+    // The hole in the middle is a rounded box; its huge outer shadow paints the frame, an inner shadow the glow
+    const b = layer.source;
+    const shadows = [`0 0 0 4000px ${b.color}`, b.glow > 0 ? `inset 0 0 ${b.glow}px ${b.glow / 2}px ${b.color}` : ''].filter(Boolean).join(', ');
+    content = (
+      <div style={{ ...fill, overflow: 'hidden' }} data-mix-border>
+        <div style={{ position: 'absolute', inset: Math.max(0, b.width), borderRadius: Math.max(0, b.radius), boxShadow: shadows }} />
+      </div>
+    );
+  }
   else if (!url) {
     content = preview ? (
       <div className="absolute inset-0 flex items-center justify-center text-center bg-black/50 border-4 border-dashed border-amber-400/80 text-amber-200 text-4xl font-semibold p-6" data-mix-missing>
@@ -330,6 +345,7 @@ function MixLayerView({ layer, preview }: { layer: LiveMixLayer; preview?: boole
 
   const fadeIn = layer.fadeIn ?? 1;
   const fadeOut = layer.fadeOut ?? 1;
+  const tinted = (layer.source.kind === 'media' || layer.source.kind === 'input') && !!layer.effects?.tint && (layer.effects.tintAmount ?? 100) > 0;
   return (
     <motion.div
       className="absolute inset-0 pointer-events-none"
@@ -340,8 +356,10 @@ function MixLayerView({ layer, preview }: { layer: LiveMixLayer; preview?: boole
       exit="gone"
       data-mix-layer={layer.id}
     >
-      <div style={box}>
+      <div style={tinted ? { ...box, isolation: 'isolate' } : box}>
         {content}
+        {/* Tint: the layer's light and dark, in the chosen colour (pictures, videos and inputs) */}
+        {tinted && <div className="absolute inset-0" style={{ background: layer.effects!.tint, mixBlendMode: 'color', opacity: clamp(layer.effects!.tintAmount ?? 100, 0, 100) / 100 }} data-mix-tint />}
         {!!layer.effects?.vignette && (
           <div className="absolute inset-0" style={{ background: `radial-gradient(ellipse at center, transparent 35%, rgba(0,0,0,${clamp(layer.effects.vignette, 0, 100) / 100}) 100%)` }} />
         )}
