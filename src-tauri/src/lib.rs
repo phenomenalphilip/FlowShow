@@ -78,6 +78,7 @@ async fn open_output_window(
   focus: Option<bool>,
 ) -> Result<(), String> {
   let skip_taskbar = skip_taskbar.unwrap_or(false);
+  log::info!("open_output_window {label} {url} at {x},{y} {width}x{height} exists={}", { use tauri::Manager; app.get_webview_window(&label).is_some() });
   use tauri::{Manager, PhysicalPosition, PhysicalSize};
   // See-through or not is fixed when a window is made: a change needs a new window
   let remake = {
@@ -107,11 +108,13 @@ async fn open_output_window(
       // Ready already (prepared, or opened before): only its address may need changing (e.g. ?operator=1)
       let same = OUTPUT_URLS.lock().unwrap().get(&label).is_some_and(|u| *u == url);
       if !same {
+        log::info!("open_output_window {label}: changing address");
         if let Ok(mut current) = w.url() {
           let (path, query) = url.split_once('?').map(|(p, q)| (p, Some(q))).unwrap_or((url.as_str(), None));
           current.set_path(path);
           current.set_query(query);
-          let _ = w.navigate(current);
+          let r = w.navigate(current);
+          log::info!("open_output_window {label}: address changed {:?}", r.err());
         }
         OUTPUT_URLS.lock().unwrap().insert(label.clone(), url.clone());
       }
@@ -135,7 +138,9 @@ async fn open_output_window(
   window.set_size(PhysicalSize::new(width, height)).map_err(|e| e.to_string())?;
   window.set_always_on_top(on_top).map_err(|e| e.to_string())?;
   let _ = window.set_skip_taskbar(skip_taskbar);
+  log::info!("open_output_window {label}: placed, showing");
   window.show().map_err(|e| e.to_string())?;
+  log::info!("open_output_window {label}: shown");
   // On the operator's own screen it takes the keyboard, so Esc closes it
   if focus.unwrap_or(false) {
     let _ = window.set_focus();
@@ -195,8 +200,10 @@ fn make_output_window(app: &tauri::AppHandle, label: &str, url: &str, title: &st
 
 /// Get a screen output's window ready in the background (hidden), so launching it later is instant:
 /// making a window and starting FlowShow in it takes a few seconds, showing a ready one doesn't
+// async: a window must never be made on the main thread (a plain command runs there, and making a window from it
+// deadlocks Windows' WebView: the whole app then waits forever, screens can't be listed and outputs don't open)
 #[tauri::command]
-fn prepare_output_window(app: tauri::AppHandle, label: String, url: String, title: String) -> Result<(), String> {
+async fn prepare_output_window(app: tauri::AppHandle, label: String, url: String, title: String) -> Result<(), String> {
   use tauri::Manager;
   if !label.starts_with("projector-") || app.get_webview_window(&label).is_some() {
     return Ok(());
