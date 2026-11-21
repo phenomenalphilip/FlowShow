@@ -765,18 +765,9 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
      if (!current) setActiveOutputId(local.outputs[0]?.id || 'main');
   }, [local.outputs, activeOutputId]);
 
-  // Find the screens by themselves while Settings is open (see detectScreens below)
-  const detectScreensRef = useRef<() => Promise<void>>(async () => {});
-  useEffect(() => {
-    if (!isOpen) return;
-    void detectScreensRef.current();
-    const id = window.setInterval(() => void detectScreensRef.current(), 3000);
-    return () => window.clearInterval(id);
-  }, [isOpen]);
-
   if (!isOpen) return null;
 
-  const applyOutputLive =(id: string, fields: Partial<OutputSettings>) => {
+  const applyOutputLive = (id: string, fields: Partial<OutputSettings>) => {
     updateOutput(id, fields);
     onSave((prev: GlobalSettings) => ({ ...prev, outputs: prev.outputs.map(o => o.id === id ? { ...o, ...fields } : o) }));
   };
@@ -819,29 +810,25 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
     reader.readAsDataURL(file);
   };
 
-  // The screens connected to this computer, found by themselves: when Settings opens, and again every few seconds
-  // while it is open (so a projector plugged in now shows up). Only changes are saved, so the list doesn't flicker.
   const detectScreens = async () => {
     try {
-        let found: { label: string; width?: number; height?: number }[] = [];
         if (isTauri()) {
             const monitors = await getMonitors();
-            found = monitors.map((m, i) => ({ label: m.name || `Display ${i + 1}`, width: m.size.width, height: m.size.height }));
-        } else if ('getScreenDetails' in window) {
-            // In a browser only when already allowed (asking would pop up a prompt every few seconds)
-            const allowed = await (navigator as any).permissions?.query({ name: 'window-management' }).then((p: any) => p.state === 'granted').catch(() => false);
-            if (!allowed) return;
-            const details = await (window as any).getScreenDetails();
-            found = details.screens.map((s: any) => ({ label: s.label, width: s.width, height: s.height }));
-        } else {
+            setDetectedScreens(monitors.map((m, i) => ({ label: m.name || `Display ${i + 1}`, width: m.size.width, height: m.size.height })));
+            if (!monitors.length) void showMessage('No screens were found.');
             return;
         }
-        setDetectedScreens(prev => JSON.stringify(prev) === JSON.stringify(found) ? prev : found);
+        if ('getScreenDetails' in window) {
+            const details = await (window as any).getScreenDetails();
+            setDetectedScreens(details.screens);
+        } else {
+            void showMessage('Screens can only be detected in the FlowShow desktop app.');
+        }
     } catch (err: any) {
-        console.warn('Could not list the screens', err);
+        console.warn(err);
+        void showMessage('Could not detect screens. ' + err.message);
     }
   };
-  detectScreensRef.current = detectScreens;
 
   const closeNewOutputModal = () => {
     setShowNewOutputModal(false);
@@ -1053,6 +1040,9 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
             <div className="bg-[#121214] border border-white/5 rounded-xl p-5">
               <div className="flex items-center justify-between mb-3">
                 <span className="text-[11px] font-bold uppercase tracking-wider text-pink-400">Target Display</span>
+                <button onClick={detectScreens} className="text-xs bg-white/5 hover:bg-white/10 text-neutral-300 hover:text-white px-3 py-1.5 rounded-lg transition-all border border-white/10 font-medium">
+                  Detect Screens
+                </button>
               </div>
               <select 
                 value={activeOutput.displayId || ''} 
@@ -1065,11 +1055,9 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
                   <option key={s.label || i} value={s.label}>{s.label || `Display ${i + 1}`}{s.width ? ` (${s.width}×${s.height})` : ''}</option>
                 ))}
               </select>
-              <p className={`text-[10px] mt-2 ${detectedScreens.length > 0 ? 'text-emerald-400' : 'text-neutral-500'}`} data-detected-screens>
-                {detectedScreens.length > 0
-                  ? `${detectedScreens.length} screen${detectedScreens.length === 1 ? '' : 's'} connected (found automatically: plug in a projector and it appears here)`
-                  : 'Looking for screens… (plug in a projector or TV and it appears here)'}
-              </p>
+              {detectedScreens.length > 0 && (
+                <p className="text-[10px] text-emerald-400 mt-2">{detectedScreens.length} display(s) detected on this system</p>
+              )}
               {!activeOutput.displayId && (
                 <p className="text-[10px] text-orange-400 mt-2">You must select a display to go LIVE to {activeOutput.name}.</p>
               )}
@@ -1456,6 +1444,15 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
                      New output
                    </button>
                  </div>
+
+                 {/* Output selector button (Right side of bottom bar, from Image e) */}
+                 <button
+                   onClick={() => detectScreens()}
+                   className="text-neutral-400 hover:text-white px-3 py-1 text-xs font-medium flex items-center gap-1.5 rounded hover:bg-white/5 transition-colors shrink-0"
+                 >
+                   <MonitorPlay size={13} />
+                   Output selector
+                 </button>
                </div>
              )}
 
