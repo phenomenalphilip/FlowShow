@@ -83,6 +83,9 @@ const cameraProblem = (e: unknown) => {
     : name === 'NotAllowedError' ? 'Not allowed to use the camera'
     : 'Can’t open this camera';
 };
+// Cameras are opened one after another: opening several at once (webcams, virtual cameras…) can stall the app
+let openQueue: Promise<unknown> = Promise.resolve();
+const notNeeded = () => Object.assign(new Error('not needed any more'), { name: 'AbortError' });
 function useCamera(id: string | undefined) {
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
@@ -90,14 +93,24 @@ function useCamera(id: string | undefined) {
     if (!id || !navigator.mediaDevices?.getUserMedia) return;
     let entry = cameras.get(id);
     if (!entry) {
-      // Everything asks for full HD, so a preview never makes the camera smaller for the screens
-      const stream = navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: { deviceId: { exact: id }, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } },
+      const made: SharedCamera = { stream: null as unknown as Promise<MediaStream>, users: 0 };
+      made.stream = openQueue.catch(() => {}).then(() => {
+        // Nobody wants it any more (moved away while it waited its turn): don't switch it on
+        if (made.users <= 0) throw notNeeded();
+        // Everything asks for full HD, so a preview never makes the camera smaller for the screens
+        return navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: { deviceId: { exact: id }, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } },
+        });
+      }).then(s => {
+        // It finished starting after everyone moved away: switch it off at once
+        if (made.users <= 0) { s.getTracks().forEach(t => t.stop()); throw notNeeded(); }
+        return s;
       });
-      entry = { stream, users: 0 };
+      openQueue = made.stream;
+      entry = made;
       cameras.set(id, entry);
-      stream.catch(() => { if (cameras.get(id) === entry) cameras.delete(id); });
+      made.stream.catch(() => { if (cameras.get(id) === made) cameras.delete(id); });
     }
     const shared = entry;
     shared.users++;
@@ -120,8 +133,15 @@ function useCamera(id: string | undefined) {
   return { stream, problem };
 }
 
-function CameraView({ input, fit, className, style, showProblems }: ViewProps) {
-  const { stream, problem } = useCamera(input.id);
+function CameraView({ input, fit, className, style, showProblems, startAfter = 0 }: ViewProps) {
+  // Previews wait a moment before switching the camera on, so passing through the Media tab doesn't
+  const [ready, setReady] = useState(startAfter <= 0);
+  useEffect(() => {
+    if (ready) return;
+    const t = window.setTimeout(() => setReady(true), startAfter);
+    return () => window.clearTimeout(t);
+  }, [ready, startAfter]);
+  const { stream, problem } = useCamera(ready ? input.id : undefined);
   const ref = useRef<HTMLVideoElement>(null);
   useEffect(() => {
     const v = ref.current;
@@ -183,6 +203,8 @@ interface ViewProps {
   style?: React.CSSProperties;
   /** Say when it can't show (the Media tab's tiles and the canvases); the screens just stay dark */
   showProblems?: boolean;
+  /** Cameras: wait this long (ms) before switching on (the Media tab's previews) */
+  startAfter?: number;
 }
 
 /** Choose a live input (Settings → Outputs → Default background): cameras, screens and NDI sources, found when opened */
@@ -226,7 +248,7 @@ export function LiveInputSelect({ value, onChange, className }: { value: LiveInp
 }
 
 /** A live input: a camera's video, or a screen's or NDI source's stream */
-export function LiveInputView({ input, quality = 'high', fit = 'cover', className, style, showProblems = false }: Partial<ViewProps> & { input: LiveInput }) {
-  const props: ViewProps = { input, quality, fit, className, style, showProblems };
+export function LiveInputView({ input, quality = 'high', fit = 'cover', className, style, showProblems = false, startAfter = 0 }: Partial<ViewProps> & { input: LiveInput }) {
+  const props: ViewProps = { input, quality, fit, className, style, showProblems, startAfter };
   return input.kind === 'camera' ? <CameraView {...props} /> : <StreamView {...props} />;
 }

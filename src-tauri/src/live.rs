@@ -430,23 +430,55 @@ pub fn screens() -> Vec<serde_json::Value> {
     list
 }
 
-fn run_screen(feed: Arc<Feed>, id: String, low: bool) {
-    let jpeg = match Jpeg::new() {
-        Ok(j) => j,
-        Err(e) => return feed.problem(format!("pictures: {e}")),
-    };
-    while feed.running() {
-        if let Err(e) = duplicate(&feed, &id, &jpeg, low) {
-            feed.problem(e.message().to_string());
-            feed.pause(Duration::from_secs(1));
+// Windows lets a program copy each screen only once at a time, so one copier per screen makes the pictures
+// for both the small previews and the full-size feed (whichever are being shown).
+static SCREEN_COPIERS: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+
+/// The screen's preview (low) and full-size feeds that are being shown now
+fn screen_feeds(id: &str) -> [Option<Arc<Feed>>; 2] {
+    let map = feeds().lock().unwrap();
+    [true, false].map(|low| map.get(&format!("screen|{id}|{}", if low { "low" } else { "high" })).filter(|f| f.running()).cloned())
+}
+
+/// A screen feed was started: make sure its screen is being copied
+fn run_screen(_feed: Arc<Feed>, id: String, _low: bool) {
+    let mut copiers = SCREEN_COPIERS.get_or_init(Default::default).lock().unwrap();
+    if !copiers.insert(id.clone()) {
+        return;
+    }
+    drop(copiers);
+    let _ = thread::Builder::new().name(format!("live screen {id}")).spawn(move || copy_screen(id));
+}
+
+fn copy_screen(id: String) {
+    let jpeg = Jpeg::new();
+    loop {
+        // Stop when neither feed is wanted any more (checked while holding the copier list, so a feed
+        // started at this moment either sees this copier still running or starts a new one)
+        {
+            let mut copiers = SCREEN_COPIERS.get_or_init(Default::default).lock().unwrap();
+            if screen_feeds(&id).iter().all(|f| f.is_none()) {
+                copiers.remove(&id);
+                return;
+            }
+        }
+        let result = match &jpeg {
+            Ok(j) => duplicate(&id, j),
+            Err(e) => Err(e.clone()),
+        };
+        if let Err(e) = result {
+            for f in screen_feeds(&id).into_iter().flatten() {
+                f.problem(e.message().to_string());
+            }
+            thread::sleep(Duration::from_secs(1));
         }
     }
 }
 
-/// Copy the screen while the input is wanted (returns to start again when Windows takes the copy away,
+/// Copy the screen while either of its feeds is wanted (returns to start again when Windows takes the copy away,
 /// e.g. when the screen's resolution changes or a full-screen game starts)
-fn duplicate(feed: &Arc<Feed>, id: &str, jpeg: &Jpeg, low: bool) -> windows::core::Result<()> {
-    let (max_w, max_h, gap) = limits(low);
+fn duplicate(id: &str, jpeg: &Jpeg) -> windows::core::Result<()> {
+    let qualities = [limits(true), limits(false)];
     let Some((adapter, output)) = outputs().into_iter().find(|(_, o)| unsafe { o.GetDesc() }.is_ok_and(|d| device_name(&d.DeviceName) == id)) else {
         return Err(windows::core::Error::new(E_FAIL, format!("the screen {id} isn't connected")));
     };
@@ -471,13 +503,19 @@ fn duplicate(feed: &Arc<Feed>, id: &str, jpeg: &Jpeg, low: bool) -> windows::cor
     let duplication = unsafe { output1.DuplicateOutput(&device)? };
     let mut staging: Option<ID3D11Texture2D> = None;
     let mut size = (0u32, 0u32);
-    // A new picture has been copied but not yet made into a JPEG
-    let mut waiting = false;
-    let mut last = Instant::now() - gap;
-    while feed.running() {
+    // A new picture has been copied but not yet made into a JPEG (for the preview, for the full size)
+    let mut waiting = [false, false];
+    let mut last = [Instant::now() - qualities[0].2, Instant::now() - qualities[1].2];
+    loop {
+        let wanted = screen_feeds(id);
+        if wanted.iter().all(|f| f.is_none()) {
+            return Ok(());
+        }
+        // Wait for a change no longer than the quickest feed shown needs
+        let wait = (0..2).filter(|&q| wanted[q].is_some()).map(|q| qualities[q].2).min().unwrap_or(qualities[0].2);
         let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut resource: Option<IDXGIResource> = None;
-        match unsafe { duplication.AcquireNextFrame(gap.as_millis() as u32, &mut info, &mut resource) } {
+        match unsafe { duplication.AcquireNextFrame(wait.as_millis() as u32, &mut info, &mut resource) } {
             Ok(()) => {
                 // LastPresentTime 0: only the mouse moved
                 let copied = (|| -> windows::core::Result<()> {
@@ -500,7 +538,7 @@ fn duplicate(feed: &Arc<Feed>, id: &str, jpeg: &Jpeg, low: bool) -> windows::cor
                     }
                     if let Some(st) = &staging {
                         unsafe { context.CopyResource(st, &texture) };
-                        waiting = true;
+                        waiting = [true, true];
                     }
                     Ok(())
                 })();
@@ -512,8 +550,13 @@ fn duplicate(feed: &Arc<Feed>, id: &str, jpeg: &Jpeg, low: bool) -> windows::cor
             Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => {}
             Err(e) => return Err(e),
         }
-        // Make the newest copy into a JPEG (at most as often as the limit allows)
-        if waiting && last.elapsed() >= gap {
+        // Make the newest copy into a JPEG for each feed shown (at most as often as its limit allows)
+        for q in 0..2 {
+            let Some(feed) = &wanted[q] else { continue };
+            let (max_w, max_h, gap) = qualities[q];
+            if !(waiting[q] && last[q].elapsed() >= gap) {
+                continue;
+            }
             if let Some(st) = &staging {
                 let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
                 unsafe { context.Map(st, 0, D3D11_MAP_READ, 0, Some(&mut mapped))? };
@@ -522,10 +565,11 @@ fn duplicate(feed: &Arc<Feed>, id: &str, jpeg: &Jpeg, low: bool) -> windows::cor
                 let made = jpeg.encode(size.0, size.1, mapped.RowPitch, px, max_w, max_h);
                 unsafe { context.Unmap(st, 0) };
                 feed.publish(made?);
-                last = Instant::now();
-                waiting = false;
+                last[q] = Instant::now();
+                waiting[q] = false;
             }
         }
     }
-    Ok(())
 }
+
+

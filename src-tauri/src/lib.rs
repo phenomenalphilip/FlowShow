@@ -39,6 +39,10 @@ fn allow_flowshow_permissions(window: &tauri::WebviewWindow) {
             || kind == COREWEBVIEW2_PERMISSION_KIND_LOCAL_FONTS)
         {
           args.SetState(COREWEBVIEW2_PERMISSION_STATE_ALLOW)?;
+          // Remembered, so camera names can be listed later without switching a camera on first
+          if let Ok(remember) = windows::core::Interface::cast::<webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2PermissionRequestedEventArgs3>(&args) {
+            let _ = remember.SetSavesInProfile(true);
+          }
         }
         Ok(())
       })),

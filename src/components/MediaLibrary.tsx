@@ -746,10 +746,16 @@ const INPUT_TABS: { kind: LiveInputKind; label: string; icon: typeof Camera }[] 
 ];
 
 /** Inputs: live tiles of every camera, screen and NDI source; click one to make it the background, or drag it into Mix */
+// What the Inputs view found last time (and its tab), so coming back shows it at once
+const inputsSeen: { tab: LiveInputKind; found: Record<LiveInputKind, LiveInput[] | null> } = { tab: 'camera', found: { camera: null, screen: null, ndi: null } };
+
 function InputsView({ onSelectInput, activeInput }: { onSelectInput?: (input: LiveInput) => void; activeInput?: LiveInput | null }) {
    const desktop = isTauri();
-   const [tab, setTab] = useState<LiveInputKind>('camera');
-   const [found, setFound] = useState<Record<LiveInputKind, LiveInput[] | null>>({ camera: null, screen: null, ndi: null });
+   const [tab, setTabState] = useState<LiveInputKind>(inputsSeen.tab);
+   const setTab = (t: LiveInputKind) => { inputsSeen.tab = t; setTabState(t); };
+   const [found, setFoundState] = useState<Record<LiveInputKind, LiveInput[] | null>>(inputsSeen.found);
+   const setFound = (f: (prev: Record<LiveInputKind, LiveInput[] | null>) => Record<LiveInputKind, LiveInput[] | null>) =>
+      setFoundState(prev => { const next = f(prev); inputsSeen.found = next; return next; });
    const [busy, setBusy] = useState(false);
    const [problem, setProblem] = useState<string | null>(null);
 
@@ -773,7 +779,8 @@ function InputsView({ onSelectInput, activeInput }: { onSelectInput?: (input: Li
       setBusy(false);
    };
    useEffect(() => {
-      if (found[tab] === null && (tab === 'camera' || desktop)) void look(tab);
+      // First time: look. After that the last list shows at once and is checked again quietly (cameras and screens are quick)
+      if ((tab === 'camera' || desktop) && (found[tab] === null || tab !== 'ndi')) void look(tab);
    // eslint-disable-next-line react-hooks/exhaustive-deps
    }, [tab]);
 
@@ -828,7 +835,7 @@ function InputsView({ onSelectInput, activeInput }: { onSelectInput?: (input: Li
                               title={`${input.label}\nClick to make it the background · drag into Mix to use it as a layer`}
                               data-input-tile={input.label}>
                               <div className="relative aspect-video overflow-hidden bg-black">
-                                 <LiveInputView input={input} quality={input.kind === 'camera' ? 'high' : 'low'} className="absolute inset-0 w-full h-full" showProblems />
+                                 <LiveInputView input={input} quality={input.kind === 'camera' ? 'high' : 'low'} className="absolute inset-0 w-full h-full" showProblems startAfter={500} />
                                  {on && <span className="absolute top-1 right-1 px-1 py-0.5 rounded bg-pink-600 text-white text-[8px] font-bold tracking-wider">ON SCREEN</span>}
                               </div>
                               <div className="h-6 px-2 flex items-center gap-1.5 text-[11px] text-neutral-300">
