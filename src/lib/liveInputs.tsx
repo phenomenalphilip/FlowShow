@@ -41,10 +41,13 @@ export async function listCameras(): Promise<LiveInput[]> {
       devices = await navigator.mediaDevices.enumerateDevices();
     } catch { /* no camera, or not allowed */ }
   }
-  return devices
+  const list = devices
     .filter(d => d.kind === 'videoinput' && d.deviceId)
     .map((d, i) => ({ kind: 'camera' as const, id: d.deviceId, label: d.label || `Camera ${i + 1}` }));
+  // Real cameras first: virtual ones (NDI Webcam, OBS…) often show nothing and are slow to start
+  return [...list.filter(c => !isVirtualCamera(c.label)), ...list.filter(c => isVirtualCamera(c.label))];
 }
+export const isVirtualCamera = (label: string) => /\bNDI\b|virtual|\bOBS\b|snap camera|xsplit|manycam|droidcam|vcam/i.test(label);
 
 /** This computer's screens (desktop app) */
 export async function listScreens(): Promise<LiveInput[]> {
@@ -107,7 +110,8 @@ function useCamera(id: string | undefined) {
         if (made.users <= 0) { s.getTracks().forEach(t => t.stop()); throw notNeeded(); }
         return s;
       });
-      openQueue = made.stream;
+      // The next camera waits for this one, but never more than 1.5 s (a slow virtual camera mustn't hold up the rest)
+      openQueue = Promise.race([made.stream.catch(() => {}), new Promise(r => window.setTimeout(r, 1500))]);
       entry = made;
       cameras.set(id, entry);
       made.stream.catch(() => { if (cameras.get(id) === made) cameras.delete(id); });
