@@ -13,7 +13,8 @@
         "minWidth": 1100,
         "minHeight": 700,
         "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows --disable-component-update --disk-cache-size=33554432",
-        "dragDropEnabled": false
+        "dragDropEnabled": false,
+        "maximized": true
       }
     ]
   }

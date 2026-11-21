@@ -2386,9 +2386,25 @@ function ControlPanel() {
     const { invoke } = await import('@tauri-apps/api/core');
     for (const o of globalSettings.outputs as OutputSettings[]) {
       if (o.outputType === 'ndi') continue;
-      try { await invoke('close_output_window', { label: `projector-${o.id}` }); } catch { /* not open */ }
+      // Hidden, not destroyed: ready to show again at once next time
+      try { await invoke('close_output_window', { label: `projector-${o.id}`, keep: true }); } catch { /* not open */ }
     }
   };
+  // Get the screen outputs' windows ready in the background shortly after FlowShow starts (and when outputs change),
+  // so launching them is instant instead of a few seconds of black
+  const prepareKey = JSON.stringify((globalSettings.outputs as OutputSettings[]).filter(o => o.enabled && o.outputType !== 'ndi' && o.displayId).map(o => [o.id, o.name]));
+  useEffect(() => {
+    if (!isTauri()) return;
+    const outs = JSON.parse(prepareKey) as [string, string][];
+    if (!outs.length) return;
+    const t = window.setTimeout(async () => {
+      const { invoke } = await import('@tauri-apps/api/core');
+      for (const [id, name] of outs) {
+        try { await invoke('prepare_output_window', { label: `projector-${id}`, url: `/projector/${id}`, title: name }); } catch { /* opens the slow way */ }
+      }
+    }, 3000);
+    return () => window.clearTimeout(t);
+  }, [prepareKey]);
   /** Open every enabled screen (HDMI…) output that has a screen chosen, except one on FlowShow's own screen */
   const openScreenOutputs = async () => {
     if (!isTauri()) return;
@@ -2918,7 +2934,8 @@ function ControlPanel() {
     const url = `/projector/${outputId}`;
 
     let wFeatures = 'width=1280,height=720,menubar=no,toolbar=no';
-    try {
+    // (Browser only: the desktop app places its windows itself, and asking for the screen layout raises a prompt)
+    if (!isTauri()) try {
         if ('getScreenDetails' in window) {
              const details = await (window as any).getScreenDetails();
              const screen = details.screens.find((s: any) => s.label === config.displayId);
@@ -6352,11 +6369,24 @@ function ProjectorView() {
   const [showHint, setShowHint] = useState(onOperatorScreen);
   const closeOutput = () => {
     if (isTauri()) {
-      import('@tauri-apps/api/core').then(({ invoke }) => invoke('close_output_window', { label: `projector-${outputId}` })).catch(() => {});
+      // Hidden, not destroyed: ready to show again at once
+      import('@tauri-apps/api/core').then(({ invoke }) => invoke('close_output_window', { label: `projector-${outputId}`, keep: true })).catch(() => {});
     } else {
       window.close();
     }
   };
+  // The desktop app keeps output windows ready (hidden) so launching them is instant: while hidden, draw nothing
+  const [shown, setShown] = useState(() => !isTauri() || (window as any).__flowshowShown === true);
+  useEffect(() => {
+    if (!isTauri()) return;
+    const onShown = () => setShown(true);
+    const onHidden = () => setShown(false);
+    window.addEventListener('flowshow-output-shown', onShown);
+    window.addEventListener('flowshow-output-hidden', onHidden);
+    // Opened straight away (not prepared first): it is already visible
+    import('@tauri-apps/api/window').then(({ getCurrentWindow }) => getCurrentWindow().isVisible()).then(v => { if (v) setShown(true); }).catch(() => setShown(true));
+    return () => { window.removeEventListener('flowshow-output-shown', onShown); window.removeEventListener('flowshow-output-hidden', onHidden); };
+  }, []);
   // Esc always closes an output window (only the operator's keyboard can reach it)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); closeOutput(); } };
@@ -6458,7 +6488,7 @@ function ProjectorView() {
           {!liveState.isPresenting && <div className="text-neutral-400 text-sm mt-1">Nothing is being presented yet: in FlowShow, click the Presenting button (top right) and pick a slide.</div>}
         </div>
       )}
-      <div className={`w-full h-full transition-opacity duration-700 ease-in-out ${liveState.isPresenting ? 'opacity-100' : 'opacity-0'}`}>
+      {shown && <div className={`w-full h-full transition-opacity duration-700 ease-in-out ${liveState.isPresenting ? 'opacity-100' : 'opacity-0'}`}>
         <FixedStage className="w-full h-full relative">
           {isStageOutput(outputConfig) ? (
             <StageScreen
@@ -6483,7 +6513,7 @@ function ProjectorView() {
             />
           )}
         </FixedStage>
-      </div>
+      </div>}
     </div>
   );
 }

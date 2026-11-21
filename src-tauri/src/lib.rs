@@ -78,7 +78,7 @@ async fn open_output_window(
   focus: Option<bool>,
 ) -> Result<(), String> {
   let skip_taskbar = skip_taskbar.unwrap_or(false);
-  use tauri::{Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindowBuilder};
+  use tauri::{Manager, PhysicalPosition, PhysicalSize};
   // See-through or not is fixed when a window is made: a change needs a new window
   let remake = {
     let mut made = TRANSPARENT_WINDOWS.lock().unwrap();
@@ -103,26 +103,24 @@ async fn open_output_window(
     }
   }
   let window = match app.get_webview_window(&label) {
-    Some(w) => w,
-    None => WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.trim_start_matches('/').into()))
-      .title(title)
-      .visible(false)
-      .decorations(false)
-      .resizable(false)
-      .skip_taskbar(skip_taskbar)
-      .focused(false)
-      .shadow(false)
-      .transparent(transparent)
-      // Black behind the slides (see-through for a transparent NDI key), never the WebView's default white
-      .background_color(tauri::window::Color(0, 0, 0, if transparent { 0 } else { 255 }))
-      .additional_browser_args(BROWSER_ARGS)
-      .build()
-      .map_err(|e| e.to_string())
-      .inspect(|w| {
-        // Outputs can show cameras without asking
-        #[cfg(windows)]
-        allow_flowshow_permissions(w);
-      })?,
+    Some(w) => {
+      // Ready already (prepared, or opened before): only its address may need changing (e.g. ?operator=1)
+      let same = OUTPUT_URLS.lock().unwrap().get(&label).is_some_and(|u| *u == url);
+      if !same {
+        if let Ok(mut current) = w.url() {
+          let (path, query) = url.split_once('?').map(|(p, q)| (p, Some(q))).unwrap_or((url.as_str(), None));
+          current.set_path(path);
+          current.set_query(query);
+          let _ = w.navigate(current);
+        }
+        OUTPUT_URLS.lock().unwrap().insert(label.clone(), url.clone());
+      }
+      w
+    }
+    None => {
+      OUTPUT_URLS.lock().unwrap().insert(label.clone(), url.clone());
+      make_output_window(&app, &label, &url, &title, transparent, skip_taskbar)?
+    }
   };
   // A new window gets its system handle a moment after it is made: wait for it (so NDI can capture it straight away)
   #[cfg(windows)]
@@ -146,6 +144,8 @@ async fn open_output_window(
   if fullscreen {
     window.set_fullscreen(true).map_err(|e| e.to_string())?;
   }
+  // The page draws again (it draws nothing while hidden)
+  let _ = window.eval("window.__flowshowShown = true; window.dispatchEvent(new Event('flowshow-output-shown'));");
   // Windows hands the keyboard to a window that has just appeared: give it back to FlowShow's main window,
   // so shortcuts (Ctrl+O, Space, Ctrl+1…) keep working without clicking the app first
   if !focus.unwrap_or(false) {
@@ -156,14 +156,63 @@ async fn open_output_window(
   Ok(())
 }
 
-/// Close an output window (an NDI output that was switched off, or one being made again)
+/// The address each output window has loaded (so a ready window is only sent somewhere else when it must)
+static OUTPUT_URLS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, String>>> = std::sync::LazyLock::new(Default::default);
+
+/// Make an output window (hidden): black (or see-through for an NDI key), no frame, FlowShow's WebView settings
+fn make_output_window(app: &tauri::AppHandle, label: &str, url: &str, title: &str, transparent: bool, skip_taskbar: bool) -> Result<tauri::WebviewWindow, String> {
+  use tauri::{WebviewUrl, WebviewWindowBuilder};
+  WebviewWindowBuilder::new(app, label, WebviewUrl::App(url.trim_start_matches('/').into()))
+    .title(title)
+    .visible(false)
+    .decorations(false)
+    .resizable(false)
+    .skip_taskbar(skip_taskbar)
+    .focused(false)
+    .shadow(false)
+    .transparent(transparent)
+    // Black behind the slides (see-through for a transparent NDI key), never the WebView's default white
+    .background_color(tauri::window::Color(0, 0, 0, if transparent { 0 } else { 255 }))
+    .additional_browser_args(BROWSER_ARGS)
+    .build()
+    .map_err(|e| e.to_string())
+    .inspect(|w| {
+      // Outputs can show cameras without asking
+      #[cfg(windows)]
+      allow_flowshow_permissions(w);
+    })
+}
+
+/// Get a screen output's window ready in the background (hidden), so launching it later is instant:
+/// making a window and starting FlowShow in it takes a few seconds, showing a ready one doesn't
 #[tauri::command]
-fn close_output_window(app: tauri::AppHandle, label: String) {
+fn prepare_output_window(app: tauri::AppHandle, label: String, url: String, title: String) -> Result<(), String> {
+  use tauri::Manager;
+  if !label.starts_with("projector-") || app.get_webview_window(&label).is_some() {
+    return Ok(());
+  }
+  TRANSPARENT_WINDOWS.lock().unwrap().insert(label.clone(), false);
+  OUTPUT_URLS.lock().unwrap().insert(label.clone(), url.clone());
+  make_output_window(&app, &label, &url, &format!("FlowShow - {title}"), false, true).map(|_| ())
+}
+
+/// Close an output window. keep: only hide it, ready for next time (screen outputs); otherwise it is destroyed
+/// (an NDI output that was switched off, or one being made again)
+#[tauri::command]
+fn close_output_window(app: tauri::AppHandle, label: String, keep: Option<bool>) {
   use tauri::Manager;
   // Only FlowShow's output windows, never the main window
   if label.starts_with("projector-") {
     if let Some(w) = app.get_webview_window(&label) {
-      let _ = w.destroy();
+      if keep.unwrap_or(false) {
+        let _ = w.set_fullscreen(false);
+        let _ = w.hide();
+        // While hidden the page draws nothing (no videos playing out of sight)
+        let _ = w.eval("window.__flowshowShown = false; window.dispatchEvent(new Event('flowshow-output-hidden'));");
+      } else {
+        OUTPUT_URLS.lock().unwrap().remove(&label);
+        let _ = w.destroy();
+      }
     }
   }
 }
@@ -368,7 +417,7 @@ pub fn run() {
       std::thread::spawn(move || responder.respond(files::serve_media(request)));
     })
     .invoke_handler(tauri::generate_handler![
-      save_export, reveal_file, pick_media_file, pick_media_folder, list_media_folder, open_output_window, close_output_window,
+      save_export, reveal_file, pick_media_file, pick_media_folder, list_media_folder, open_output_window, close_output_window, prepare_output_window,
       ndi_info, ndi_peek, ndi_sources, ndi_snapshot, ndi_start, ndi_stop, ndi_status, live_url, live_screens, live_status
     ])
     .build(tauri::generate_context!())
