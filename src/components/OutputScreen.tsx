@@ -11,6 +11,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { loadInstalledFonts } from '../lib/fontStore';
 import { isTauri } from '../lib/tauriScreen';
 import { SmartTextLayout } from './SmartTextLayout';
+import { PagePicture } from '../lib/pages';
 import { FixedStage } from './FixedStage';
 import { PresentationTemplate, getStoredTemplates, subscribeTemplates } from '../lib/templates';
 import { StageScreen } from './StageScreen';
@@ -130,7 +131,10 @@ export function AudienceOutputContent({ output, settings, slide, background, hid
 
       {/* data-text-layer lets the Design canvas tell which words belong to the lyrics */}
       {/* Cleared words stay in place and fade (or leave with the slide's exit), so clearing never cuts */}
-      {shownSlide && resolved && !design?.hideLyrics && !noWords && (
+      {/* A PDF or PowerPoint page: the slide is the picture (it goes with the words: Clear text takes it off) */}
+      {shownSlide?.page && !noWords && <PagePicture page={shownSlide.page} cleared={!showText} fadeSeconds={clearSeconds} />}
+
+      {shownSlide && !shownSlide.page && resolved && !design?.hideLyrics && !noWords && (
         <div data-text-layer="lyrics" style={wordsFaint ? FAINT_WORDS : { display: 'contents' }}>
           <SmartTextLayout
             text={shownSlide.text}

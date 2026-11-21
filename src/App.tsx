@@ -34,6 +34,7 @@ import { FILE_SAVED_EVENT, SavedFile, revealFile } from './lib/nativeFiles';
 import { NdiBadge } from './components/NdiStatus';
 import { get, set } from 'idb-keyval';
 import { SmartTextLayout } from './components/SmartTextLayout';
+import { LIBREOFFICE_URL, NoConverterError, PageThumb, isPdfFile, pdfToPictures, powerPointToPdf, storePages } from './lib/pages';
 import { FixedStage } from './components/FixedStage';
 import { BibleVersion, getBibleList, getBible, saveBible, deleteBible, initDatabase } from './lib/bibleDb';
 import { parseBibleXml, BibleFileError, countVerses } from './lib/xmlParser';
@@ -252,8 +253,53 @@ function ControlPanel() {
     if (showFiles.length) { setPendingShowFiles(showFiles); setIsImportOpen(true); }
   };
   // A choice in the Import window: song files ask Songs or Declarations; FlowShow files and Bibles go straight in
+  // PDF and PowerPoint: each page becomes a slide, shown as it looks in the file (one show per file)
+  const importDocuments = async (files: File[]) => {
+    const progress = (text: string) => setUndoToast({ text, at: Date.now(), kind: 'info', noUndo: true });
+    let added = 0;
+    for (const file of files) {
+      const title = file.name.replace(/\.[^.]+$/, '');
+      try {
+        let pdf: ArrayBuffer;
+        if (isPdfFile(file.name)) pdf = await file.arrayBuffer();
+        else {
+          progress(`Opening "${file.name}"…`);
+          pdf = await powerPointToPdf(file);
+        }
+        const pictures = await pdfToPictures(pdf, (done, total) => progress(`Importing "${title}": page ${done} of ${total}…`));
+        if (!pictures.length) { void showMessage(`"${file.name}" has no pages.`); continue; }
+        const pages = await storePages(title, pictures);
+        const now = Date.now();
+        const show: PresentationItem = {
+          id: `song-${now}-${added}`,
+          title,
+          category: 'Songs',
+          createdAt: new Date().toISOString(),
+          slides: pages.map((page, k) => ({ id: `s-${now}-${added}-${k}`, text: '', type: 'media' as SlideType, page })),
+        };
+        setSongsList(prev => [...prev, show]);
+        added++;
+        progress(`Imported "${title}": ${pages.length} ${pages.length === 1 ? 'slide' : 'slides'}`);
+      } catch (err) {
+        if (err instanceof NoConverterError) {
+          const get = await askConfirm(
+            `To bring in "${file.name}", FlowShow needs PowerPoint or LibreOffice on this computer, to turn its slides into pictures.\n\nLibreOffice is free. Install it, then import again.\n\nOr: open the file in PowerPoint, choose File → Save As → PDF, and import the PDF.`,
+            { okLabel: 'Get LibreOffice (free)' },
+          );
+          if (get) {
+            if (isTauri()) { const { invoke } = await import('@tauri-apps/api/core'); await invoke('open_web_page', { url: LIBREOFFICE_URL }).catch(() => {}); }
+            else window.open(LIBREOFFICE_URL, '_blank');
+          }
+          continue;
+        }
+        void showMessage(`Couldn't import "${file.name}": ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    if (added) setActiveTab('songs');
+  };
   const importChosenFiles = async (kind: ImportKind, files: File[]) => {
-    if (kind === 'flowshow') await importAnyFiles(files);
+    if (kind === 'pdf' || kind === 'powerpoint') await importDocuments(files);
+    else if (kind === 'flowshow') await importAnyFiles(files);
     else if (kind === 'bible') { for (const file of files) await importBibleFile(file); }
     else { setPendingShowFiles(files); setIsImportOpen(true); }
   };
@@ -2496,9 +2542,11 @@ function ControlPanel() {
                            ${slide.disabled ? 'opacity-30 cursor-not-allowed' : ''} ${isLive ? 'border-red-500 shadow-[0_0_20px_rgba(239,68,68,0.2)]' : isPreview ? 'border-blue-500 shadow-[0_0_20px_rgba(59,130,246,0.15)]' : isNextLogical ? 'border-dashed border-white/30 bg-[#0a0a0a]' : 'bg-[#030303] border-white/5 hover:border-white/20 shadow-lg'} ${dragOverSlideIndex === i ? 'border-dashed border-blue-400 opacity-70' : ''}
                          `}
                        >
+                         {slide.page ? <PageThumb page={slide.page} /> : (
                          <FixedStage className="w-full h-full pointer-events-none">
                             <SmartTextLayout text={slide.text} source={slide.source} type={slide.type} styleOverrides={applyGlobalStyles(slide, liveState.settings?.outputs.find(o => o.id === 'main'), liveState.settings)} />
                          </FixedStage>
+                         )}
                          
                          {/* Background media: this slide's own (from here on), or carried on from an earlier slide */}
                          {slideBgs[i] && (
@@ -3076,14 +3124,16 @@ function ControlPanel() {
                         : 'border-white/5 hover:border-pink-500/40'
                     }`}
                   >
+                    {slide.page ? <PageThumb page={slide.page} /> : (
                     <FixedStage className="w-full h-full pointer-events-none">
-                      <SmartTextLayout 
-                        text={slide.text} 
-                        source={slide.source} 
-                        type={slide.type} 
-                        styleOverrides={applyGlobalStyles(slide, liveState.settings?.outputs.find(o => o.id === 'main'), liveState.settings)} 
+                      <SmartTextLayout
+                        text={slide.text}
+                        source={slide.source}
+                        type={slide.type}
+                        styleOverrides={applyGlobalStyles(slide, liveState.settings?.outputs.find(o => o.id === 'main'), liveState.settings)}
                       />
                     </FixedStage>
+                    )}
 
                     {/* Background media: this slide's own (from here on), or carried on from an earlier slide */}
                     {slideBgs[i] && (

@@ -7,6 +7,7 @@ import { type Overlay } from './overlays';
 import { type LiveInput } from './liveInputs';
 import { type ScreenBorder, type LiveMix, type ShowMix, type SavedMix } from './mix';
 import React from 'react';
+import type { SlidePage } from './pages';
 import { LiveTimer, TimerPreset } from './timers';
 import { AppThemeId } from './themes';
 import { AnimationConfig, PresentationTemplate, FALLBACK_ANIMATION, TextPosition } from './templates';
@@ -52,6 +53,8 @@ export type SlideDefinition = {
   declaration?: boolean;
   /** Background media from this slide on (until a later slide has its own): dropped from the Media tab */
   background?: SlideBackground;
+  /** A page of an imported PDF or PowerPoint: the slide is this picture (shown as it looks in the file) */
+  page?: SlidePage;
   animation?: AnimationConfig;
   styleOverrides?: {
     global?: React.CSSProperties & { '--font-scale'?: number };

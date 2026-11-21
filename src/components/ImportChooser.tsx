@@ -8,7 +8,7 @@ import { IMPORT_SOURCES, ImportSource } from '../lib/importers';
 import type { ShowCategory } from './AddSongModal';
 
 /** What a chosen file is meant to be: FlowShow's own files and Bibles go one way, songs from other programs another */
-export type ImportKind = ImportSource | 'flowshow' | 'bible';
+export type ImportKind = ImportSource | 'flowshow' | 'bible' | 'pdf' | 'powerpoint';
 
 interface Tile {
   kind: ImportKind | 'clipboard';
@@ -49,8 +49,8 @@ const SECTIONS: { title: string; tiles: Tile[] }[] = [
       src('text', FileText, '#f59e0b'),
       src('chordpro', Guitar, '#facc15'),
       src('csv', FileSpreadsheet, '#22c55e'),
-      { kind: 'text', label: 'PDF', hint: 'coming soon', Icon: ScrollText, colour: '#ef4444', soon: 'PDF import is coming in a later version.' },
-      { kind: 'text', label: 'PowerPoint', hint: 'coming soon', Icon: Presentation, colour: '#f97316', soon: 'PowerPoint import is coming in a later version.' },
+      { kind: 'pdf', label: 'PDF', hint: 'each page becomes a slide', Icon: ScrollText, colour: '#ef4444', accept: '.pdf' },
+      { kind: 'powerpoint', label: 'PowerPoint', hint: 'each slide, as it looks', Icon: Presentation, colour: '#f97316', accept: '.pptx,.ppt,.pptm,.ppsx,.pps,.odp' },
     ],
   },
   {

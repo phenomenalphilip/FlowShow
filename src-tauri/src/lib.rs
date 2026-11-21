@@ -1,3 +1,4 @@
+mod convert;
 mod files;
 #[cfg(windows)]
 mod live;
@@ -309,6 +310,24 @@ fn save_export(request: tauri::ipc::Request<'_>) -> Result<String, String> {
   files::save_export(&request)
 }
 
+/// A PowerPoint (or OpenDocument) presentation → PDF, made by PowerPoint or LibreOffice on this computer.
+/// The file comes as raw bytes (its name in the "file-name" header); the PDF goes back as raw bytes.
+/// async + a blocking thread: converting can take a while and must not hold up FlowShow.
+#[tauri::command]
+async fn convert_to_pdf(request: tauri::ipc::Request<'_>) -> Result<tauri::ipc::Response, String> {
+  let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err("no file was sent".into()) };
+  let name = request.headers().get("file-name").and_then(|v| v.to_str().ok()).map(files::percent_decode).unwrap_or_else(|| "slides.pptx".into());
+  let bytes = bytes.clone();
+  let pdf = tauri::async_runtime::spawn_blocking(move || convert::to_pdf(&name, &bytes)).await.map_err(|e| e.to_string())??;
+  Ok(tauri::ipc::Response::new(pdf))
+}
+
+/// Open a web page (https) in the user's browser, e.g. where to get LibreOffice
+#[tauri::command]
+fn open_web_page(url: String) -> Result<(), String> {
+  convert::open_web_page(&url)
+}
+
 /// Show a saved file in File Explorer
 #[tauri::command]
 fn reveal_file(path: String) -> Result<(), String> {
@@ -443,7 +462,8 @@ pub fn run() {
     })
     .invoke_handler(tauri::generate_handler![
       save_export, reveal_file, pick_media_file, pick_media_folder, list_media_folder, open_output_window, close_output_window, prepare_output_window,
-      ndi_info, ndi_peek, ndi_sources, ndi_snapshot, ndi_start, ndi_stop, ndi_status, live_url, live_screens, live_status
+      ndi_info, ndi_peek, ndi_sources, ndi_snapshot, ndi_start, ndi_stop, ndi_status, live_url, live_screens, live_status,
+      convert_to_pdf, open_web_page
     ])
     .build(tauri::generate_context!())
     .expect("error while building tauri application")
