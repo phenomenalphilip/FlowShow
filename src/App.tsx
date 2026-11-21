@@ -2527,6 +2527,56 @@ function ControlPanel() {
      });
   };
 
+  // App shortcuts: Ctrl+I import, Ctrl+E export, F11 full screen; 1 / 2 / 3 / ` the modes; Shift+1…6 the lower tabs;
+  // in Scripture: Ctrl+H history, Ctrl+F reference search, Ctrl+B search the Bible
+  const appKeysRef = useRef<() => void>(() => {});
+  const openBottomTab = (tab: 'shows' | 'media' | 'overlays' | 'templates' | 'scripture' | 'timers') => {
+    setBottomTab(tab);
+    if (tab === 'media') setActiveTab('media');
+    else if (tab === 'scripture') setActiveTab('bibles');
+    else if (tab === 'shows') setActiveTab('songs');
+    setBottomPanelCollapsed(false);
+    setFocusMode(false);
+  };
+  const appKeys = (e: KeyboardEvent) => {
+    const ctrl = e.ctrlKey || e.metaKey;
+    const el = e.target as HTMLElement | null;
+    const typing = isTyping(e.target);
+    if (e.key === 'F11' && !ctrl && !e.altKey && !e.shiftKey) { e.preventDefault(); void toggleFullscreen(); return; }
+    if (ctrl && !e.altKey && !e.shiftKey) {
+      if (e.code === 'KeyI' && !el?.isContentEditable) { e.preventDefault(); setImportChooserOpen(true); return; }
+      if (e.code === 'KeyE' && !el?.isContentEditable) { e.preventDefault(); setAppDialog('export'); return; }
+      if (appMode === 'show' && activeTab === 'bibles') {
+        if (e.code === 'KeyH') { e.preventDefault(); setBibleSearchQuery(''); setBibleKeywordQuery(''); setShowBibleHistory(v => !v); return; }
+        if (e.code === 'KeyF' || e.code === 'KeyB') {
+          e.preventDefault();
+          setShowBibleHistory(false);
+          const box = document.querySelector<HTMLInputElement>(e.code === 'KeyF' ? '[data-bible-ref-search]' : '[data-bible-keyword-search]');
+          box?.focus(); box?.select();
+          return;
+        }
+      }
+      return;
+    }
+    if (typing || ctrl || e.altKey) return;
+    if (!e.shiftKey) {
+      if (e.code === 'Digit1') { e.preventDefault(); setAppMode('show'); return; }
+      if (e.code === 'Digit2') { e.preventDefault(); if (appMode !== 'design') openDesign(); return; }
+      if (e.code === 'Digit3') { e.preventDefault(); setAppMode('mix'); return; }
+      if (e.code === 'Backquote') { e.preventDefault(); setAppMode('stage'); return; }
+      return;
+    }
+    const tabs = ['shows', 'media', 'overlays', 'templates', 'scripture', 'timers'] as const;
+    const n = /^Digit([1-6])$/.exec(e.code);
+    if (n) { e.preventDefault(); openBottomTab(tabs[Number(n[1]) - 1]); }
+  };
+  appKeysRef.current = appKeys as any;
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => (appKeysRef.current as any)(e);
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   // Keyboard Navigation Support & Live Production Shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -3706,7 +3756,8 @@ function ControlPanel() {
                    value={bibleSearchQuery} 
                    onChange={handleBibleSearchChange}
                    onKeyDown={handleBibleSearchKeyDown}
-                   placeholder="Ref (Joh 3 16)..." 
+                   placeholder="Ref (Joh 3 16)...  Ctrl+F"
+                   data-bible-ref-search
                    className="w-full bg-white/5 border border-white/10 rounded-lg text-sm px-9 py-2 outline-none focus:border-white/20 transition-all text-white placeholder:text-neutral-500"
                  />
               </div>
@@ -3716,7 +3767,8 @@ function ControlPanel() {
                    type="text" 
                    value={bibleKeywordQuery} 
                    onChange={handleKeywordSearchChange}
-                   placeholder="Keyword (God so loved)..." 
+                   placeholder="Keyword (God so loved)...  Ctrl+B"
+                   data-bible-keyword-search
                    className="w-full bg-white/5 border border-white/10 rounded-lg text-sm px-9 py-2 outline-none focus:border-white/20 transition-all text-white placeholder:text-neutral-500"
                  />
               </div>
@@ -3728,7 +3780,7 @@ function ControlPanel() {
                  }}
                  className={`px-4 py-2 rounded-lg flex items-center gap-2 text-sm font-medium transition-all ${showBibleHistory ? 'bg-blue-600 text-white shadow-md' : 'bg-white/5 border border-transparent text-neutral-400 hover:text-white hover:bg-white/10'}`}
               >
-                 <Clock size={16} /> History
+                 <Clock size={16} /> History <span className="text-[10px] font-mono opacity-60">Ctrl+H</span>
               </button>
               {/* Which Bible (right-click it to rename or delete), and importing another */}
               <div className="ml-auto flex items-center gap-2">
@@ -5798,8 +5850,8 @@ function ControlPanel() {
         <div className="flex items-center gap-3 min-w-0 justify-self-start">
           <div className="flex items-center gap-2 text-xs text-neutral-400">
             <TopMenu label="File" entries={[
-              { label: 'Import…', onClick: () => setImportChooserOpen(true), hint: 'Songs from FlowShow and other programs, documents, the clipboard, templates, profiles, a backup, or a Bible' },
-              { label: 'Export…', onClick: () => setAppDialog('export') },
+              { label: 'Import…', shortcut: 'Ctrl+I', onClick: () => setImportChooserOpen(true), hint: 'Songs from FlowShow and other programs, documents, the clipboard, templates, profiles, a backup, or a Bible' },
+              { label: 'Export…', shortcut: 'Ctrl+E', onClick: () => setAppDialog('export') },
             ]} />
             <input
               ref={fileImportRef}

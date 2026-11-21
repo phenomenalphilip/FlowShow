@@ -124,13 +124,32 @@ const SHORTCUTS: [string, [string, string][]][] = [
     ['Edit a slide’s words (Design mode)', 'Double-click the text'],
   ]],
   ['Scripture', [
+    ['Search for a book, chapter or verse', 'Ctrl + F'],
+    ['Search in the Bible (words)', 'Ctrl + B'],
+    ['Show / hide History', 'Ctrl + H'],
     ['Finish the book or chapter while typing a reference', 'Space · →'],
     ['Show the verse typed', 'Enter'],
     ['Put a verse on the screens', 'Double-click it'],
   ]],
-  ['View', [
-    ['Focus mode', 'Ctrl + Shift + F'],
+  ['Modes', [
+    ['Show', '1'],
+    ['Design', '2'],
+    ['Mix', '3'],
+    ['Stage', '` (the key left of 1)'],
+  ]],
+  ['Lower tabs', [
+    ['Shows', 'Shift + 1'],
+    ['Media', 'Shift + 2'],
+    ['Overlays', 'Shift + 3'],
+    ['Templates', 'Shift + 4'],
+    ['Scripture', 'Shift + 5'],
+    ['Timers', 'Shift + 6'],
+  ]],
+  ['File & view', [
+    ['Import', 'Ctrl + I'],
+    ['Export', 'Ctrl + E'],
     ['Full screen', 'F11'],
+    ['Focus mode', 'Ctrl + Shift + F'],
   ]],
 ];
 
