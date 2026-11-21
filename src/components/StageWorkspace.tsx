@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useDeleteKey } from '../lib/deleteKey';
 import { askConfirm, askText } from '../lib/appDialogs';
 import { AlignCenter, AlignLeft, AlignRight, ArrowDown, ArrowUp, Check, Copy, Eye, EyeOff, ImagePlus, Pencil, Plus, Trash2, Tv, Type } from 'lucide-react';
-import type { OutputSettings, PresentationStyle, SlideDefinition } from '../App';
+import type { OutputSettings, PresentationStyle, SlideDefinition } from '../lib/model';
 import {
   STAGE_ITEM_KINDS, STAGE_LAYOUTS, STAGE_SAMPLES, StageItem, StageItemKind, StageLayout, StageRect,
   allStageLayouts, isReadyMadeStageLayout, stageLayoutFor, StageSlot, STAGE_SLOT_FIELD, STAGE_SLOT_LABEL, stageSlotSlide, stageDrawOrder,

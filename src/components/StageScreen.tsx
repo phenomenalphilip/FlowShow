@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { SmartTextLayout } from './SmartTextLayout';
 import type { TextPosition } from '../lib/templates';
-import type { SlideDefinition } from '../App';
+import type { SlideDefinition } from '../lib/model';
 import { stageDrawOrder, type StageItem, type StageLayout, type StageRect } from '../lib/stageLayouts';
 import { useStageMediaUrl } from '../lib/stageMedia';
 import { mediaUrl } from '../lib/nativeFiles';

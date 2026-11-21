@@ -8,7 +8,7 @@ import {
 } from 'lucide-react';
 import { GROUP_PRESETS, groupColors } from '../lib/slideGroups';
 import { tokenize } from '../lib/TokenEngine';
-import type { CustomTextBox, OutputSettings, SlideDefinition, SlideDesign, TemplateSource } from '../App';
+import type { CustomTextBox, OutputSettings, SlideDefinition, SlideDesign, TemplateSource } from '../lib/model';
 import type { TextPosition } from '../lib/templates';
 import { BOX_COLOR_KEY, BOX_OPACITY_KEY, CONTRAST_KEY, readabilityOf } from '../lib/readability';
 import {

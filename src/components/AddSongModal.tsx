@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { X, Search, Activity } from 'lucide-react';
-import { SlideDefinition } from '../App';
+import { SlideDefinition } from '../lib/model';
 import { lyricsToSections } from '../lib/slideGroups';
 
 /** A show is a Song or a Declaration (each kind uses its own template) */

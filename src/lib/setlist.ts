@@ -1,5 +1,5 @@
 import { get, set } from 'idb-keyval';
-import { SlideDefinition } from '../App';
+import { SlideDefinition } from './model';
 
 export interface SetlistItem {
   id: string;

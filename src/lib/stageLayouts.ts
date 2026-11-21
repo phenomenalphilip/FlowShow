@@ -1,6 +1,6 @@
 import type { TextPosition } from './templates';
 import type React from 'react';
-import type { SlideDefinition } from '../App';
+import type { SlideDefinition } from './model';
 
 /**
  * Stage layouts: what a stage screen (facing the people on stage) shows. Unlike audience templates they

@@ -5,7 +5,7 @@ import {
   Clock, Play, Eye, Layers, Search
 } from 'lucide-react';
 import { ServiceSetlist, SetlistItem } from '../lib/setlist';
-import { SlideDefinition } from '../App';
+import { SlideDefinition } from '../lib/model';
 
 interface SetlistManagerProps {
   setlist: ServiceSetlist;

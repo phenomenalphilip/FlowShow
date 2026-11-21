@@ -4,7 +4,7 @@ import {
   ChevronDown, Copy, Eye, EyeOff, Film, FlipHorizontal, Frame, Type, FlipVertical, Image as ImageIcon, Maximize2, Minimize2, Palette,
   Pencil, Play, Plus, Radio, RefreshCw, RotateCcw, Save, Send, Trash2, ArrowUp, ArrowDown, Video,
 } from 'lucide-react';
-import type { PresentationItem, SlideDefinition } from '../App';
+import type { PresentationItem, SlideDefinition } from '../lib/model';
 import { FixedStage } from './FixedStage';
 import { ColourPalette, Slider, type Phase } from './MixControls';
 export { ColourPalette, Slider, type Phase };

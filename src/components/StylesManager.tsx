@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Plus, Trash, Pencil, Check, X, Sparkles, MonitorPlay, Tv } from 'lucide-react';
-import { BUILT_IN_STYLE_IDS, PresentationStyle, ScreenKind, styleKind } from '../App';
+import { BUILT_IN_STYLE_IDS, PresentationStyle, ScreenKind, styleKind } from '../lib/model';
 import { PresentationTemplate } from '../lib/templates';
 import { STAGE_LAYOUTS, STAGE_SAMPLES, StageLayout, stageLayoutFor, STAGE_SLOT_FIELD, STAGE_SLOT_LABEL, stageSlotSlide } from '../lib/stageLayouts';
 import { InlineTemplateGrid } from './TemplateGalleryModal';

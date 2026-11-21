@@ -3,7 +3,7 @@ import { useDeleteKey } from '../lib/deleteKey';
 import { askText } from '../lib/appDialogs';
 import { AlignCenter, AlignLeft, AlignRight, Check, Copy, Eye, EyeOff, Image as ImageIcon, Monitor as MonitorIcon, Pencil, Play, RotateCcw } from 'lucide-react';
 import { DesignMediaControls, chooseDesignMediaFile, newDesignMedia, type DesignMedia } from '../lib/designMedia';
-import type { OutputSettings, SlideDefinition } from '../App';
+import type { OutputSettings, SlideDefinition } from '../lib/model';
 import {
   PresentationTemplate, AnimationConfig, AnimationType, FALLBACK_ANIMATION, SCRIPTURE_SAMPLES, DECLARATION_SAMPLES, saveTemplate, deleteTemplate,
 } from '../lib/templates';

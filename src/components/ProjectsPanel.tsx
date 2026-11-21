@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { askConfirm, askText } from '../lib/appDialogs';
 import { BookOpen, ChevronDown, ChevronRight, Folder, FolderOpen, Image as ImageIcon, Music, Pencil, Plus, Trash, Video, Heading } from 'lucide-react';
 import { HEADER_COLORS, ProjectsState, ServiceSetlist, SetlistItem } from '../lib/setlist';
-import type { SlideDefinition } from '../App';
+import type { SlideDefinition } from '../lib/model';
 
 /** What can be dragged into a setlist (and the setlist's own rows and projects) */
 export const DRAG_SONG = 'application/x-flowshow-song';

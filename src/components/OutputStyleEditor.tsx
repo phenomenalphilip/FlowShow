@@ -4,7 +4,7 @@ import { Rnd } from 'react-rnd';
 import { Bold, Italic, Underline as UnderlineIcon, Strikethrough, AlignLeft, AlignCenter, AlignRight, AlignJustify } from 'lucide-react';
 import { FixedStage } from './FixedStage';
 import { SmartTextLayout } from './SmartTextLayout';
-import { SlideDefinition } from '../App';
+import { SlideDefinition } from '../lib/model';
 import { Sparkles } from 'lucide-react';
 import { TemplateGalleryModal } from './TemplateGalleryModal';
 import { PresentationTemplate } from '../lib/templates';
