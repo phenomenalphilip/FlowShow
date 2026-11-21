@@ -8,7 +8,7 @@ import { PlaybackBar, PLAYBACK_TOGGLE_EVENT, isPlayback, usePlaybackFollower } f
 import { isTyping } from './lib/deleteKey';
 import {
   MixStack, DEFAULT_SHOW_END_FADE, EMPTY_MIX, mainScreenId, mixLayersAt, mixLayersForScreen, mixUrlNow, findMixUrl, mixForSlides, mixToSave,
-  type LiveMix, type LiveMixLayer, type ShowMix, type SavedMix,
+  ScreenBorderView, type ScreenBorder, type LiveMix, type LiveMixLayer, type ShowMix, type SavedMix,
 } from './lib/mix';
 import { OverlayDesignWorkspace } from './components/OverlayDesignWorkspace';
 import React, { useState, useEffect, useRef, useMemo } from 'react';
@@ -160,6 +160,8 @@ export interface PresentationStyle {
   declarationTemplateId?: string;
   /** Optional text-style overrides for lyrics */
   lyricsStyleOverride?: { global?: React.CSSProperties & { '--font-scale'?: number }; layout?: { x: number; y: number; width: number; height: number } };
+  /** A border on every screen with this style (whatever shows: songs, scripture, declarations), over everything */
+  border?: ScreenBorder;
   /** Optional text-style overrides for scripture */
   scriptureStyleOverride?: { global?: React.CSSProperties & { '--font-scale'?: number }; layout?: { x: number; y: number; width: number; height: number }; sourceGlobal?: React.CSSProperties & { '--font-scale'?: number }; sourceLayout?: { x: number; y: number; width: number; height: number } };
 }
@@ -594,6 +596,13 @@ const releaseWaitingBoxes = (slide: SlideDefinition): SlideDefinition => {
 export const getStyleForOutput = (outputConfig: OutputSettings | undefined, settings: GlobalSettings | undefined): PresentationStyle | undefined => {
   if (!outputConfig?.styleId || !settings?.styles) return undefined;
   return settings.styles.find(s => s.id === outputConfig.styleId);
+};
+
+/** A screen's border: its style's, or (a normal screen with no style picked) the Default style's */
+export const screenBorderFor = (outputConfig: OutputSettings | undefined, settings: GlobalSettings | undefined): ScreenBorder | undefined => {
+  if (!outputConfig || !settings?.styles) return undefined;
+  const id = outputConfig.styleId || (isStageOutput(outputConfig) ? undefined : 'default');
+  return id ? settings.styles.find(s => s.id === id)?.border : undefined;
 };
 
 type RawBackground = { url?: string; color?: string; type: 'image' | 'video' | 'color' | 'ndi' | 'input' | 'none'; fileName?: string; input?: LiveInput; playback?: boolean } | null | undefined;
@@ -6300,6 +6309,9 @@ function AudienceOutputContent({ output, settings, slide, background, hideBackgr
 
       {/* Mix borders: over everything (outside the border's window stays covered, words and overlays too) */}
       <MixStack layers={mixLayersForScreen(mix?.layers, output?.id, settings?.outputs)} exitFade={mix?.exitFade} preview={designPreview} top />
+
+      {/* The screen's border (its Style): on every slide, over everything */}
+      <ScreenBorderView border={screenBorderFor(output, settings)} />
     </>
   );
 }

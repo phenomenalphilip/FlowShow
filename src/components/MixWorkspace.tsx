@@ -18,7 +18,7 @@ import {
   MixRect, MixSource, MixSpan, NEW_MIX_BOX, SavedMix, ShowMix, layerPlaysAt, layerRuns, mixLayersAt, newMixId, rememberMixUrl, slidesSpan,
 } from '../lib/mix';
 
-type Phase = 'draft' | 'commit';
+export type Phase = 'draft' | 'commit';
 type Sel = { kind: 'layer'; id: string } | { kind: 'design'; slideId: string; mediaId: string } | null;
 type Screen = { id: string; name: string };
 
@@ -72,7 +72,7 @@ const END_OPTIONS: { value: string; label: string }[] = [
 ];
 
 /** A labelled slider for the settings column: dragging shows on the canvas only; letting go saves */
-function Slider({ label, min, max, step, value, format, onChange }: {
+export function Slider({ label, min, max, step, value, format, onChange }: {
   label: string; min: number; max: number; step: number; value: number; format: (v: number) => string;
   onChange: (v: number, phase: Phase) => void;
 }) {
@@ -215,11 +215,6 @@ export function MixWorkspace(p: MixWorkspaceProps) {
     const media: MixMedia = { type: file.type, name: file.name, path: file.path, storedId: file.storedId };
     addLayer(newLayer({ kind: 'media', media }, { kind: 'show' }, baseName(file.name), startBox(media)));
   };
-  /** A border: a window (rounded to start with) with everything outside it covered in black, over everything */
-  const addBorder = () => addLayer(newLayer(
-    { kind: 'border', shape: 'rounded', outside: '#000000', color: '#ffffff', width: 0, glow: 0, radius: 80 },
-    { kind: 'show' }, 'Border', { x: 0.03, y: 0.05, width: 0.94, height: 0.9 },
-  ));
   const addColour = (gradient: boolean) => addLayer(newLayer(
     gradient ? { kind: 'gradient', from: '#1e3a8a', to: '#7c3aed', angle: 135 } : { kind: 'color', color: '#1e3a8a' },
     { kind: 'show' }, gradient ? 'Gradient' : 'Colour wash', { ...FULL_SCREEN_RECT },
@@ -468,9 +463,7 @@ export function MixWorkspace(p: MixWorkspaceProps) {
               <div className="absolute right-0 top-full mt-1 z-50 w-56 py-1 rounded-lg border border-white/10 bg-[#18181b] shadow-2xl" data-mix-add-menu>
                 <button type="button" className={menuItem} onClick={() => { setMenu(null); void addFile(); }} data-mix-add-file><ImageIcon size={13} className="text-neutral-400" /> Picture or video…</button>
                 <button type="button" className={menuItem} onClick={() => { setMenu(null); addColour(false); }} data-mix-add-colour><Palette size={13} className="text-neutral-400" /> Colour wash</button>
-                <button type="button" className={menuItem} onClick={() => { setMenu(null); addColour(true); }} data-mix-add-gradient><Palette size={13} className="text-neutral-400" /> Gradient</button>
-                <button type="button" className={menuItem} onClick={() => { setMenu(null); addBorder(); }} data-mix-add-border><Frame size={13} className="text-neutral-400" /> Border</button>
-                <div className="px-3 pt-1.5 pb-1 text-[10px] text-neutral-500 leading-snug border-t border-white/5 mt-1">Or drag from the Media tab: onto the screen (plays the whole show) or onto a slide in the timeline.</div>
+                <button type="button" className={menuItem} onClick={() => { setMenu(null); addColour(true); }} data-mix-add-gradient><Palette size={13} className="text-neutral-400" /> Gradient</button>                <div className="px-3 pt-1.5 pb-1 text-[10px] text-neutral-500 leading-snug border-t border-white/5 mt-1">Or drag from the Media tab: onto the screen (plays the whole show) or onto a slide in the timeline.</div>
               </div>
             )}
           </div>
@@ -806,7 +799,7 @@ const PALETTE = [
   '#059669', '#65a30d', '#facc15', '#f59e0b', '#ea580c', '#dc2626', '#be123c', '#db2777',
   '#c026d3', '#7c3aed', '#4c1d95', '#78350f',
 ];
-function ColourPalette({ value, onChange }: { value: string; onChange: (v: string, phase: Phase) => void }) {
+export function ColourPalette({ value, onChange }: { value: string; onChange: (v: string, phase: Phase) => void }) {
   const current = value.toLowerCase();
   return (
     <div className="flex flex-wrap items-center gap-1" data-mix-palette>

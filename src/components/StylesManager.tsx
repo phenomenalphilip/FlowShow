@@ -6,6 +6,9 @@ import { STAGE_LAYOUTS, STAGE_SAMPLES, StageLayout, stageLayoutFor, STAGE_SLOT_F
 import { InlineTemplateGrid } from './TemplateGalleryModal';
 import { FixedStage } from './FixedStage';
 import { StageScreen } from './StageScreen';
+import { ColourPalette, Slider } from './MixWorkspace';
+import { segBtn } from './DesignControls';
+import { DEFAULT_SCREEN_BORDER, ScreenBorderView, type ScreenBorder } from '../lib/mix';
 
 interface StylesManagerProps {
   styles: PresentationStyle[];
@@ -302,6 +305,9 @@ export function StylesManager({ styles, stageLayouts, templates, onAdd, onUpdate
                 </Row>
               </Section>
 
+              {/* Screen border */}
+              <ScreenBorderSection border={selected.border} onChange={(border) => update({ border })} />
+
               {/* Active Layers */}
               <Section title="Active layers">
                 {(['background', 'slide', 'overlays'] as const).map(layer => (
@@ -386,6 +392,78 @@ export function StylesManager({ styles, stageLayouts, templates, onAdd, onUpdate
           Select a style or create one.
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── Screen border ────────────────────────────────────────────────────────────
+
+/**
+ * A border on every screen with this style: a window (rectangle, rounded or oval); everything outside it is covered
+ * (black, or any colour), over everything that shows, with an optional edge line. It stays the same for songs,
+ * scripture and declarations.
+ */
+function ScreenBorderSection({ border, onChange }: { border: ScreenBorder | undefined; onChange: (b: ScreenBorder | undefined) => void }) {
+  const b = border;
+  const set = (patch: Partial<ScreenBorder>) => onChange({ ...(b || DEFAULT_SCREEN_BORDER), ...patch });
+  // The window's margins from the screen's edges (left/right and top/bottom, in % of the screen), kept centred
+  const marginX = b ? Math.round(b.layout.x * 1000) / 10 : 3;
+  const marginY = b ? Math.round(b.layout.y * 1000) / 10 : 5;
+  const setMargins = (mx: number, my: number) => set({ layout: { x: mx / 100, y: my / 100, width: 1 - (2 * mx) / 100, height: 1 - (2 * my) / 100 } });
+  return (
+    <Section title="Screen border">
+      <Row label="Border">
+        <Toggle checked={!!b?.on} onChange={(v) => onChange(v ? { ...(b || DEFAULT_SCREEN_BORDER), on: true } : b ? { ...b, on: false } : undefined)} />
+      </Row>
+      {b?.on && (
+        <div className="px-4 py-3 space-y-3" data-style-border>
+          <p className="text-[11px] text-neutral-500 leading-snug">On every slide of every screen with this style (songs, scripture and declarations alike), over everything: outside the shape stays covered, whatever you show.</p>
+          {/* A small preview */}
+          <div className="relative w-full max-w-[320px] mx-auto aspect-video rounded overflow-hidden" style={{ background: 'repeating-linear-gradient(45deg, #334155 0 12px, #475569 12px 24px)' }}>
+            <div className="absolute inset-0 flex items-center justify-center text-white/80 text-sm font-bold tracking-wide">Your slides</div>
+            <ScreenBorderPreview border={b} />
+          </div>
+          <div className="flex items-center gap-2 text-[11px] text-neutral-400">
+            <span className="w-[72px] shrink-0">Shape</span>
+            <div className="flex rounded overflow-hidden">
+              {([['rect', 'Rectangle'], ['rounded', 'Rounded'], ['oval', 'Oval']] as const).map(([s, label]) => (
+                <button key={s} type="button" onClick={() => set({ shape: s })} className={segBtn(b.shape === s)} data-style-border-shape={s}>{label}</button>
+              ))}
+            </div>
+          </div>
+          {b.shape === 'rounded' && <Slider label="Corners" min={0} max={540} step={1} value={b.radius} format={(v) => `${v}px`} onChange={(v) => set({ radius: v })} />}
+          <Slider label="Left / right" min={0} max={45} step={0.5} value={marginX} format={(v) => `${v}%`} onChange={(v) => setMargins(v, marginY)} />
+          <Slider label="Top / bottom" min={0} max={45} step={0.5} value={marginY} format={(v) => `${v}%`} onChange={(v) => setMargins(marginX, v)} />
+          <div>
+            <div className="flex items-center justify-between text-[11px] text-neutral-400 mb-1">
+              <span>Outside</span>
+              <button type="button" onClick={() => set({ outside: b.outside === 'transparent' ? '#000000' : 'transparent' })} className="text-neutral-500 hover:text-white">
+                {b.outside === 'transparent' ? 'Cover it' : 'Don’t cover'}
+              </button>
+            </div>
+            {b.outside === 'transparent'
+              ? <p className="text-[11px] text-neutral-500">Not covered: only the edge line shows.</p>
+              : <ColourPalette value={b.outside} onChange={(v) => set({ outside: v })} />}
+          </div>
+          <div className="space-y-1.5">
+            <div className="text-[11px] text-neutral-400">Edge line</div>
+            <ColourPalette value={b.color} onChange={(v) => set({ color: v })} />
+            <Slider label="Thickness" min={0} max={120} step={1} value={b.width} format={(v) => v ? `${v}px` : 'none'} onChange={(v) => set({ width: v })} />
+            {b.width > 0 && <Slider label="Glow" min={0} max={200} step={1} value={b.glow} format={(v) => v ? `${v}px` : 'none'} onChange={(v) => set({ glow: v })} />}
+          </div>
+        </div>
+      )}
+    </Section>
+  );
+}
+
+/** The border drawn small: px values are for a 1920×1080 screen, so it's drawn at that size and scaled down */
+function ScreenBorderPreview({ border }: { border: ScreenBorder }) {
+  return (
+    <div className="absolute inset-0">
+      <FixedStage className="w-full h-full">
+        {() => <ScreenBorderView border={border} />}
+      </FixedStage>
     </div>
   );
 }

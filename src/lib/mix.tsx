@@ -363,21 +363,31 @@ function MixLayerView({ layer, preview }: { layer: LiveMixLayer; preview?: boole
   );
 }
 
-/** A border layer: the window (its box) shows what is under it; everything outside is covered, and an edge line can run round it */
-function BorderLayerView({ layer, box, fadeIn, fadeOut, opacity }: { layer: LiveMixLayer; box: React.CSSProperties; fadeIn: number; fadeOut: number; opacity: number }) {
-  const b = layer.source as Extract<MixSource, { kind: 'border' }>;
+/** A screen's border (Settings → Styles): the window's place on the screen (0–1) plus how it looks. On every slide, over everything. */
+export interface ScreenBorder {
+  on: boolean;
+  shape: 'rect' | 'rounded' | 'oval';
+  radius: number;
+  outside: string;
+  color: string;
+  width: number;
+  glow: number;
+  layout: MixRect;
+}
+export const DEFAULT_SCREEN_BORDER: ScreenBorder = { on: true, shape: 'rounded', radius: 80, outside: '#000000', color: '#ffffff', width: 0, glow: 0, layout: { x: 0.03, y: 0.05, width: 0.94, height: 0.9 } };
+
+/** The window of a border: its box shows what is under it, its huge outer shadow covers everything outside (following its shape) */
+function borderWindowStyle(b: { shape?: 'rect' | 'rounded' | 'oval'; outside?: string; color: string; width: number; glow: number; radius: number }, box: React.CSSProperties): React.CSSProperties {
   const shape = b.shape || 'rect';
   const outside = b.outside || '#000000';
   const width = Math.max(0, b.width || 0);
   const glow = Math.max(0, b.glow || 0);
-  // The window's huge outer shadow covers everything outside it (following its shape); the edge line is its border,
-  // and the glow spreads both ways from the line (drawn over the covering)
   const shadows = [
     glow > 0 && width > 0 ? `0 0 ${glow}px ${glow / 2}px ${b.color}` : '',
     glow > 0 && width > 0 ? `inset 0 0 ${glow}px ${glow / 2}px ${b.color}` : '',
     outside !== 'transparent' ? `0 0 0 6000px ${outside}` : '',
   ].filter(Boolean).join(', ');
-  const windowStyle: React.CSSProperties = {
+  return {
     ...box,
     overflow: undefined,
     boxSizing: 'border-box',
@@ -385,6 +395,23 @@ function BorderLayerView({ layer, box, fadeIn, fadeOut, opacity }: { layer: Live
     border: width > 0 ? `${width}px solid ${b.color}` : undefined,
     boxShadow: shadows || undefined,
   };
+}
+
+/** A screen's border, drawn over everything on that screen */
+export function ScreenBorderView({ border }: { border: ScreenBorder | undefined }) {
+  if (!border?.on) return null;
+  const l = border.layout;
+  const box: React.CSSProperties = { position: 'absolute', left: pct(l.x), top: pct(l.y), width: pct(l.width), height: pct(l.height) };
+  return (
+    <div className="absolute inset-0 pointer-events-none overflow-hidden" style={{ zIndex: 70 }} data-screen-border>
+      <div style={borderWindowStyle(border, box)} data-screen-border-window />
+    </div>
+  );
+}
+
+/** A border layer: the window (its box) shows what is under it; everything outside is covered, and an edge line can run round it */
+function BorderLayerView({ layer, box, fadeIn, fadeOut, opacity }: { layer: LiveMixLayer; box: React.CSSProperties; fadeIn: number; fadeOut: number; opacity: number }) {
+  const windowStyle = borderWindowStyle(layer.source as Extract<MixSource, { kind: 'border' }>, box);
   return (
     <motion.div
       className="absolute inset-0 pointer-events-none overflow-hidden"
