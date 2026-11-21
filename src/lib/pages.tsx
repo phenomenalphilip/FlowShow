@@ -71,6 +71,23 @@ export const isPdfFile = (name: string) => /\.pdf$/i.test(name);
 export const isPowerPointFile = (name: string) => /\.(pptx|ppt|pptm|ppsx|pps|odp)$/i.test(name);
 export const LIBREOFFICE_URL = 'https://www.libreoffice.org/download/download-libreoffice/';
 
+/** Which program can turn PowerPoints into pictures here: "PowerPoint", "LibreOffice", or null (neither) */
+export async function pdfConverter(): Promise<string | null> {
+  if (!isTauri()) return null;
+  const { invoke } = await import('@tauri-apps/api/core');
+  return invoke<string | null>('pdf_converter').catch(() => null);
+}
+
+/** Open LibreOffice's download page in the browser */
+export async function openLibreOfficePage() {
+  if (isTauri()) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    await invoke('open_web_page', { url: LIBREOFFICE_URL }).catch(() => {});
+  } else {
+    window.open(LIBREOFFICE_URL, '_blank');
+  }
+}
+
 /** No PowerPoint and no LibreOffice on this computer: a PowerPoint can't be turned into pictures */
 export class NoConverterError extends Error {
   constructor() { super('NO_CONVERTER'); this.name = 'NoConverterError'; }

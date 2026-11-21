@@ -74,7 +74,7 @@ export function ProjectsPanel({ state, onChange, setlistOpen, activeItemId, onOp
     if (songId) {
       const song = getSong(songId);
       if (!song) return null;
-      return { id: `setlist-song-${now}`, type: 'song', title: song.title, subtitle: `${song.category === 'Declarations' ? 'Declaration · ' : ''}${song.slides.length} slides`, songId: song.id, slides: song.slides };
+      return { id: `setlist-song-${now}`, type: 'song', title: song.title, subtitle: `${song.category === 'Declarations' ? 'Declaration · ' : song.category === 'Presentations' ? 'Presentation · ' : ''}${song.slides.length} slides`, songId: song.id, slides: song.slides };
     }
     const media = dt.getData(DRAG_MEDIA);
     if (media) {

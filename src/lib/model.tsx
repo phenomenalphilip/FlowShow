@@ -630,7 +630,7 @@ export interface GroupLook {
 export interface PresentationItem {
   id: string;
   title: string;
-  /** A show is a Song or a Declaration (older saved Presentations are turned into Songs when loaded) */
+  /** A Song, a Declaration, or a Presentation (an imported PDF or PowerPoint: its slides are pictures) */
   category?: 'Presentations' | 'Songs' | 'Declarations';
   createdAt?: string;
   modifiedAt?: string;

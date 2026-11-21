@@ -6,6 +6,7 @@ import {
 import { Dialog } from './AppMenus';
 import { IMPORT_SOURCES, ImportSource } from '../lib/importers';
 import type { ShowCategory } from './AddSongModal';
+import { openLibreOfficePage, pdfConverter } from '../lib/pages';
 
 /** What a chosen file is meant to be: FlowShow's own files and Bibles go one way, songs from other programs another */
 export type ImportKind = ImportSource | 'flowshow' | 'bible' | 'pdf' | 'powerpoint';
@@ -75,9 +76,13 @@ export function ImportChooser({ onClose, onFiles, onPaste }: {
   const [text, setText] = useState('');
   const [category, setCategory] = useState<ShowCategory>('Songs');
 
+  // PowerPoint needs PowerPoint or LibreOffice on this computer: warn before a file is even chosen
+  const [needConverter, setNeedConverter] = useState(false);
   const choose = async (t: Tile) => {
     setSoon(null);
+    setNeedConverter(false);
     if (t.soon) { setSoon(t.soon); return; }
+    if (t.kind === 'powerpoint' && !(await pdfConverter())) { setNeedConverter(true); return; }
     if (t.kind === 'clipboard') {
       setPasting(true);
       // Fill in what's on the clipboard when the browser allows it; otherwise paste with Ctrl+V
@@ -156,6 +161,17 @@ export function ImportChooser({ onClose, onFiles, onPaste }: {
           </div>
         ))}
         {soon && <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200" data-import-soon>{soon}</div>}
+        {needConverter && (
+          <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-100 space-y-2" data-import-need-converter>
+            <div className="text-sm font-bold text-amber-300">PowerPoint or LibreOffice needed</div>
+            <p className="leading-relaxed">To bring in PowerPoint slides as they look, FlowShow needs PowerPoint or LibreOffice on this computer. LibreOffice is free: install it, then import again.</p>
+            <p className="leading-relaxed text-amber-200/80">Or open the file in PowerPoint, choose File → Save As → PDF, and import the PDF.</p>
+            <div className="flex items-center gap-2 pt-1">
+              <button type="button" onClick={() => void openLibreOfficePage()} className="px-3 py-1.5 rounded-md bg-amber-500 hover:bg-amber-400 text-black font-semibold" data-get-libreoffice>Get LibreOffice (free)</button>
+              <button type="button" onClick={() => setNeedConverter(false)} className="px-3 py-1.5 rounded-md text-amber-200 hover:bg-white/5">OK</button>
+            </div>
+          </div>
+        )}
         <p className="text-[11px] text-neutral-500 flex items-center gap-1.5"><Music size={12} /> A .zip of song files works too, from any of the song options.</p>
       </div>
       <input

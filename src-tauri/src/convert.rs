@@ -47,6 +47,22 @@ fn soffice() -> Option<PathBuf> {
     places.into_iter().find(|p| p.exists())
 }
 
+/// Which converter this computer has: "PowerPoint", "LibreOffice", or None (then a PowerPoint can't be imported)
+pub fn available() -> Option<&'static str> {
+    #[cfg(windows)]
+    {
+        let installed = quiet(Command::new("reg").args(["query", r"HKCR\PowerPoint.Application\CLSID"]))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        if installed {
+            return Some("PowerPoint");
+        }
+    }
+    soffice().map(|_| "LibreOffice")
+}
+
 /// Ask PowerPoint to save it as PDF. Ok(false): PowerPoint isn't installed.
 #[cfg(windows)]
 fn with_powerpoint(input: &Path, output: &Path) -> Result<bool, String> {

@@ -10,7 +10,7 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { askConfirm, askText, showMessage, AppDialogHost } from './lib/appDialogs';
 import { DEFAULT_TIMER_PRESETS, TimerPreset, setSharedTimer, timeLeft, timerBusy } from './lib/timers';
 import { TimersPanel } from './components/TimersPanel';
-import { Settings, MonitorPlay, Mic, BookOpen, Music, Image as ImageIcon, Video, Plus, Search, List, X, LayoutTemplate, Layers, Play, EyeOff, FileText, Activity, Upload, Edit2, Copy, Trash, Split, ExternalLink as LaunchIcon, Clock, Lock, Radio, Tv, Wifi, ListOrdered, Check, Sparkles, ChevronRight, ChevronLeft, Film, Folder, RotateCcw, Eye, MoreHorizontal, Sliders, Info, Wand2, Timer as TimerIcon } from 'lucide-react';
+import { Settings, MonitorPlay, Mic, BookOpen, Music, Image as ImageIcon, Video, Plus, Search, List, X, LayoutTemplate, Layers, Play, EyeOff, FileText, Activity, Upload, Edit2, Copy, Trash, Split, ExternalLink as LaunchIcon, Clock, Lock, Radio, Tv, Wifi, ListOrdered, Check, Sparkles, ChevronRight, ChevronLeft, Film, Folder, RotateCcw, Eye, MoreHorizontal, Sliders, Info, Wand2, Timer as TimerIcon, Presentation } from 'lucide-react';
 import { DEFAULT_APP_THEME, applyAppTheme } from './lib/themes';
 import { ndiService } from './lib/ndi';
 import { SetlistManager } from './components/SetlistManager';
@@ -34,7 +34,7 @@ import { FILE_SAVED_EVENT, SavedFile, revealFile } from './lib/nativeFiles';
 import { NdiBadge } from './components/NdiStatus';
 import { get, set } from 'idb-keyval';
 import { SmartTextLayout } from './components/SmartTextLayout';
-import { LIBREOFFICE_URL, NoConverterError, PageThumb, isPdfFile, pdfToPictures, powerPointToPdf, storePages } from './lib/pages';
+import { NoConverterError, PageThumb, isPdfFile, openLibreOfficePage, pdfToPictures, powerPointToPdf, storePages } from './lib/pages';
 import { FixedStage } from './components/FixedStage';
 import { BibleVersion, getBibleList, getBible, saveBible, deleteBible, initDatabase } from './lib/bibleDb';
 import { parseBibleXml, BibleFileError, countVerses } from './lib/xmlParser';
@@ -273,7 +273,7 @@ function ControlPanel() {
         const show: PresentationItem = {
           id: `song-${now}-${added}`,
           title,
-          category: 'Songs',
+          category: 'Presentations',
           createdAt: new Date().toISOString(),
           slides: pages.map((page, k) => ({ id: `s-${now}-${added}-${k}`, text: '', type: 'media' as SlideType, page })),
         };
@@ -283,13 +283,10 @@ function ControlPanel() {
       } catch (err) {
         if (err instanceof NoConverterError) {
           const get = await askConfirm(
-            `To bring in "${file.name}", FlowShow needs PowerPoint or LibreOffice on this computer, to turn its slides into pictures.\n\nLibreOffice is free. Install it, then import again.\n\nOr: open the file in PowerPoint, choose File → Save As → PDF, and import the PDF.`,
+            `PowerPoint or LibreOffice needed.\n\nTo bring in "${file.name}" as it looks, FlowShow needs PowerPoint or LibreOffice on this computer. LibreOffice is free: install it, then import again.\n\nOr: open the file in PowerPoint, choose File → Save As → PDF, and import the PDF.`,
             { okLabel: 'Get LibreOffice (free)' },
           );
-          if (get) {
-            if (isTauri()) { const { invoke } = await import('@tauri-apps/api/core'); await invoke('open_web_page', { url: LIBREOFFICE_URL }).catch(() => {}); }
-            else window.open(LIBREOFFICE_URL, '_blank');
-          }
+          if (get) await openLibreOfficePage();
           continue;
         }
         void showMessage(`Couldn't import "${file.name}": ${err instanceof Error ? err.message : String(err)}`);
@@ -342,7 +339,7 @@ function ControlPanel() {
   const lastSlideTabRef = useRef<'songs' | 'setlist'>('songs');
   useEffect(() => { if (activeTab === 'songs' || activeTab === 'setlist') lastSlideTabRef.current = activeTab; }, [activeTab]);
   const [bottomTab, setBottomTab] = useState<'shows' | 'media' | 'audio' | 'overlays' | 'templates' | 'scripture' | 'timers' | 'calendar' | 'functions'>('shows');
-  const [selectedCategory, setSelectedCategory] = useState<'all' | 'Songs' | 'Declarations'>('all');
+  const [selectedCategory, setSelectedCategory] = useState<'all' | 'Songs' | 'Declarations' | 'Presentations'>('all');
   const [rightInspectorTab, setRightInspectorTab] = useState<'groups' | 'metadata'>('groups');
   const [selectedProjectFolder, setSelectedProjectFolder] = useState<string>('11/18/26');
 
@@ -558,8 +555,12 @@ function ControlPanel() {
     get('songsList').then((val) => {
       if (val) {
         skipNextUndoRecordRef.current = true; // loading isn't an edit
-        // There are only Songs and Declarations now: older Presentations (or shows with no category) become Songs
-        setSongsList((val as PresentationItem[]).map(s => s.category === 'Declarations' || s.category === 'Songs' ? s : { ...s, category: 'Songs' as const }));
+        // A show of PDF/PowerPoint pages is a Presentation; any other is a Song or a Declaration
+        // (older word-only "Presentations" become Songs)
+        setSongsList((val as PresentationItem[]).map(s => {
+          const kind = s.slides?.some(x => x.page) ? 'Presentations' as const : s.category === 'Declarations' ? 'Declarations' as const : 'Songs' as const;
+          return s.category === kind ? s : { ...s, category: kind };
+        }));
       }
       songsLoadedRef.current = true;
     });
@@ -3902,7 +3903,9 @@ function ControlPanel() {
               </div>
               <div>
                 <span className="text-neutral-500 block text-[10px]">Category</span>
-                {activeSong && songsList.some(sg => sg.id === activeSong.id) ? (
+                {activeSong?.category === 'Presentations' ? (
+                  <span className="text-neutral-300" title="Imported from a PDF or PowerPoint: its slides are pictures">Presentation</span>
+                ) : activeSong && songsList.some(sg => sg.id === activeSong.id) ? (
                   <select
                     value={activeSong.category === 'Declarations' ? 'Declarations' : 'Songs'}
                     onChange={(e) => setShowCategory(activeSong.id, e.target.value as 'Songs' | 'Declarations')}
@@ -3945,6 +3948,7 @@ function ControlPanel() {
     const activeSong = songsList[activeItemIndex] || songsList[0];
     const songsCount = songsList.filter(s => s.category === 'Songs').length;
     const declarationsCount = songsList.filter(s => s.category === 'Declarations').length;
+    const presentationsCount = songsList.filter(s => s.category === 'Presentations').length;
 
     return (
       <div className="h-full bg-[#0c0c11] flex flex-col overflow-hidden select-none">
@@ -4042,6 +4046,21 @@ function ControlPanel() {
                   <span>Declarations</span>
                 </div>
                 <span className="text-[10px] font-mono text-neutral-500">{declarationsCount}</span>
+              </button>
+
+              {/* Imported PDFs and PowerPoints (their slides are pictures) */}
+              <button
+                onClick={() => setSelectedCategory('Presentations')}
+                className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                  selectedCategory === 'Presentations' ? 'bg-pink-500/15 text-pink-300 font-semibold' : 'text-neutral-400 hover:text-white hover:bg-white/5'
+                }`}
+                data-category-presentations
+              >
+                <div className="flex items-center gap-2">
+                  <Presentation size={13} />
+                  <span>Presentations</span>
+                </div>
+                <span className="text-[10px] font-mono text-neutral-500">{presentationsCount}</span>
               </button>
 
               <button 
@@ -4143,7 +4162,7 @@ function ControlPanel() {
                 </div>
                 <div className="flex justify-between items-center py-1 border-b border-white/5">
                   <span className="text-neutral-500">Category</span>
-                  <span className="text-neutral-300 italic">{activeSong?.category === 'Declarations' ? 'Declarations' : 'Songs'}</span>
+                  <span className="text-neutral-300 italic">{activeSong?.category === 'Declarations' || activeSong?.category === 'Presentations' ? activeSong.category : 'Songs'}</span>
                 </div>
                 <div className="flex justify-between items-center py-1 border-b border-white/5">
                   <span className="text-neutral-500">Slides</span>
@@ -4549,7 +4568,7 @@ function ControlPanel() {
                    }
                    setContextMenu(null);
                  }}><Edit2 size={14}/> Rename {contextMenu.type === 'song' ? 'Song' : 'Bible'}</button>
-               {contextMenu.type === 'song' && (() => {
+               {contextMenu.type === 'song' && songsList.find(s => s.id === contextMenu.id)?.category !== 'Presentations' && (() => {
                  const show = songsList.find(s => s.id === contextMenu.id);
                  const current = show?.category === 'Declarations' ? 'Declarations' : 'Songs';
                  return (

@@ -322,6 +322,12 @@ async fn convert_to_pdf(request: tauri::ipc::Request<'_>) -> Result<tauri::ipc::
   Ok(tauri::ipc::Response::new(pdf))
 }
 
+/// Can PowerPoint files be imported here? "PowerPoint", "LibreOffice" or null (neither installed)
+#[tauri::command]
+async fn pdf_converter() -> Option<String> {
+  tauri::async_runtime::spawn_blocking(|| convert::available().map(String::from)).await.ok().flatten()
+}
+
 /// Open a web page (https) in the user's browser, e.g. where to get LibreOffice
 #[tauri::command]
 fn open_web_page(url: String) -> Result<(), String> {
@@ -463,7 +469,7 @@ pub fn run() {
     .invoke_handler(tauri::generate_handler![
       save_export, reveal_file, pick_media_file, pick_media_folder, list_media_folder, open_output_window, close_output_window, prepare_output_window,
       ndi_info, ndi_peek, ndi_sources, ndi_snapshot, ndi_start, ndi_stop, ndi_status, live_url, live_screens, live_status,
-      convert_to_pdf, open_web_page
+      convert_to_pdf, open_web_page, pdf_converter
     ])
     .build(tauri::generate_context!())
     .expect("error while building tauri application")

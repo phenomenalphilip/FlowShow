@@ -6,6 +6,7 @@ import { stageDrawOrder, type StageItem, type StageLayout, type StageRect } from
 import { useStageMediaUrl } from '../lib/stageMedia';
 import { mediaUrl } from '../lib/nativeFiles';
 import { formatClock, timeLeft, useSharedTimer, useTicker } from '../lib/timers';
+import { PageThumb } from '../lib/pages';
 
 /** Plain, steady text for the stage: no shadow, no capitals unless the layout asks for them */
 const STAGE_TEXT: React.CSSProperties = {
@@ -37,6 +38,8 @@ export function StageScreen({ layout, slide, nextSlide, songTitle, background = 
   const timer = useSharedTimer();
   const now = useTicker(!!timer && timer.startedAt !== null, 250);
   const timeUp = !!timer && timeLeft(timer, now) <= 0;
+  // A PDF or PowerPoint page is live: the presenter view (like PowerPoint's), whatever the stage layout
+  if (slide?.page) return <PresenterView slide={slide} nextSlide={nextSlide} cleared={hideText} timer={timer} now={now} />;
   return (
     <>
       <div className="absolute inset-0" style={{ background }} />
@@ -52,6 +55,56 @@ export function StageScreen({ layout, slide, nextSlide, songTitle, background = 
         </div>
       )}
     </>
+  );
+}
+
+/**
+ * Presenter view for presentations (PDF / PowerPoint pages): the page on the screens big on the left, the next page
+ * smaller on the right, and the time under it (like PowerPoint's presenter view).
+ */
+function PresenterView({ slide, nextSlide, cleared, timer, now }: {
+  slide: SlideDefinition;
+  nextSlide: SlideDefinition | null | undefined;
+  cleared: boolean;
+  timer: ReturnType<typeof useSharedTimer>;
+  now: number;
+}) {
+  const clockNow = useTicker(true, 1000);
+  const clock = new Date(clockNow).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const label: React.CSSProperties = { ...STAGE_TEXT, fontSize: 34, color: '#a3a3a3', letterSpacing: '0.12em' };
+  const box = 'absolute rounded-xl overflow-hidden bg-[#111] border-2';
+  const left = timer ? timeLeft(timer, now) : null;
+  return (
+    <div className="absolute inset-0 bg-black" data-stage-presenter>
+      {/* Now: the page on the screens */}
+      <div className="absolute" style={{ left: 50, top: 40, ...label }}>NOW</div>
+      <div className={`${box} ${cleared ? 'border-neutral-700' : 'border-red-500'}`} style={{ left: 40, top: 110, width: 1240, height: 698 }} data-stage-presenter-now>
+        {cleared
+          ? <div className="absolute inset-0 flex items-center justify-center" style={{ ...STAGE_TEXT, fontSize: 60, color: '#737373' }}>Cleared</div>
+          : <PageThumb page={slide.page!} />}
+      </div>
+      <div className="absolute" style={{ left: 50, top: 830, ...STAGE_TEXT, fontSize: 36, color: '#d4d4d4' }}>{slide.page!.name}</div>
+
+      {/* Next */}
+      <div className="absolute" style={{ left: 1330, top: 40, ...label }}>NEXT</div>
+      <div className={`${box} border-neutral-600`} style={{ left: 1320, top: 110, width: 560, height: 315 }} data-stage-presenter-next>
+        {nextSlide?.page
+          ? <PageThumb page={nextSlide.page} />
+          : <div className="absolute inset-0 flex items-center justify-center text-center px-6" style={{ ...STAGE_TEXT, fontSize: 40, color: '#a3a3a3' }}>
+              {nextSlide?.text?.trim() ? nextSlide.text.split('\n')[0] : 'End of presentation'}
+            </div>}
+      </div>
+
+      {/* The time, and the countdown when one is running */}
+      <div className="absolute flex flex-col items-center justify-center" style={{ left: 1320, top: 470, width: 560, height: 420 }}>
+        <div style={{ ...STAGE_TEXT, fontSize: 120, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }} data-stage-presenter-clock>{clock}</div>
+        {left !== null && (
+          <div style={{ ...STAGE_TEXT, fontSize: 90, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap', color: left <= 0 ? '#ef4444' : '#fbbf24' }}>
+            {left <= 0 ? 'TIME UP' : formatClock(left)}
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
