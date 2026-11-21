@@ -14,7 +14,8 @@ import {
 } from '../lib/templates';
 import { SmartTextLayout } from './SmartTextLayout';
 import { FixedStage } from './FixedStage';
-import { TemplateEditor } from './TemplateEditor';
+// The Template editor loads only when a template is opened for editing
+const TemplateEditor = React.lazy(() => import('./TemplateEditor').then(m => ({ default: m.TemplateEditor })));
 import { ExportTemplatesDialog, ImportTemplatesDialog } from './TemplatePackageDialogs';
 
 export interface TemplateGalleryModalProps {
@@ -183,6 +184,7 @@ export function TemplateGalleryModal({
 
         {/* If in Edit Mode, render TemplateEditor */}
         {editingTemplate ? (
+          <React.Suspense fallback={<div className="p-6 text-xs text-neutral-500">Loading…</div>}>
           <TemplateEditor
             template={editingTemplate}
             onSave={handleSaveEditedTemplate}
@@ -192,6 +194,7 @@ export function TemplateGalleryModal({
             onApplyToSong={(t) => onApplyToSong?.(t, selectedSongId, slideOutputTarget === 'all' ? undefined : slideOutputTarget)}
             onClose={() => setEditingTemplate(null)}
           />
+          </React.Suspense>
         ) : (
           <>
             {/* Top Header */}
@@ -769,6 +772,7 @@ export function InlineTemplateGrid({
   if (editingTemplate) {
     return (
       <div className="flex-1 min-h-0 bg-[#09090b] flex flex-col overflow-hidden">
+        <React.Suspense fallback={<div className="p-6 text-xs text-neutral-500">Loading…</div>}>
         <TemplateEditor
           template={editingTemplate}
           onSave={handleSave}
@@ -778,6 +782,7 @@ export function InlineTemplateGrid({
           onApplyToSong={(t) => { handleApply(t); setEditingTemplate(null); }}
           onClose={() => setEditingTemplate(null)}
         />
+        </React.Suspense>
       </div>
     );
   }

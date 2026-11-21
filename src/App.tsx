@@ -2,7 +2,6 @@ import { BrowserRouter, Routes, Route, useParams } from 'react-router-dom';
 import { DesignMediaLayer, type DesignMedia } from './lib/designMedia';
 import { OverlayLayer, newOverlay, overlaysFor, type Overlay } from './lib/overlays';
 import { OverlaysPanel } from './components/OverlaysPanel';
-import { MixWorkspace } from './components/MixWorkspace';
 import { LiveInputView, LiveInputSelect, inputKey, type LiveInput } from './lib/liveInputs';
 import { PlaybackBar, PLAYBACK_TOGGLE_EVENT, isPlayback, usePlaybackFollower } from './lib/playback';
 import { isTyping } from './lib/deleteKey';
@@ -12,6 +11,11 @@ import {
 } from './lib/mix';
 import { OverlayDesignWorkspace } from './components/OverlayDesignWorkspace';
 import React, { useState, useEffect, useRef, useMemo } from 'react';
+// Mix mode and the Stage designer load only when first opened (smaller and quicker to start, also for the output windows)
+const MixWorkspace = React.lazy(() => import('./components/MixWorkspace').then(m => ({ default: m.MixWorkspace })));
+const StageWorkspace = React.lazy(() => import('./components/StageWorkspace').then(m => ({ default: m.StageWorkspace })));
+/** Shown for a moment while a part that loads when opened arrives */
+const LoadingPart = () => <div className="flex-1 flex items-center justify-center text-xs text-neutral-500" data-loading-part>Loading…</div>;
 import { askConfirm, askText, showMessage, AppDialogHost } from './lib/appDialogs';
 import { DEFAULT_TIMER_PRESETS, LiveTimer, TimerPreset, setSharedTimer, timeLeft, timerBusy } from './lib/timers';
 import { TimersPanel } from './components/TimersPanel';
@@ -69,7 +73,7 @@ import { detectGroups, groupColors } from './lib/slideGroups';
 import { GroupMenu } from './components/GroupMenu';
 import { TemplateGalleryModal, TemplateGalleryModalProps, InlineTemplateGrid } from './components/TemplateGalleryModal';
 import { StageScreen } from './components/StageScreen';
-import { StageWorkspace, StageLiveData } from './components/StageWorkspace';
+import type { StageLiveData } from './components/StageWorkspace';
 import { DEFAULT_LYRICS_STAGE_LAYOUT, DEFAULT_SCRIPTURE_STAGE_LAYOUT, StageLayout, stageLayoutFor } from './lib/stageLayouts';
 
 export type SlideType = 'lyrics' | 'scripture' | 'blank' | 'media';
@@ -4584,6 +4588,7 @@ function ControlPanel() {
     if (appMode === 'stage') {
       const stageOutputs = globalSettings.outputs.filter(isStageOutput);
       return (
+        <React.Suspense fallback={<LoadingPart />}>
         <StageWorkspace
           outputs={stageOutputs}
           selectedOutputId={stageOutputId}
@@ -4603,6 +4608,7 @@ function ControlPanel() {
             setStageOutputId(out.id);
           }}
         />
+        </React.Suspense>
       );
     }
 
@@ -5021,6 +5027,7 @@ function ControlPanel() {
     const rawBg = locked ? liveState.frozenStates?.[mainId]?.bg : (liveState.globalBackground || out?.defaultBackground);
     const background = resolveOutputBackground(rawBg, out, globalSettings);
     return (
+      <React.Suspense fallback={<LoadingPart />}>
       <MixWorkspace
         show={show}
         screens={globalSettings.outputs.filter(o => !isStageOutput(o)).map(o => ({ id: o.id, name: o.name }))}
@@ -5061,6 +5068,7 @@ function ControlPanel() {
         onEditInDesign={(slideId) => { setDesignOutputId(mainId); openDesign(slideId); }}
         focus={mixFocus}
       />
+      </React.Suspense>
     );
   };
 

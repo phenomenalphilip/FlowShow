@@ -6,7 +6,7 @@ import { STAGE_LAYOUTS, STAGE_SAMPLES, StageLayout, stageLayoutFor, STAGE_SLOT_F
 import { InlineTemplateGrid } from './TemplateGalleryModal';
 import { FixedStage } from './FixedStage';
 import { StageScreen } from './StageScreen';
-import { ColourPalette, Slider } from './MixWorkspace';
+import { ColourPalette, Slider } from './MixControls';
 import { segBtn } from './DesignControls';
 import { DEFAULT_SCREEN_BORDER, ScreenBorderView, type ScreenBorder } from '../lib/mix';
 

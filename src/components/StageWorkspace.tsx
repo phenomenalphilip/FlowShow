@@ -13,7 +13,7 @@ import { isTauri } from '../lib/tauriScreen';
 import { FixedStage } from './FixedStage';
 import { StageScreen } from './StageScreen';
 import { DesignBox, InlineTextEditor } from './DesignCanvas';
-import { FONT_OPTIONS } from './TemplateEditor';
+import { FONT_OPTIONS } from '../lib/designPresets';
 import { Phase, WEIGHTS, selectCls, segBtn, smallBtn, GroupLabel, Divider, SizeStepper, ColorField, FontSelect, TextPositionSwitch, MiniSlider } from './DesignControls';
 
 /** What a stage output shows right now */

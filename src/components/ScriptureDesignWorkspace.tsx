@@ -7,7 +7,7 @@ import type { OutputSettings, SlideDefinition } from '../App';
 import {
   PresentationTemplate, AnimationConfig, AnimationType, FALLBACK_ANIMATION, SCRIPTURE_SAMPLES, DECLARATION_SAMPLES, saveTemplate, deleteTemplate,
 } from '../lib/templates';
-import { FONT_OPTIONS, MOTION_PRESETS, LAYOUT_PRESETS, SHADOW_PRESETS, MOTION_DEFAULTS, GENERIC_MOTION_DEFAULTS } from './TemplateEditor';
+import { FONT_OPTIONS, MOTION_PRESETS, LAYOUT_PRESETS, SHADOW_PRESETS, MOTION_DEFAULTS, GENERIC_MOTION_DEFAULTS } from '../lib/designPresets';
 import { FixedStage } from './FixedStage';
 import { BOX_COLOR_KEY, BOX_OPACITY_KEY, CONTRAST_KEY, readabilityOf } from '../lib/readability';
 import { DesignBox, Rect, getPlacement, placeAcross, placeDown, resizeBox } from './DesignCanvas';

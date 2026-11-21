@@ -14,7 +14,7 @@ import { BOX_COLOR_KEY, BOX_OPACITY_KEY, CONTRAST_KEY, readabilityOf } from '../
 import {
   PresentationTemplate, AnimationConfig, AnimationType, getScrollPositions, SCROLL_POS_MIN, SCROLL_POS_MAX, FALLBACK_ANIMATION, saveTemplate, categoryForKind, TemplateKind,
 } from '../lib/templates';
-import { FONT_OPTIONS, MOTION_PRESETS, LAYOUT_PRESETS, SHADOW_PRESETS, ScrollMarker, MOTION_DEFAULTS, GENERIC_MOTION_DEFAULTS } from './TemplateEditor';
+import { FONT_OPTIONS, MOTION_PRESETS, LAYOUT_PRESETS, SHADOW_PRESETS, ScrollMarker, MOTION_DEFAULTS, GENERIC_MOTION_DEFAULTS } from '../lib/designPresets';
 import { FixedStage } from './FixedStage';
 import { DesignMediaControls, chooseDesignMediaFile, newDesignMedia, type DesignMedia } from '../lib/designMedia';
 import { DesignBox, InlineTextEditor, Rect, getPlacement, placeAcross, placeDown, resizeBox } from './DesignCanvas';

@@ -3,7 +3,7 @@ import { useDeleteKey } from '../lib/deleteKey';
 import { AlignCenter, AlignLeft, AlignRight, ArrowDownToLine, ArrowUpToLine, Eye, EyeOff, Image as ImageIcon, Plus, Trash2, Type } from 'lucide-react';
 import { FixedStage } from './FixedStage';
 import { DesignBox, InlineTextEditor } from './DesignCanvas';
-import { SHADOW_PRESETS } from './TemplateEditor';
+import { SHADOW_PRESETS } from '../lib/designPresets';
 import {
   DesignFor, DesignForSwitch, Divider, FontSelect, GroupLabel, SizeStepper, ColorField, TextPositionSwitch,
   WEIGHTS, selectCls, segBtn, smallBtn,

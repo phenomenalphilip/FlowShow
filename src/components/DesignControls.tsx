@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { askText } from '../lib/appDialogs';
 import { ChevronDown, ChevronRight, Info, Layers, Minus, Plus, Sparkles, X } from 'lucide-react';
 import { AnimationConfig, AnimationType, EXIT_OPTIONS, ExitType, MAX_MOTIONS, SCROLL_POS_MAX, SCROLL_POS_MIN, TextPosition, getScrollPositions, motionsClash, PresentationTemplate, TemplateKind, TEMPLATE_KINDS, TEMPLATE_KIND_LABEL, templateKind } from '../lib/templates';
-import { GENERIC_MOTION_DEFAULTS, MOTION_DEFAULTS, MOTION_PRESETS } from './TemplateEditor';
+import { GENERIC_MOTION_DEFAULTS, MOTION_DEFAULTS, MOTION_PRESETS } from '../lib/designPresets';
 import {
   FONT_OPTIONS, canListLocalFonts, fontLabel, getLocalFonts, loadLocalFonts, loadLocalFontsIfAllowed, localFontValue, subscribeLocalFonts,
 } from '../lib/fonts';
