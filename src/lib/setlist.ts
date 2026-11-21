@@ -12,6 +12,8 @@ export interface SetlistItem {
   mediaType?: 'image' | 'video';
   /** A picture or video from an added folder: found again there when played (its URL only lasts a session) */
   mediaRef?: { folder: string; path: string[] };
+  /** The video's path on this computer (desktop app), to know if it is a playback video */
+  mediaPath?: string;
   headerColor?: string;
   templateId?: string;
 }

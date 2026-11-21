@@ -34,7 +34,7 @@ fn documents_dir() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join("Documents")
 }
 
-fn percent_decode(s: &str) -> String {
+pub(crate) fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -137,6 +137,62 @@ pub fn pick_media(owner: Option<isize>, kind: &str) -> Result<Option<String>, St
     }
 }
 
+/// The Windows folder dialog, for a folder of pictures and videos (the Media tab). Returns its path, or None if cancelled.
+/// FlowShow reads the folder itself, so the WebView never has to ask for permission to see files.
+#[cfg(windows)]
+pub fn pick_folder(owner: Option<isize>) -> Result<Option<String>, String> {
+    use windows::core::HSTRING;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
+    use windows::Win32::UI::Shell::{FileOpenDialog, IFileOpenDialog, FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, SIGDN_FILESYSPATH};
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).map_err(|e| e.to_string())?;
+        let options = dialog.GetOptions().map_err(|e| e.to_string())?;
+        dialog.SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM).map_err(|e| e.to_string())?;
+        let _ = dialog.SetTitle(&HSTRING::from("Choose a folder of pictures and videos (they stay where they are)"));
+        let owner = owner.map(|h| HWND(h as *mut core::ffi::c_void));
+        if let Err(e) = dialog.Show(owner) {
+            if e.code().0 as u32 == 0x800704C7 {
+                return Ok(None);
+            }
+            return Err(e.to_string());
+        }
+        let item = dialog.GetResult().map_err(|e| e.to_string())?;
+        let name = item.GetDisplayName(SIGDN_FILESYSPATH).map_err(|e| e.to_string())?;
+        let path = name.to_string().unwrap_or_default();
+        CoTaskMemFree(Some(name.0 as _));
+        Ok(if path.is_empty() { None } else { Some(path) })
+    }
+}
+
+/// What is in a media folder: its folders, and its pictures and videos (name, size, last changed), folders first
+pub fn list_media_folder(path: &str) -> Result<Vec<serde_json::Value>, String> {
+    let dir = Path::new(path);
+    let entries = fs::read_dir(dir).map_err(|e| format!("couldn't open {}: {e}", dir.display()))?;
+    let mut list: Vec<(bool, String, serde_json::Value)> = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') || name.starts_with('$') {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        let full = entry.path().to_string_lossy().into_owned();
+        if meta.is_dir() {
+            list.push((true, name.to_lowercase(), serde_json::json!({ "name": name, "path": full, "dir": true })));
+        } else if let Some(mime) = mime_for(&entry.path()).filter(|m| m.starts_with("image/") || m.starts_with("video/")) {
+            let modified = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64).unwrap_or(0);
+            list.push((false, name.to_lowercase(), serde_json::json!({
+                "name": name, "path": full, "dir": false,
+                "type": if mime.starts_with("video/") { "video" } else { "image" },
+                "size": meta.len(), "modified": modified,
+            })));
+        }
+    }
+    list.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    Ok(list.into_iter().map(|(_, _, v)| v).collect())
+}
+
 // ─── Serving media from disk to the screens ───
 
 fn mime_for(path: &Path) -> Option<&'static str> {
@@ -168,12 +224,117 @@ fn respond(status: StatusCode, body: Vec<u8>) -> Response<Vec<u8>> {
 /// Largest piece of a file sent at once (videos are read in pieces as they play)
 const CHUNK: u64 = 4 * 1024 * 1024;
 
-/// A request for http://media.localhost/<URL-encoded path>: the file, or the asked-for piece of it
+// ─── Thumbnails for the Media tab ───
+
+/// Thumbnails already made (path + last change + size → JPEG; empty = Windows has none), so a folder opens at once the next time
+static THUMBS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<Vec<u8>>>>> =
+    std::sync::LazyLock::new(Default::default);
+const THUMB_SIZE: u32 = 320;
+const THUMBS_KEPT: usize = 1500;
+
+/// A small JPEG of a picture or video: Windows' own thumbnail (the one File Explorer shows, usually ready at once)
+#[cfg(windows)]
+fn make_thumbnail(path: &Path, size: u32) -> Result<Vec<u8>, String> {
+    use windows::core::HSTRING;
+    use windows::Win32::Foundation::SIZE;
+    use windows::Win32::Graphics::Gdi::{DeleteObject, HPALETTE};
+    use windows::Win32::Graphics::Imaging::{
+        CLSID_WICImagingFactory, GUID_ContainerFormatJpeg, GUID_WICPixelFormat24bppBGR, IWICImagingFactory, IWICPalette,
+        WICBitmapDitherTypeNone, WICBitmapEncoderNoCache, WICBitmapIgnoreAlpha, WICBitmapPaletteTypeCustom,
+    };
+    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, IBindCtx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, STREAM_SEEK_CUR};
+    use windows::Win32::UI::Shell::{IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_RESIZETOFIT, SIIGBF_THUMBNAILONLY};
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let item: IShellItemImageFactory =
+            SHCreateItemFromParsingName(&HSTRING::from(path.to_string_lossy().replace('/', "\\").as_str()), None::<&IBindCtx>).map_err(|e| e.to_string())?;
+        // Only a real thumbnail (never a generic file icon)
+        let bitmap_handle = item
+            .GetImage(SIZE { cx: size as i32, cy: size as i32 }, SIIGBF_RESIZETOFIT | SIIGBF_THUMBNAILONLY)
+            .map_err(|e| e.to_string())?;
+        let made = (|| -> windows::core::Result<Vec<u8>> {
+            let wic: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
+            let bitmap = wic.CreateBitmapFromHBITMAP(bitmap_handle, HPALETTE::default(), WICBitmapIgnoreAlpha)?;
+            let (mut w, mut h) = (0u32, 0u32);
+            bitmap.GetSize(&mut w, &mut h)?;
+            let converter = wic.CreateFormatConverter()?;
+            converter.Initialize(&bitmap, &GUID_WICPixelFormat24bppBGR, WICBitmapDitherTypeNone, None::<&IWICPalette>, 0.0, WICBitmapPaletteTypeCustom)?;
+            let mut buf = vec![0u8; (w as usize * h as usize * 3) + 64 * 1024];
+            let stream = wic.CreateStream()?;
+            stream.InitializeFromMemory(&buf)?;
+            let encoder = wic.CreateEncoder(&GUID_ContainerFormatJpeg, std::ptr::null())?;
+            encoder.Initialize(&stream, WICBitmapEncoderNoCache)?;
+            let mut frame = None;
+            let mut options = None;
+            encoder.CreateNewFrame(&mut frame, &mut options)?;
+            let frame = frame.ok_or_else(|| windows::core::Error::from_win32())?;
+            frame.Initialize(options.as_ref())?;
+            frame.SetSize(w, h)?;
+            let mut format = GUID_WICPixelFormat24bppBGR;
+            frame.SetPixelFormat(&mut format)?;
+            frame.WriteSource(&converter, std::ptr::null())?;
+            frame.Commit()?;
+            encoder.Commit()?;
+            let mut written = 0u64;
+            stream.Seek(0, STREAM_SEEK_CUR, Some(&mut written))?;
+            drop(stream);
+            buf.truncate(written as usize);
+            Ok(buf)
+        })();
+        let _ = DeleteObject(bitmap_handle.into());
+        made.map_err(|e| e.to_string())
+    }
+}
+#[cfg(not(windows))]
+fn make_thumbnail(_path: &Path, _size: u32) -> Result<Vec<u8>, String> {
+    Err("thumbnails are on Windows for now".into())
+}
+
+/// http://media.localhost/<path>?thumb: the file's thumbnail (404 if Windows has none: the Media tab shows the file instead)
+fn serve_thumbnail(path: &Path) -> Response<Vec<u8>> {
+    let Ok(meta) = fs::metadata(path) else { return respond(StatusCode::NOT_FOUND, b"file not found".to_vec()) };
+    let changed = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
+    let key = format!("{}|{changed}|{THUMB_SIZE}", path.to_string_lossy().to_lowercase());
+    let cached = THUMBS.lock().unwrap().get(&key).cloned();
+    let jpeg = match cached {
+        // Windows had no thumbnail for it last time: say so at once (some video kinds take seconds to fail)
+        Some(j) if j.is_empty() => return respond(StatusCode::NOT_FOUND, b"no thumbnail".to_vec()),
+        Some(j) => j,
+        None => match make_thumbnail(path, THUMB_SIZE) {
+            Ok(bytes) => {
+                let bytes = std::sync::Arc::new(bytes);
+                let mut kept = THUMBS.lock().unwrap();
+                if kept.len() >= THUMBS_KEPT {
+                    kept.clear();
+                }
+                kept.insert(key, bytes.clone());
+                bytes
+            }
+            Err(e) => {
+                THUMBS.lock().unwrap().insert(key, std::sync::Arc::new(Vec::new()));
+                return respond(StatusCode::NOT_FOUND, e.into_bytes());
+            }
+        },
+    };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "image/jpeg")
+        .header(header::CACHE_CONTROL, "max-age=86400")
+        .header(header::CONTENT_LENGTH, jpeg.len().to_string())
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .body(jpeg.as_ref().clone())
+        .unwrap()
+}
+
+/// A request for http://media.localhost/<URL-encoded path>: the file, or the asked-for piece of it (or ?thumb: its thumbnail)
 pub fn serve_media(request: Request<Vec<u8>>) -> Response<Vec<u8>> {
     let raw = request.uri().path().trim_start_matches('/');
     let path = PathBuf::from(percent_decode(raw));
     // Only pictures, videos and sound: never any other file on the computer
     let Some(mime) = mime_for(&path) else { return respond(StatusCode::FORBIDDEN, b"not a media file".to_vec()) };
+    if request.uri().query().is_some_and(|q| q.split('&').any(|p| p == "thumb" || p.starts_with("thumb="))) {
+        return serve_thumbnail(&path);
+    }
     let Ok(meta) = fs::metadata(&path) else { return respond(StatusCode::NOT_FOUND, b"file not found".to_vec()) };
     let len = meta.len();
     let Ok(mut file) = File::open(&path) else { return respond(StatusCode::NOT_FOUND, b"can't open".to_vec()) };

@@ -2,6 +2,14 @@ import { BrowserRouter, Routes, Route, useParams } from 'react-router-dom';
 import { DesignMediaLayer, type DesignMedia } from './lib/designMedia';
 import { OverlayLayer, newOverlay, overlaysFor, type Overlay } from './lib/overlays';
 import { OverlaysPanel } from './components/OverlaysPanel';
+import { MixWorkspace } from './components/MixWorkspace';
+import { LiveInputView, LiveInputSelect, inputKey, type LiveInput } from './lib/liveInputs';
+import { PlaybackBar, PLAYBACK_TOGGLE_EVENT, isPlayback, usePlaybackFollower } from './lib/playback';
+import { isTyping } from './lib/deleteKey';
+import {
+  MixStack, DEFAULT_SHOW_END_FADE, EMPTY_MIX, mainScreenId, mixLayersAt, mixLayersForScreen, mixUrlNow, findMixUrl, mixForSlides, mixToSave,
+  type LiveMix, type LiveMixLayer, type ShowMix, type SavedMix,
+} from './lib/mix';
 import { OverlayDesignWorkspace } from './components/OverlayDesignWorkspace';
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { askConfirm, askText, showMessage, AppDialogHost } from './lib/appDialogs';
@@ -13,7 +21,7 @@ import {
   SquareSquare, MonitorOff, MonitorUp, EyeOff, FileText,
   Activity, Upload, ExternalLink, Edit2, Copy, Trash, GripVertical, Split,
   Pause, Volume2, VolumeX, Save, ChevronDown, ExternalLink as LaunchIcon, Clock, Lock, Unlock, PanelLeft, PanelLeftClose,
-  Radio, Tv, Wifi, ListOrdered, Check, Sparkles, ChevronRight, ChevronLeft,
+  Radio, Tv, Wifi, ListOrdered, Check, Sparkles, ChevronRight, ChevronLeft, Film,
   Folder, FolderPlus, RotateCcw, Eye, MoreHorizontal, MoreVertical, Calendar, Puzzle, Sliders, Info, Minus, Maximize2, Square, Wand2,
   Palette, Keyboard, Rocket, Timer as TimerIcon
 } from 'lucide-react';
@@ -200,9 +208,11 @@ export interface OutputSettings {
   defaultBackground: { 
     url?: string; 
     color?: string; 
-    type: 'image' | 'video' | 'color' | 'ndi' | 'none'; 
+    type: 'image' | 'video' | 'color' | 'ndi' | 'input' | 'none'; 
     fileName?: string;
     ndiSourceId?: string;
+    /** A camera, screen or NDI source (type 'input') */
+    input?: LiveInput;
   } | null;
   lyricsStyleEnabled: boolean;
   lyricsStyle: { global?: React.CSSProperties & { '--font-scale'?: number }; layout?: { x: number; y: number; width: number; height: number } } | React.CSSProperties;
@@ -236,6 +246,8 @@ export interface GlobalSettings {
   overlays?: Overlay[];
   /** Overlay group names (kept even when empty) */
   overlayGroups?: string[];
+  /** Mixes saved to reuse in other shows (Mix mode → Mix → Save as a reusable mix) */
+  savedMixes?: SavedMix[];
 }
 
 const DEFAULT_SETTINGS: GlobalSettings = {
@@ -284,12 +296,14 @@ const DEFAULT_SETTINGS: GlobalSettings = {
 
 export type PresentState = {
   slide: SlideDefinition | null;
-  globalBackground: { url: string; type: 'image' | 'video', fileName?: string } | null;
+  globalBackground: { url: string; type: 'image' | 'video' | 'input', fileName?: string; input?: LiveInput; /** A playback video: plays once, with sound (from this computer only) */ playback?: boolean } | null;
   clearText: boolean;
   clearedOutputs?: Record<string, boolean>; 
   /** true = paused; 'held' = unpaused but still showing its paused picture until the next slide, background or clear is sent */
   lockedOutputs?: Record<string, boolean | 'held'>; 
-  frozenStates?: Record<string, { slide: SlideDefinition | null; bg: any; clearText: boolean; overlays?: Overlay[] }>;
+  frozenStates?: Record<string, { slide: SlideDefinition | null; bg: any; clearText: boolean; overlays?: Overlay[]; mix?: LiveMix | null }>;
+  /** What the Media Mixer is playing (the layers of the live show's mix for the live slide) */
+  mix?: LiveMix | null;
   /** Overlays switched on (several at once); only F3 / Clear overlays takes them off */
   overlays?: string[];
   /** The countdown in use (Timers tab), shown by stage layouts' Timer items */
@@ -582,7 +596,7 @@ export const getStyleForOutput = (outputConfig: OutputSettings | undefined, sett
   return settings.styles.find(s => s.id === outputConfig.styleId);
 };
 
-type RawBackground = { url?: string; color?: string; type: 'image' | 'video' | 'color' | 'ndi' | 'none'; fileName?: string } | null | undefined;
+type RawBackground = { url?: string; color?: string; type: 'image' | 'video' | 'color' | 'ndi' | 'input' | 'none'; fileName?: string; input?: LiveInput; playback?: boolean } | null | undefined;
 
 /**
  * Resolve the effective background for a single output, applying the output's
@@ -1045,48 +1059,31 @@ function SettingsModal({ isOpen, onClose, settings, onSave, isPresenting, onTogg
           <div className="flex flex-wrap items-center gap-3">
             <select 
               className="bg-[#09090B] border border-white/10 text-white rounded-lg px-3 py-2 text-sm outline-none focus:border-pink-500 font-medium min-w-[180px]" 
-              value={activeOutput.defaultBackground ? activeOutput.defaultBackground.type : 'none'} 
+              value={activeOutput.defaultBackground ? (activeOutput.defaultBackground.type === 'ndi' ? 'input' : activeOutput.defaultBackground.type) : 'none'} 
               onChange={(e) => { 
                 const val = e.target.value; 
                 if (val === 'none') updateOutput(activeOutputId, { defaultBackground: null }); 
                 else if (val === 'color') updateOutput(activeOutputId, { defaultBackground: { type: 'color', color: '#0a0a0a' } }); 
                 else if (val === 'image') updateOutput(activeOutputId, { defaultBackground: { type: 'image', url: '' } }); 
-                else if (val === 'ndi') updateOutput(activeOutputId, { defaultBackground: { type: 'ndi', ndiSourceId: ndiSources[0]?.id || '', fileName: ndiSources[0]?.name || 'Live Camera Feed' } });
+                else if (val === 'input') updateOutput(activeOutputId, { defaultBackground: { type: 'input' } });
               }}
             >
               <option value="none">Transparent (None)</option>
               <option value="color">Solid Color</option>
               <option value="image">Media (Image / Video)</option>
-              <option value="ndi">NDI Live Video Feed</option>
+              <option value="input">Live input (camera, screen or NDI)</option>
             </select>
             {activeOutput.defaultBackground?.type === 'color' && (
               <input type="color" value={activeOutput.defaultBackground.color || '#0a0a0a'} onChange={e => updateOutput(activeOutputId, { defaultBackground: { type: 'color', color: e.target.value }})} className="h-9 w-14 cursor-pointer border-none bg-transparent" />
             )}
-            {activeOutput.defaultBackground?.type === 'ndi' && (
-              <div className="flex items-center gap-2 bg-[#09090B] px-3 py-2 rounded-lg border border-white/5 flex-1">
-                <Radio size={14} className="text-red-400 animate-pulse shrink-0" />
-                <select
-                  value={activeOutput.defaultBackground.ndiSourceId || ''}
-                  onChange={(e) => {
-                    const found = ndiSources.find(s => s.id === e.target.value);
-                    updateOutput(activeOutputId, {
-                      defaultBackground: { type: 'ndi', ndiSourceId: e.target.value, fileName: found?.name || 'NDI Stream' }
-                    });
-                  }}
-                  className="bg-transparent text-xs text-white font-medium outline-none flex-1 cursor-pointer"
-                >
-                  {ndiSources.map(src => (
-                    <option key={src.id} value={src.id} className="bg-[#121214]">{src.name} ({src.ip})</option>
-                  ))}
-                </select>
-                <button
-                  type="button"
-                  onClick={async () => { setIsScanningNdi(true); const found = await ndiService.scanNetworkSources(); setNdiSources([...found]); setIsScanningNdi(false); }}
-                  disabled={isScanningNdi}
-                  className="text-[10px] text-pink-400 hover:text-pink-300 font-bold shrink-0"
-                >
-                  {isScanningNdi ? 'Scanning...' : 'Scan'}
-                </button>
+            {(activeOutput.defaultBackground?.type === 'input' || activeOutput.defaultBackground?.type === 'ndi') && (
+              <div className="flex items-center gap-2 bg-[#09090B] px-3 py-2 rounded-lg border border-white/5 flex-1 min-w-[260px]" data-default-input>
+                <Radio size={14} className="text-red-400 shrink-0" />
+                <LiveInputSelect
+                  value={activeOutput.defaultBackground.input}
+                  onChange={(input) => updateOutput(activeOutputId, { defaultBackground: { type: 'input', input, fileName: input.label } })}
+                  className="bg-transparent text-xs text-white font-medium outline-none flex-1 min-w-0 cursor-pointer [&>*]:bg-[#121214]"
+                />
               </div>
             )}
             {(activeOutput.defaultBackground?.type === 'image' || activeOutput.defaultBackground?.type === 'video') && (
@@ -1617,7 +1614,7 @@ export interface GroupLook {
 export interface PresentationItem {
   id: string;
   title: string;
-  /** A show is a Song or a Declaration (older shows can also be Presentations) */
+  /** A show is a Song or a Declaration (older saved Presentations are turned into Songs when loaded) */
   category?: 'Presentations' | 'Songs' | 'Declarations';
   createdAt?: string;
   modifiedAt?: string;
@@ -1625,13 +1622,15 @@ export interface PresentationItem {
   slides: SlideDefinition[];
   /** Looks assigned to sections of this song, by group name */
   groupLooks?: { [group: string]: GroupLook };
+  /** The show's Media Mixer layers (they travel with the show to every setlist) */
+  mix?: ShowMix;
 }
 
 const MOCK_SONGS: PresentationItem[] = [
   {
     id: 'show-welcome',
     title: 'Welcome',
-    category: 'Presentations',
+    category: 'Songs',
     createdAt: 'Wednesday 18. November, 2026',
     modifiedAt: 'Wednesday 18. November, 2026',
     usedAt: 'Wednesday 18. November, 2026',
@@ -1666,7 +1665,11 @@ const MOCK_SONGS: PresentationItem[] = [
 ];
 
 function ControlPanel() {
-  const [appMode, setAppMode] = useState<'show' | 'design' | 'stage'>('show');
+  const [appMode, setAppMode] = useState<'show' | 'design' | 'mix' | 'stage'>('show');
+  // Mix mode: changes go to the screens as soon as they are let go (off = they wait for Update screens / the next slide)
+  const [mixAutoSend, setMixAutoSend] = useState(false);
+  // Mix mode opened from Design mode on a slide picture (which slide and picture to show)
+  const [mixFocus, setMixFocus] = useState<{ slideId: string; mediaId?: string; at: number } | null>(null);
   const [designOutputId, setDesignOutputId] = useState('main');
   // Slide picked in the Design strip; null = follow the slide that's on air
   const [designSlideId, setDesignSlideId] = useState<string | null>(null);
@@ -1886,8 +1889,11 @@ function ControlPanel() {
     setAppMode('design');
   };
   const [activeTab, setActiveTab] = useState<'shows' | 'songs' | 'setlist' | 'bibles' | 'media' | 'audio'>('songs');
+  // The slide list the arrow keys move through when the Media or Audio tab is open (the show last open there)
+  const lastSlideTabRef = useRef<'songs' | 'setlist'>('songs');
+  useEffect(() => { if (activeTab === 'songs' || activeTab === 'setlist') lastSlideTabRef.current = activeTab; }, [activeTab]);
   const [bottomTab, setBottomTab] = useState<'shows' | 'media' | 'audio' | 'overlays' | 'templates' | 'scripture' | 'timers' | 'calendar' | 'functions'>('shows');
-  const [selectedCategory, setSelectedCategory] = useState<'all' | 'Presentations' | 'Songs' | 'Declarations'>('all');
+  const [selectedCategory, setSelectedCategory] = useState<'all' | 'Songs' | 'Declarations'>('all');
   const [rightInspectorTab, setRightInspectorTab] = useState<'groups' | 'metadata'>('groups');
   const [selectedProjectFolder, setSelectedProjectFolder] = useState<string>('11/18/26');
 
@@ -1916,6 +1922,8 @@ function ControlPanel() {
       panelStateBeforeDesign.current = null;
     }
   }, [appMode]);
+
+  useEffect(() => { if (appMode === 'mix') setBottomTab('media'); }, [appMode]);
 
   const handleDividerMouseDown = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -2028,27 +2036,30 @@ function ControlPanel() {
     setActiveTab('setlist');
   };
   // Clicking a setlist item: its slides (the first goes live), or its media as the background
-  const openSetlistItem = (projectId: string, item: SetlistItem) => {
+  /** A setlist item: one click opens it in Preview; a double-click (`live`) sends it to the screens */
+  const openSetlistItem = (projectId: string, item: SetlistItem, live = false) => {
     setProjectsState(prev => prev.activeId === projectId ? prev : { ...prev, activeId: projectId });
     setActiveTab('setlist');
     setActiveSetlistItemId(item.id);
+    // Media goes on the screens only with a double-click
+    if (item.type === 'media' && !live) return;
     if (item.type === 'media' && item.mediaRef) {
       // A file from an added folder: find it there again (its earlier link only lasted that session)
       const ref = item.mediaRef;
       resolveMediaRef(ref).then(url => {
-        if (url) setGlobalBackground(url, item.mediaType || 'image');
+        if (url) showVideoOrPicture(url, item.mediaType || 'image', { name: item.title, path: item.mediaPath, ref });
         else setUndoToast({ text: `Couldn't open "${item.title}": the folder "${ref.folder}" isn't added, or the file was moved`, at: Date.now(), kind: 'error' });
       });
       return;
     }
     if (item.type === 'media' && item.backgroundUrl) {
-      setGlobalBackground(item.backgroundUrl, item.mediaType || 'image');
+      showVideoOrPicture(item.backgroundUrl, item.mediaType || 'image', { name: item.title, path: item.mediaPath });
       return;
     }
     if (item.slides && item.slides.length > 0) {
       setSetlistViewMode('slides');
       setPreviewSlide(item.slides[0]);
-      goLive(item.slides[0]);
+      if (live) goLive(item.slides[0]);
     }
   };
   const newProject = async (folder?: string) => {
@@ -2098,7 +2109,8 @@ function ControlPanel() {
     get('songsList').then((val) => {
       if (val) {
         skipNextUndoRecordRef.current = true; // loading isn't an edit
-        setSongsList(val);
+        // There are only Songs and Declarations now: older Presentations (or shows with no category) become Songs
+        setSongsList((val as PresentationItem[]).map(s => s.category === 'Declarations' || s.category === 'Songs' ? s : { ...s, category: 'Songs' as const }));
       }
       songsLoadedRef.current = true;
     });
@@ -2211,6 +2223,19 @@ function ControlPanel() {
   const [contextMenu, setContextMenu] = useState<{ x: number, y: number, type: 'song'|'bible'|'slide', id: string | number } | null>(null);
   // Slides marked on the main grid (Ctrl+click / Shift+click) for right-click actions; a plain click still goes live
   const [gridChosen, setGridChosen] = useState<Set<string>>(() => new Set());
+  // What the Delete key acts on in Show mode: the part of the window clicked last
+  const deleteAreaRef = useRef<'slides' | 'setlist' | 'shows' | null>(null);
+  useEffect(() => {
+    const onDown = (e: PointerEvent) => {
+      const el = e.target as HTMLElement | null;
+      deleteAreaRef.current = el?.closest?.('[data-delete-area="slides"]') ? 'slides'
+        : el?.closest?.('[data-setlist-row]') ? 'setlist'
+        : el?.closest?.('[data-show-row]') ? 'shows'
+        : null;
+    };
+    window.addEventListener('pointerdown', onDown, true);
+    return () => window.removeEventListener('pointerdown', onDown, true);
+  }, []);
   const gridAnchor = useRef<number | null>(null);
   useEffect(() => { setGridChosen(prev => prev.size ? new Set() : prev); gridAnchor.current = null; }, [activeItemIndex, activeSetlistItemId, activeTab]);
 
@@ -2379,7 +2404,7 @@ function ControlPanel() {
             lockedOutputs: { ...prev.lockedOutputs, [outputId]: true },
             frozenStates: {
                 ...prev.frozenStates,
-                [outputId]: { slide: prev.slide, bg: currentActiveBg, clearText: prev.clearText, overlays: overlaysFor(prev.settings?.overlays, prev.overlays, outputId) }
+                [outputId]: { slide: prev.slide, bg: currentActiveBg, clearText: prev.clearText, overlays: overlaysFor(prev.settings?.overlays, prev.overlays, outputId), mix: prev.mix }
             }
         };
     });
@@ -2507,6 +2532,20 @@ function ControlPanel() {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement) return;
 
+      // Delete: remove what was picked in the part of the window clicked last (Design, Mix and Stage handle their own)
+      if (e.key === 'Delete' && !e.ctrlKey && !e.metaKey && !e.altKey && appMode === 'show' && !isTyping(e.target)) {
+        const area = deleteAreaRef.current;
+        if ((area === 'slides' && deletePickedSlides()) || (area === 'setlist' && removeOpenSetlistItem()) || (area === 'shows' && deleteOpenShow())) {
+          e.preventDefault();
+          return;
+        }
+      }
+      // K: play / pause the playback video (only while one is on)
+      if ((e.key === 'k' || e.key === 'K') && !e.ctrlKey && !e.metaKey && !e.altKey && liveState.globalBackground?.playback) {
+        e.preventDefault();
+        window.dispatchEvent(new Event(PLAYBACK_TOGGLE_EVENT));
+        return;
+      }
       // Ctrl+O: start / stop presenting (the screens on or off)
       if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.code === 'KeyO') {
         e.preventDefault();
@@ -2554,11 +2593,13 @@ function ControlPanel() {
         return;
       }
 
+      // The arrows move through the open show's slides even while the Media or Audio tab is open
+      const slideTab = activeTab === 'media' || activeTab === 'audio' ? lastSlideTabRef.current : activeTab;
       // FORWARD PROGRESSION (Space, PageDown, ArrowDown, ArrowRight)
       if (e.key === 'ArrowRight' || e.key === 'ArrowDown' || e.key === 'PageDown' || e.key === ' ') {
          e.preventDefault();
 
-         if (activeTab === 'setlist') {
+         if (slideTab === 'setlist') {
             const currentItem = serviceSetlist.items.find(i => i.id === activeSetlistItemId);
             if (currentItem && currentItem.slides && currentItem.slides.length > 0) {
                const currentSlideId = previewSlide?.id || liveState.slide?.id;
@@ -2589,7 +2630,7 @@ function ControlPanel() {
                   }
                }
             }
-         } else if (activeTab === 'songs') {
+         } else if (slideTab === 'songs') {
             const currentSong = songsList[activeItemIndex];
             if (!currentSong) return;
             const currentSlideId = previewSlide?.id || liveState.slide?.id;
@@ -2623,7 +2664,7 @@ function ControlPanel() {
       else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp' || e.key === 'PageUp') {
          e.preventDefault();
 
-         if (activeTab === 'setlist') {
+         if (slideTab === 'setlist') {
             const currentItem = serviceSetlist.items.find(i => i.id === activeSetlistItemId);
             if (currentItem && currentItem.slides && currentItem.slides.length > 0) {
                const currentSlideId = previewSlide?.id || liveState.slide?.id;
@@ -2650,7 +2691,7 @@ function ControlPanel() {
                   }
                }
             }
-         } else if (activeTab === 'songs') {
+         } else if (slideTab === 'songs') {
             const currentSong = songsList[activeItemIndex];
             if (!currentSong) return;
             const currentSlideId = previewSlide?.id || liveState.slide?.id;
@@ -2680,7 +2721,7 @@ function ControlPanel() {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [activeTab, activeItemIndex, serviceSetlist, activeSetlistItemId, activeBibleData, activeBibleBookIndex, activeBibleChapterIndex, activeBibleVerseIndex, liveState, previewSlide, songsList, isShowingThreeColumns]);
+  }, [activeTab, activeItemIndex, serviceSetlist, activeSetlistItemId, activeBibleData, activeBibleBookIndex, activeBibleChapterIndex, activeBibleVerseIndex, liveState, previewSlide, songsList, isShowingThreeColumns, gridChosen, appMode]);
 
 
   // The Bibles, opening the one that was open last time
@@ -2840,11 +2881,135 @@ function ControlPanel() {
       // Text boxes added in Design mode wait off the screens until their slide goes live
       const released = releaseWaitingBoxes(slide);
       if (released !== slide) updateSlidesById(new Set([slide.id]), releaseWaitingBoxes);
-      setLiveState(prev => ({ ...prev, ...releaseHeld(prev), slide: released, clearText: false, clearedOutputs: {} }));
+      // The show's mix: the layers for this slide (layers that carry on keep playing; a new show's mix replaces the old one)
+      setLiveState(prev => ({ ...prev, ...releaseHeld(prev), slide: released, clearText: false, clearedOutputs: {}, mix: liveMixFor(prev.mix, slide) }));
+      findMixMedia(slide);
       setPreviewSlide(released);
   };
   
-  const setGlobalBackground = (url: string | null, type: 'image' | 'video' = 'image') => setLiveState(prev => ({ ...prev, ...releaseHeld(prev), globalBackground: url ? { url, type } : null, clearedOutputs: {} }));
+  /** A playback video: on every screen as the background, playing once with sound from this computer (the playback bar) */
+  const startPlayback = (url: string, name: string) => setLiveState(prev => ({ ...prev, ...releaseHeld(prev), globalBackground: { url, type: 'video', fileName: name, playback: true }, clearedOutputs: {} }));
+  /** It ended or was stopped: fade back to each screen's default background (the mix and overlays stay) */
+  const endPlayback = (url: string) => setLiveState(prev => prev.globalBackground?.playback && prev.globalBackground.url === url ? { ...prev, globalBackground: null } : prev);
+  /** A video from the Media tab or a setlist: playback videos play once with sound, the others are silent looping backgrounds */
+  const showVideoOrPicture = (url: string, type: 'image' | 'video', media: { name?: string; path?: string; ref?: { folder: string; path: string[] } }) => {
+    if (type === 'video' && isPlayback({ ...media, url })) startPlayback(url, media.name || 'Video');
+    else setGlobalBackground(url, type);
+  };
+  /** A camera, screen or NDI source as the background on the screens (Media tab → Inputs) */
+  const setLiveInputBackground = (input: LiveInput) => setLiveState(prev => ({ ...prev, ...releaseHeld(prev), globalBackground: { url: '', type: 'input', input, fileName: input.label }, clearedOutputs: {} }));
+  const setGlobalBackground = (url: string | null, type: 'image' | 'video' = 'image') => setLiveState(prev => ({ ...prev, ...releaseHeld(prev), globalBackground: url ? { url, type } : null, clearedOutputs: {}, ...(url ? {} : { mix: clearedMix(prev.mix) }) }));
+
+  // ─── Media Mixer: the live show's mix on the screens ───
+  /** The show (song, declaration or presentation) a slide belongs to */
+  const showOfSlide = (slideId: string) => songsList.find(song => song.slides.some(s => s.id === slideId)) || null;
+  /**
+   * What the mixer plays when this slide goes live: the layers of its show's mix for this slide.
+   * Moving to another show fades the old mix out (or keeps it playing, if it is set to), and a show with its own mix takes over.
+   * fresh: also bring back layers taken off with F1 / Clear all.
+   */
+  const liveMixFor = (prev: LiveMix | null | undefined, slide: SlideDefinition, opts: { fresh?: boolean; song?: PresentationItem | null; mixOverride?: ShowMix } = {}): LiveMix | null => {
+    const song = opts.song !== undefined ? opts.song : showOfSlide(slide.id);
+    const mix = opts.mixOverride ?? song?.mix;
+    const showId = song?.id ?? null;
+    const showChanged = (prev?.showId ?? null) !== showId;
+    if (!song || !mix?.layers.length) {
+      // Nothing playing: just note which show is on now (so layers taken off with F1 count again in a new show)
+      if (!prev || !prev.layers.length) return prev ? { ...prev, showId: showChanged ? showId : prev.showId, suppressed: showChanged ? [] : prev.suppressed, exitFade: undefined } : null;
+      if (!showChanged) return { ...prev, layers: [], exitFade: undefined, suppressed: [] };
+      // Moving on from a show whose mix keeps playing: it carries on until a show with its own mix (or F1)
+      if (prev.keepPlaying) return prev;
+      return { ...prev, showId, layers: [], exitFade: prev.fadeOut ?? DEFAULT_SHOW_END_FADE, suppressed: [] };
+    }
+    const index = song.slides.findIndex(s => s.id === slide.id);
+    const active = mixLayersAt(mix, song.slides, index);
+    const suppressed = (!showChanged && !opts.fresh ? (prev?.suppressed || []) : []).filter(id => active.some(l => l.id === id));
+    const layers: LiveMixLayer[] = active.filter(l => !suppressed.includes(l.id)).map(l => {
+      // A layer that carries on keeps its address (so it keeps playing)
+      const before = prev?.layers.find(x => x.id === l.id);
+      const sameSource = before && JSON.stringify(before.source) === JSON.stringify(l.source);
+      const url = l.source.kind === 'media' ? (sameSource && before?.url ? before.url : mixUrlNow(l.source.media) ?? undefined) : undefined;
+      return { ...l, url };
+    });
+    return { showId, layers, keepPlaying: mix.keepPlaying, fadeOut: mix.fadeOut, exitFade: showChanged ? (prev?.fadeOut ?? DEFAULT_SHOW_END_FADE) : undefined, suppressed };
+  };
+  /** Media that isn't ready yet (from an added folder, or kept in FlowShow): find it, then put it on */
+  const findMixMedia = (slide: SlideDefinition, song: PresentationItem | null = showOfSlide(slide.id), mixOverride?: ShowMix) => {
+    const mix = mixOverride ?? song?.mix;
+    if (!song || !mix) return;
+    const index = song.slides.findIndex(s => s.id === slide.id);
+    mixLayersAt(mix, song.slides, index).forEach(l => {
+      if (l.source.kind !== 'media' || (mixUrlNow(l.source.media) && !l.source.media.storedId)) return;
+      void findMixUrl(l.source.media).then(url => {
+        if (!url) {
+          setUndoToast({ text: `Mix: can't find "${l.source.kind === 'media' ? l.source.media.name : l.name}". Its folder isn't added, or the file was moved.`, at: Date.now(), kind: 'error' });
+          return;
+        }
+        setLiveState(prev => prev.mix?.layers.some(x => x.id === l.id && x.url !== url)
+          ? { ...prev, mix: { ...prev.mix, layers: prev.mix.layers.map(x => x.id === l.id ? { ...x, url } : x) } }
+          : prev);
+      });
+    });
+  };
+  /** F1 / Clear all: the mix fades out; its layers stay off until their slides are over */
+  const clearedMix = (m: LiveMix | null | undefined): LiveMix | null | undefined =>
+    m && m.layers.length
+      ? { ...m, layers: [], exitFade: m.fadeOut ?? DEFAULT_SHOW_END_FADE, suppressed: Array.from(new Set([...(m.suppressed || []), ...m.layers.map(l => l.id)])) }
+      : m;
+  /** Put a show's mix (as it is now) on the screens, when one of its slides is live */
+  const sendMixToScreens = (song: PresentationItem, mixOverride?: ShowMix) => {
+    const live = liveState.slide;
+    if (!live || !song.slides.some(s => s.id === live.id)) return;
+    setLiveState(prev => ({ ...prev, ...releaseHeld(prev), mix: liveMixFor(prev.mix, live, { fresh: true, song, mixOverride }) }));
+    findMixMedia(live, song, mixOverride);
+  };
+  const changeShowMix = (showId: string, fn: (mix: ShowMix) => ShowMix) => {
+    const song = songsList.find(s => s.id === showId);
+    if (!song) return;
+    const next = fn(song.mix || EMPTY_MIX);
+    const kept = next.layers.length || next.keepPlaying || next.fadeOut !== undefined ? next : undefined;
+    setSongsList(prev => prev.map(s => s.id === showId ? { ...s, mix: kept } : s));
+    // What happens when the show ends applies at once to its mix on the screens (it changes nothing you can see)
+    setLiveState(prev => prev.mix?.showId === showId && (prev.mix.keepPlaying !== kept?.keepPlaying || prev.mix.fadeOut !== kept?.fadeOut)
+      ? { ...prev, mix: { ...prev.mix, keepPlaying: kept?.keepPlaying, fadeOut: kept?.fadeOut } }
+      : prev);
+    if (mixAutoSend) sendMixToScreens({ ...song, mix: kept }, kept ?? EMPTY_MIX);
+  };
+  const copyMixTo = (from: PresentationItem, toId: string) => {
+    if (!from.mix?.layers.length) return;
+    const portable = mixToSave(from.mix, from.slides);
+    const target = songsList.find(s => s.id === toId);
+    setSongsList(prev => prev.map(s => s.id === toId ? { ...s, mix: mixForSlides(portable, s.slides) } : s));
+    setUndoToast({ text: `Mix copied to "${target?.title || 'the show'}"`, at: Date.now(), kind: 'info', noUndo: true });
+  };
+  const saveReusableMix = (from: PresentationItem, name: string) => {
+    if (!from.mix?.layers.length) return;
+    const saved: SavedMix = { id: `savedmix-${Date.now().toString(36)}`, name, mix: mixToSave(from.mix, from.slides), savedAt: Date.now() };
+    setGlobalSettings(prev => ({ ...prev, savedMixes: [...(prev.savedMixes || []), saved] }));
+    setUndoToast({ text: `Saved "${name}": use it in any show from Mix → Use a saved mix`, at: Date.now(), kind: 'info', noUndo: true });
+  };
+  const useSavedMix = (song: PresentationItem, id: string) => {
+    const saved = (globalSettings.savedMixes || []).find(m => m.id === id);
+    if (saved) changeShowMix(song.id, () => mixForSlides(saved.mix, song.slides));
+  };
+  /** The show that is open, for the Groups panel and the slide count: like getMixShow, and for a setlist song
+   *  that isn't linked to the song library, the setlist item's own slides */
+  const getOpenShow = (): PresentationItem | null => {
+    const show = getMixShow();
+    if (show || activeTab !== 'setlist') return show;
+    const item = serviceSetlist.items.find(i => i.id === activeSetlistItemId);
+    return item?.type === 'song' && item.slides?.length ? { id: item.id, title: item.title, category: 'Songs', slides: item.slides } : null;
+  };
+  /** The show Mix mode works on: the one open in the Shows tab, or the open setlist item's song */
+  const getMixShow = (): PresentationItem | null => {
+    if (activeTab === 'setlist') {
+      const item = serviceSetlist.items.find(i => i.id === activeSetlistItemId);
+      if (item?.songId) return songsList.find(s => s.id === item.songId) || null;
+      const first = item?.slides?.[0];
+      return first ? showOfSlide(first.id) : null;
+    }
+    return songsList[activeItemIndex] || null;
+  };
 
   // ─── Slide backgrounds (drop media from the Media tab onto a slide) ───
   /** The slides a slide belongs to (the open setlist item's, or its song's) */
@@ -2942,6 +3107,45 @@ function ControlPanel() {
     gridAnchor.current = i;
     setGridChosen(prev => prev.size ? new Set() : prev);
     if (!slide.disabled) { setPreviewSlide(slide); goLive(slide); }
+  };
+  /** Delete key on the slide grid: the marked slides, or else the slide in Preview (Ctrl+Z brings them back) */
+  const deletePickedSlides = () => {
+    const shown = getShownSlides().slides;
+    const ids = gridChosen.size ? shown.filter(s => gridChosen.has(s.id)).map(s => s.id)
+      : previewSlide && shown.some(s => s.id === previewSlide.id) ? [previewSlide.id] : [];
+    if (!ids.length) return false;
+    const gone = new Set(ids);
+    // A show keeps at least one (empty) slide
+    const strip = (slides: SlideDefinition[]) => { const kept = slides.filter(s => !gone.has(s.id)); return kept.length ? kept : [{ ...slides[0], text: '' }]; };
+    setSongsList(prev => prev.map(song => song.slides.some(s => gone.has(s.id)) ? { ...song, slides: strip(song.slides) } : song));
+    setProjectsState(prev => ({
+      ...prev,
+      projects: prev.projects.map(p => p.items.some(it => it.slides?.some(s => gone.has(s.id)))
+        ? { ...p, items: p.items.map(it => it.slides?.some(s => gone.has(s.id)) ? { ...it, slides: strip(it.slides) } : it) }
+        : p),
+    }));
+    setGridChosen(new Set());
+    if (previewSlide && gone.has(previewSlide.id)) setPreviewSlide(null);
+    setUndoToast({ text: `Deleted ${ids.length} slide${ids.length === 1 ? '' : 's'}`, at: Date.now() });
+    return true;
+  };
+  /** Delete key on the setlist: take the open item out of the setlist (the song stays in the library) */
+  const removeOpenSetlistItem = () => {
+    const item = serviceSetlist.items.find(i => i.id === activeSetlistItemId);
+    if (!item) return false;
+    setProjectsState(prev => ({ ...prev, projects: prev.projects.map(p => p.id === serviceSetlist.id ? { ...p, items: p.items.filter(i => i.id !== item.id) } : p) }));
+    setActiveSetlistItemId(null);
+    setUndoToast({ text: `Removed "${item.title}" from the setlist (it stays in your shows)`, at: Date.now(), kind: 'info', noUndo: true });
+    return true;
+  };
+  /** Delete key on the Shows list: delete the selected show (asks first; Ctrl+Z brings it back) */
+  const deleteOpenShow = () => {
+    const song = songsList[activeItemIndex];
+    if (!song) return false;
+    void askConfirm(`Delete the show "${song.title}"? Ctrl+Z brings it back.`, { okLabel: 'Delete', danger: true }).then(ok => {
+      if (ok) { deleteSong(song.id); setUndoToast({ text: `Deleted "${song.title}"`, at: Date.now() }); }
+    });
+    return true;
   };
   /** The slides a right-click acts on: all marked slides when the one clicked is marked, otherwise just that one */
   const gridMenuTargets = (index: number): SlideDefinition[] => {
@@ -3210,6 +3414,19 @@ function ControlPanel() {
     setContextMenu({ x: e.clientX, y: e.clientY, type, id });
   };
 
+  /** A show becomes a Song or a Declaration. Its slides then use that kind's template on every screen
+   *  (Declarations: the Declarations template). Setlist copies follow. */
+  const setShowCategory = (id: string, category: 'Songs' | 'Declarations') => {
+    const show = songsList.find(s => s.id === id);
+    if (!show || (show.category === 'Declarations' ? 'Declarations' : 'Songs') === category) return;
+    const declaration = category === 'Declarations';
+    setSongsList(prev => prev.map(s => s.id === id ? { ...s, category } : s));
+    updateSlidesEverywhere(new Set(show.slides.map(s => s.id)), s => {
+      const { declaration: _was, ...rest } = s;
+      return declaration ? { ...rest, declaration: true } : rest;
+    });
+    setUndoToast({ text: `"${show.title}" is now a ${category === 'Songs' ? 'Song' : 'Declaration'}`, at: Date.now() });
+  };
   const deleteSong = (id: string | number) => {
     let indexToRemove = -1;
     setSongsList(prev => { indexToRemove = prev.findIndex(s => s.id === id); return prev.filter(s => s.id !== id); });
@@ -3228,7 +3445,7 @@ function ControlPanel() {
      setPreviewSlide(null);
   };
   const clearAll = () => {
-     setLiveState(prev => ({ ...prev, ...releaseHeld(prev), slide: undefined, globalBackground: null, clearText: false, clearedOutputs: {} }));
+     setLiveState(prev => ({ ...prev, ...releaseHeld(prev), slide: undefined, globalBackground: null, clearText: false, clearedOutputs: {}, mix: clearedMix(prev.mix) }));
      setPreviewSlide(null);
   };
 
@@ -3323,7 +3540,7 @@ function ControlPanel() {
             {filteredSongs.map((song) => {
               const originalIndex = songsList.findIndex(s => s.id === song.id);
               return (
-                 <div key={song.id} draggable onDragStart={(e) => { e.dataTransfer.setData(DRAG_SONG, song.id); e.dataTransfer.effectAllowed = 'copy'; }} onContextMenu={(e) => handleContextMenu(e, 'song', song.id)} onClick={() => setActiveItemIndex(originalIndex)} className={`group px-4 py-3 cursor-pointer border-b border-white/5 flex items-center justify-between transition-colors ${activeItemIndex === originalIndex ? 'bg-blue-600/10 border-l-2 border-l-blue-500 text-white' : 'hover:bg-white/5 border-l-2 border-l-transparent text-neutral-400'}`}>
+                 <div key={song.id} data-show-row draggable onDragStart={(e) => { e.dataTransfer.setData(DRAG_SONG, song.id); e.dataTransfer.effectAllowed = 'copy'; }} onContextMenu={(e) => handleContextMenu(e, 'song', song.id)} onClick={() => setActiveItemIndex(originalIndex)} className={`group px-4 py-3 cursor-pointer border-b border-white/5 flex items-center justify-between transition-colors ${activeItemIndex === originalIndex ? 'bg-blue-600/10 border-l-2 border-l-blue-500 text-white' : 'hover:bg-white/5 border-l-2 border-l-transparent text-neutral-400'}`}>
                    <div className="flex items-center gap-3 min-w-0">
                      <FileText size={14} className={activeItemIndex === originalIndex ? "text-blue-500" : "text-neutral-500 transition-colors group-hover:text-neutral-400"} />
                      <span className="text-sm font-medium truncate">{song.title}</span>
@@ -3469,7 +3686,7 @@ function ControlPanel() {
   };
 
   const renderCenterWorkspace = () => {
-    if (activeTab === 'media') return <MediaLibrary onSelectBackground={setGlobalBackground} />;
+    if (activeTab === 'media') return <MediaLibrary onSelectBackground={setGlobalBackground} onPlayVideo={startPlayback} onSelectInput={setLiveInputBackground} activeInput={liveState.globalBackground?.type === 'input' ? liveState.globalBackground.input : null} />;
     if (activeTab === 'audio') return <AudioModule onVerseDetected={handleVerseDetected} />;
 
     if (activeTab === 'bibles') {
@@ -3725,7 +3942,7 @@ function ControlPanel() {
 
           {/* Slide Grid */}
           <div className="flex-1 overflow-y-auto p-4 bg-[#09090B] custom-scrollbar">
-            <div className="grid grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 2xl:grid-cols-10 gap-3 content-start">
+            <div className="grid grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 2xl:grid-cols-10 gap-3 content-start" data-delete-area="slides">
               {activeItem.slides.map((slide, i) => {
                 const isLive = liveState.slide?.id === slide.id;
                 const isPreview = previewSlide?.id === slide.id;
@@ -3789,7 +4006,7 @@ function ControlPanel() {
            
            {/* Slide Grid */}
            <div className="flex-1 overflow-y-auto p-3 bg-[#09090B] custom-scrollbar z-0">
-              <div className="grid grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 2xl:grid-cols-10 gap-3 content-start">
+              <div className="grid grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 2xl:grid-cols-10 gap-3 content-start" data-delete-area="slides">
                  {(() => { const slideBgs = slideBackgrounds(activeSong.slides); return activeSong.slides.map((slide, i) => {
                     const isLive = liveState.slide?.id === slide.id;
                     const isPreview = previewSlide?.id === slide.id;
@@ -4137,6 +4354,7 @@ function ControlPanel() {
                 hideBackground={isOutCleared && out.id !== 'main'}
                 hideText={isOutCleared || !!displayClearText}
                 overlays={isOutLocked ? (frozenState?.overlays || []) : overlaysFor(globalSettings.overlays, liveState.overlays, out.id)}
+                mix={isOutLocked ? frozenState?.mix : liveState.mix}
                 muted
               />
             )}
@@ -4286,6 +4504,7 @@ function ControlPanel() {
   // --- CENTER SLIDE GRID / WORKSPACE (TOP-CENTER) ---
   const renderCenterSlideArea = () => {
     if (appMode === 'design') return renderDesignWorkspace();
+    if (appMode === 'mix') return renderMixWorkspace();
 
     // Stage tab: what the stage screens show, and the layouts their Stage styles use
     if (appMode === 'stage') {
@@ -4349,7 +4568,7 @@ function ControlPanel() {
               <span>No slides available in {activeTitle}</span>
             </div>
           ) : (
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 content-start">
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 content-start" data-delete-area="slides">
               {(() => { const slideBgs = slideBackgrounds(currentSlides); return currentSlides.map((slide, i) => {
                 const isLive = liveState.slide?.id === slide.id;
                 const isPreview = previewSlide?.id === slide.id;
@@ -4719,6 +4938,57 @@ function ControlPanel() {
   };
 
   // --- DESIGN MODE: large live canvas of one screen ---
+  // --- MIX MODE: the show's media layers, on the main screen ---
+  const renderMixWorkspace = () => {
+    const show = getMixShow();
+    const mainId = mainScreenId(globalSettings.outputs);
+    const out = globalSettings.outputs.find(o => o.id === mainId);
+    const locked = !!liveState.lockedOutputs?.[mainId];
+    const rawBg = locked ? liveState.frozenStates?.[mainId]?.bg : (liveState.globalBackground || out?.defaultBackground);
+    const background = resolveOutputBackground(rawBg, out, globalSettings);
+    return (
+      <MixWorkspace
+        show={show}
+        screens={globalSettings.outputs.filter(o => !isStageOutput(o)).map(o => ({ id: o.id, name: o.name }))}
+        mainScreenId={mainId}
+        liveSlideId={liveState.slide?.id ?? null}
+        liveMix={liveState.mix}
+        autoSend={mixAutoSend}
+        onAutoSend={setMixAutoSend}
+        onChangeMix={(fn) => { if (show) changeShowMix(show.id, fn); }}
+        onGoLive={(s) => { setPreviewSlide(s); goLive(s); }}
+        onUpdateScreens={() => { if (show) sendMixToScreens(show); }}
+        otherShows={songsList.filter(s => s.id !== show?.id).map(s => ({ id: s.id, title: s.title, hasMix: !!s.mix?.layers.length }))}
+        onCopyMixTo={(id) => { if (show) copyMixTo(show, id); }}
+        savedMixes={globalSettings.savedMixes || []}
+        onSaveMix={(name) => { if (show) saveReusableMix(show, name); }}
+        onUseSavedMix={(id) => { if (show) useSavedMix(show, id); }}
+        onRenameSavedMix={(id, name) => setGlobalSettings(prev => ({ ...prev, savedMixes: (prev.savedMixes || []).map(m => m.id === id ? { ...m, name } : m) }))}
+        onDeleteSavedMix={(id) => setGlobalSettings(prev => ({ ...prev, savedMixes: (prev.savedMixes || []).filter(m => m.id !== id) }))}
+        renderScreen={(slide, layers) => out ? (
+          <AudienceOutputContent
+            output={out}
+            settings={globalSettings}
+            slide={slide}
+            background={background}
+            muted
+            designPreview
+            wordsFaint
+            mix={{ layers }}
+            overlays={overlaysFor(globalSettings.overlays, liveState.overlays, mainId)}
+          />
+        ) : null}
+        onChangeDesignMedia={(slideId, mediaId, patch) => updateSlidesById(new Set([slideId]), s => {
+          const d = s.designs?.[mainId] || {};
+          const media = (d.media || []).flatMap(m => m.id !== mediaId ? [m] : patch ? [{ ...m, ...patch }] : []);
+          return withDesign(s, mainId, { ...d, media: media.length ? media : undefined });
+        })}
+        onEditInDesign={(slideId) => { setDesignOutputId(mainId); openDesign(slideId); }}
+        focus={mixFocus}
+      />
+    );
+  };
+
   const renderDesignWorkspace = () => {
     // Design is for audience screens; stage screens get their look from Stage styles
     const outputs = globalSettings.outputs.filter(o => o.enabled && !isStageOutput(o));
@@ -4827,6 +5097,13 @@ function ControlPanel() {
         onCopyDesign={(toIds) => { if (slide) setDesignOn(toIds, slide.designs?.[out.id]); }}
         onResetDesign={(ids) => setDesignOn(ids, undefined)}
         onRemoveMedia={removeSlideMedia}
+        onOpenInMix={(slideId, mediaId) => {
+          // Mix opens on that slide's show, with the picture picked
+          const index = songsList.findIndex(s => s.slides.some(x => x.id === slideId));
+          if (activeTab !== 'setlist' && index >= 0) setActiveItemIndex(index);
+          setMixFocus({ slideId, mediaId, at: Date.now() });
+          setAppMode('mix');
+        }}
         textHidden={style?.activeLayers.slide === false}
         status={status}
         slideIsOnAir={!!slide && slide.id === onAirId}
@@ -4842,6 +5119,7 @@ function ControlPanel() {
             scrollPreviewPos={scrollPreviewPos}
             highlightWordIndex={highlightWordIndex}
             overlays={locked ? (liveState.frozenStates?.[out.id]?.overlays || []) : overlaysFor(globalSettings.overlays, liveState.overlays, out.id)}
+            mix={song && slide ? { layers: mixLayersAt(song.mix, song.slides, song.slides.findIndex(x => x.id === slide.id)) } : null}
             designPreview
           />
         )}
@@ -4875,7 +5153,8 @@ function ControlPanel() {
       const slide = out ? getDesignSlide(out.id) : null;
       return { song: getSongForSlide(slide), current: slide };
     }
-    const song = songsList[activeItemIndex];
+    // The show that is open: from the Shows tab, or the song of the open setlist item
+    const song = getOpenShow();
     const inSong = (s: SlideDefinition | null) => !!s && !!song?.slides.some(x => x.id === s.id);
     return { song, current: inSong(liveState.slide) ? liveState.slide : inSong(previewSlide) ? previewSlide : null };
   };
@@ -4987,7 +5266,8 @@ function ControlPanel() {
   // --- OUTPUT PREVIEWS & CONTROLS (TOP-RIGHT) ---
   const renderRightOutputsPanel = () => {
     const enabledOutputs = globalSettings.outputs.filter(o => o.enabled);
-    const activeSong = songsList[activeItemIndex];
+    // The show that is open (Shows tab or setlist)
+    const activeSong = getOpenShow();
     const totalSlides = activeSong?.slides?.length || 1;
     const currentSlideId = previewSlide?.id || liveState.slide?.id;
     const currentIdx = activeSong?.slides?.findIndex(s => s.id === currentSlideId);
@@ -5026,12 +5306,24 @@ function ControlPanel() {
 
         {/* Layer Clear Icons Row */}
         <div className="px-4 py-2 border-b border-[#262635] flex items-center justify-between text-neutral-400 shrink-0 bg-[#0d0d12]">
-          <button onClick={() => setGlobalBackground(null)} title="Clear Background (F1)" className={`p-1.5 rounded transition-colors ${!liveState.globalBackground ? 'text-neutral-600' : 'text-neutral-300 hover:text-pink-400 hover:bg-white/5'}`}><ImageIcon size={15} /></button>
+          <button onClick={() => setGlobalBackground(null)} title="Clear Background and the mix (F1)" className={`p-1.5 rounded transition-colors ${!liveState.globalBackground && !liveState.mix?.layers.length ? 'text-neutral-600' : 'text-neutral-300 hover:text-pink-400 hover:bg-white/5'}`}><ImageIcon size={15} /></button>
           <button onClick={toggleClearText} title="Clear Slide Text" className={`p-1.5 rounded transition-colors ${liveState.clearText ? 'text-pink-500 bg-pink-500/20 font-bold' : 'text-neutral-300 hover:text-pink-400 hover:bg-white/5'}`}><FileText size={15} /></button>
           <button onClick={clearOverlays} title="Clear Overlays (F3)" data-toolbar-clear-overlays className={`p-1.5 rounded transition-colors ${liveState.overlays?.length ? 'text-neutral-300 hover:text-pink-400 hover:bg-white/5' : 'text-neutral-600'}`}><Layers size={15} /></button>
           <button onClick={toggleMute} title="Mute Audio" className={`p-1.5 rounded transition-colors ${isVideoMuted ? 'text-neutral-600' : 'text-neutral-300 hover:text-pink-400 hover:bg-white/5'}`}><Music size={15} /></button>
           <button title="Timer" className="p-1.5 rounded text-neutral-400 hover:text-pink-400 hover:bg-white/5 transition-colors"><Clock size={15} /></button>
         </div>
+
+        {/* A playback video's controls (its sound plays from this computer) */}
+        {liveState.globalBackground?.playback && liveState.globalBackground.url && (
+          <React.Fragment key={liveState.globalBackground.url}>
+            <PlaybackBar
+              url={liveState.globalBackground.url}
+              name={liveState.globalBackground.fileName || 'Video'}
+              onEnded={() => endPlayback(liveState.globalBackground!.url)}
+              onStop={() => endPlayback(liveState.globalBackground!.url)}
+            />
+          </React.Fragment>
+        )}
 
         {/* Current Item Status Indicator */}
         <div className="px-3 py-1.5 border-b border-[#262635] flex items-center justify-between text-xs text-neutral-400 shrink-0 bg-[#121218]">
@@ -5083,7 +5375,20 @@ function ControlPanel() {
               </div>
               <div>
                 <span className="text-neutral-500 block text-[10px]">Category</span>
-                <span className="text-neutral-300">{activeSong?.category || 'Presentations'}</span>
+                {activeSong && songsList.some(sg => sg.id === activeSong.id) ? (
+                  <select
+                    value={activeSong.category === 'Declarations' ? 'Declarations' : 'Songs'}
+                    onChange={(e) => setShowCategory(activeSong.id, e.target.value as 'Songs' | 'Declarations')}
+                    className="mt-0.5 bg-[#09090B] border border-white/10 text-neutral-200 rounded px-2 py-1 text-xs outline-none focus:border-pink-500 cursor-pointer"
+                    title="Each kind uses its own template (Declarations: the Declarations template)"
+                    data-show-category-select
+                  >
+                    <option value="Songs">Song</option>
+                    <option value="Declarations">Declaration</option>
+                  </select>
+                ) : (
+                  <span className="text-neutral-300">{activeSong?.category === 'Declarations' ? 'Declarations' : 'Songs'}</span>
+                )}
               </div>
               <div>
                 <span className="text-neutral-500 block text-[10px]">Total Slides</span>
@@ -5111,7 +5416,6 @@ function ControlPanel() {
     });
 
     const activeSong = songsList[activeItemIndex] || songsList[0];
-    const presCount = songsList.filter(s => s.category === 'Presentations').length;
     const songsCount = songsList.filter(s => s.category === 'Songs').length;
     const declarationsCount = songsList.filter(s => s.category === 'Declarations').length;
 
@@ -5188,19 +5492,6 @@ function ControlPanel() {
               <div className="text-[10px] uppercase font-bold text-neutral-500 px-1 mb-1">Categories</div>
               
               <button 
-                onClick={() => setSelectedCategory('Presentations')}
-                className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-                  selectedCategory === 'Presentations' ? 'bg-pink-500/15 text-pink-300 font-semibold' : 'text-neutral-400 hover:text-white hover:bg-white/5'
-                }`}
-              >
-                <div className="flex items-center gap-2">
-                  <FileText size={13} />
-                  <span>Presentations</span>
-                </div>
-                <span className="text-[10px] font-mono text-neutral-500">{presCount}</span>
-              </button>
-
-              <button 
                 onClick={() => setSelectedCategory('Songs')}
                 className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${
                   selectedCategory === 'Songs' ? 'bg-pink-500/15 text-pink-300 font-semibold' : 'text-neutral-400 hover:text-white hover:bg-white/5'
@@ -5255,6 +5546,7 @@ function ControlPanel() {
                   return (
                     <div
                       key={song.id}
+                      data-show-row
                       draggable
                       onDragStart={(e) => { e.dataTransfer.setData(DRAG_SONG, song.id); e.dataTransfer.effectAllowed = 'copy'; }}
                       title="Drag into a project to add it to the setlist"
@@ -5324,7 +5616,7 @@ function ControlPanel() {
                 </div>
                 <div className="flex justify-between items-center py-1 border-b border-white/5">
                   <span className="text-neutral-500">Category</span>
-                  <span className="text-neutral-300 italic">{activeSong?.category || 'Presentations'}</span>
+                  <span className="text-neutral-300 italic">{activeSong?.category === 'Declarations' ? 'Declarations' : 'Songs'}</span>
                 </div>
                 <div className="flex justify-between items-center py-1 border-b border-white/5">
                   <span className="text-neutral-500">Slides</span>
@@ -5355,7 +5647,7 @@ function ControlPanel() {
           </div>
         ) : bottomTab === 'media' ? (
           <div className="flex-1 min-h-0 bg-[#0d0d12]">
-            <MediaLibrary onSelectBackground={setGlobalBackground} />
+            <MediaLibrary onSelectBackground={setGlobalBackground} onPlayVideo={startPlayback} onSelectInput={setLiveInputBackground} activeInput={liveState.globalBackground?.type === 'input' ? liveState.globalBackground.input : null} />
           </div>
         ) : bottomTab === 'audio' ? (
           <div className="flex-1 min-h-0 bg-[#0d0d12]">
@@ -5501,9 +5793,9 @@ function ControlPanel() {
       />
 
       {/* TOP HEADER BAR (FreeShow Style) */}
-      <header className="h-10 bg-[#09090b] border-b border-[#262635] flex items-center justify-between px-3 shrink-0 z-30 select-none">
-        {/* Left: Menu & Brand Logo */}
-        <div className="flex items-center gap-3">
+      <header className="h-10 bg-[#09090b] border-b border-[#262635] grid grid-cols-[1fr_auto_1fr] items-center gap-3 px-3 shrink-0 z-30 select-none" data-top-bar>
+        {/* Left: Menu & Brand Logo (the left and right sides are the same width, so the mode buttons sit exactly in the middle) */}
+        <div className="flex items-center gap-3 min-w-0 justify-self-start">
           <div className="flex items-center gap-2 text-xs text-neutral-400">
             <TopMenu label="File" entries={[
               { label: 'Import…', onClick: () => setImportChooserOpen(true), hint: 'Songs from FlowShow and other programs, documents, the clipboard, templates, profiles, a backup, or a Bible' },
@@ -5551,8 +5843,8 @@ function ControlPanel() {
           <span className="font-black text-pink-500 tracking-wider text-base ml-2">FlowShow</span>
         </div>
 
-        {/* Center: Mode Tabs (Show | Design | Stage) */}
-        <div className="flex items-center gap-1 bg-[#121218] p-0.5 rounded-lg border border-[#262635]">
+        {/* Center: Mode Tabs (Show | Design | Mix | Stage) */}
+        <div className="flex items-center gap-1 bg-[#121218] p-0.5 rounded-lg border border-[#262635] justify-self-center" data-mode-tabs>
           <button
             onClick={() => setAppMode('show')}
             className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs font-semibold transition-all ${
@@ -5573,6 +5865,17 @@ function ControlPanel() {
             Design
           </button>
           <button
+            onClick={() => setAppMode('mix')}
+            className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs font-semibold transition-all ${
+              appMode === 'mix' ? 'text-pink-400 bg-pink-500/15 shadow-sm' : 'text-neutral-400 hover:text-white'
+            }`}
+            title="Media Mixer: layers of pictures, videos and colour for a show"
+            data-mode-mix
+          >
+            <Film size={12} />
+            Mix
+          </button>
+          <button
             onClick={() => setAppMode('stage')}
             className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs font-semibold transition-all ${
               appMode === 'stage' ? 'text-pink-400 bg-pink-500/15 shadow-sm' : 'text-neutral-400 hover:text-white'
@@ -5584,7 +5887,7 @@ function ControlPanel() {
         </div>
 
         {/* Right: Quick Action Controls */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 justify-self-end">
           {/* Remote / Squiggle icon */}
           <button 
             onClick={() => void showMessage('FlowShow Remote is connected and listening.')}
@@ -5619,11 +5922,10 @@ function ControlPanel() {
       {/* TOP SECTION: 3-COLUMN WORKSPACE (Projects | Slide Grid | Output Monitors) */}
       <div className="flex-1 min-h-0 flex overflow-hidden">
         {/* Focus mode keeps the output monitors, so you still see what is being sent */}
-        {focusMode ? (<>{renderFocusView()}{renderRightOutputsPanel()}</>) : (<>
-          {renderProjectsSidebar()}
-          {renderCenterSlideArea()}
-          {renderRightOutputsPanel()}
-        </>)}
+        {/* The same three places in both layouts, so switching Focus mode never rebuilds the output monitors */}
+        {focusMode ? null : renderProjectsSidebar()}
+        {focusMode ? renderFocusView() : renderCenterSlideArea()}
+        {renderRightOutputsPanel()}
       </div>
 
       {/* DRAG HANDLE DIVIDER */}
@@ -5679,7 +5981,15 @@ function ControlPanel() {
 
       {/* CONTEXT MENUS */}
       {contextMenu && (
-        <div className="fixed z-50 bg-[#18181B] border border-white/10 rounded-lg shadow-2xl overflow-hidden py-1.5 w-48 backdrop-blur-xl" style={{ top: contextMenu.y, left: contextMenu.x }} onClick={(e) => e.stopPropagation()}>
+        <div className="fixed z-50 bg-[#18181B] border border-white/10 rounded-lg shadow-2xl overflow-hidden py-1.5 w-48 backdrop-blur-xl" style={{ top: contextMenu.y, left: contextMenu.x }} onClick={(e) => e.stopPropagation()}
+          data-context-menu
+          ref={(el) => {
+            // Keep the whole menu on screen: open upwards / leftwards when it would run off the edge
+            if (!el) return;
+            const r = el.getBoundingClientRect();
+            if (contextMenu.y + r.height > window.innerHeight - 8) el.style.top = `${Math.max(8, window.innerHeight - r.height - 8)}px`;
+            if (contextMenu.x + r.width > window.innerWidth - 8) el.style.left = `${Math.max(8, window.innerWidth - r.width - 8)}px`;
+          }}>
           {contextMenu.type === 'slide' ? (
              <>
                <button className="w-full text-left px-4 py-2 hover:bg-white/5 text-neutral-300 hover:text-white text-sm transition-colors flex items-center gap-2" onClick={() => { openDesign(getShownSlides().slides[contextMenu.id as number]?.id ?? null); setContextMenu(null); }}><Edit2 size={14}/> Edit</button>
@@ -5712,6 +6022,23 @@ function ControlPanel() {
                    }
                    setContextMenu(null);
                  }}><Edit2 size={14}/> Rename {contextMenu.type === 'song' ? 'Song' : 'Bible'}</button>
+               {contextMenu.type === 'song' && (() => {
+                 const show = songsList.find(s => s.id === contextMenu.id);
+                 const current = show?.category === 'Declarations' ? 'Declarations' : 'Songs';
+                 return (
+                   <>
+                     <div className="h-px w-full bg-white/5 my-1" />
+                     <div className="px-4 pt-1 pb-0.5 text-[10px] uppercase tracking-wider text-neutral-500">Category</div>
+                     {(['Songs', 'Declarations'] as const).map(c => (
+                       <button key={c} className="w-full text-left px-4 py-1.5 hover:bg-white/5 text-neutral-300 hover:text-white text-sm transition-colors flex items-center gap-2"
+                         onClick={() => { setShowCategory(String(contextMenu.id), c); setContextMenu(null); }} data-show-set-category={c}>
+                         <span className="w-3.5">{current === c && <Check size={13} className="text-pink-400" />}</span>
+                         {c === 'Songs' ? 'Song' : 'Declaration'}
+                       </button>
+                     ))}
+                   </>
+                 );
+               })()}
                <div className="h-px w-full bg-white/5 my-1" />
                <button className="w-full text-left px-4 py-2 hover:bg-red-500/10 text-red-400 text-sm transition-colors flex items-center gap-2" onClick={() => {
                    if (contextMenu.type === 'song') deleteSong(contextMenu.id); else if (contextMenu.type === 'bible') handleDeleteBible(contextMenu.id as string);
@@ -5777,7 +6104,37 @@ function ControlPanel() {
  * What an audience output draws inside its FixedStage. The projector window and the Design canvas
  * both render through this, so the canvas is always exactly what the screen shows.
  */
-function AudienceOutputContent({ output, settings, slide, background, hideBackground = false, hideText = false, videoRef, muted = false, scrollPreviewPos, highlightWordIndex, designPreview = false, templateOverride, overlays = [] }: {
+/**
+ * A background video on a screen. Always silent: a playback video's sound comes only from the playback bar's player,
+ * which this follows (time, pause, loop); other videos loop on their own.
+ */
+function BackgroundVideo({ url, playback, videoRef, opacity }: { url: string; playback: boolean; videoRef?: React.RefObject<HTMLVideoElement>; opacity: number }) {
+  const local = useRef<HTMLVideoElement | null>(null);
+  usePlaybackFollower(local, playback ? url : null);
+  return (
+    <video
+      ref={(el) => { local.current = el; if (videoRef) (videoRef as React.MutableRefObject<HTMLVideoElement | null>).current = el; }}
+      src={url}
+      className="absolute inset-0 w-full h-full object-cover pointer-events-none"
+      style={{ opacity }}
+      autoPlay
+      loop={!playback}
+      muted
+      playsInline
+      data-bg-media
+      data-playback={playback ? '' : undefined}
+    />
+  );
+}
+
+/** Mix mode's canvas: the words faint (a sheet of its own, still above the media) */
+const FAINT_WORDS: React.CSSProperties = { position: 'absolute', inset: 0, opacity: 0.35, zIndex: 10, pointerEvents: 'none' };
+
+function AudienceOutputContent({ output, settings, slide, background, hideBackground = false, hideText = false, videoRef, muted = false, scrollPreviewPos, highlightWordIndex, designPreview = false, templateOverride, overlays = [], mix, wordsFaint = false }: {
+  /** The Media Mixer's layers (filtered here to the ones for this screen) */
+  mix?: { layers: LiveMixLayer[]; exitFade?: number } | null;
+  /** Mix mode's canvas: the words faint, so media can be placed around them */
+  wordsFaint?: boolean;
   /** Overlays on this screen (they stay through clears; only F3 takes them off) */
   overlays?: Overlay[];
   output: OutputSettings | undefined;
@@ -5809,7 +6166,7 @@ function AudienceOutputContent({ output, settings, slide, background, hideBackgr
   const pageHidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
   const slideExit = resolved?.animation?.exit;
   const clearSeconds = pageHidden ? 0 : slideExit && slideExit.type !== 'none' ? (slideExit.duration ?? 0.35) : 0.6;
-  const bgKey = bg ? `${bg.type}|${bg.url || ''}|${bg.color || ''}|${(bg as any).ndiSourceId || ''}` : '';
+  const bgKey = bg ? `${bg.type}|${bg.url || ''}|${bg.color || ''}|${bg.input ? inputKey(bg.input) : ''}` : '';
   // How strongly the background shows over black (Settings → Outputs → Background opacity)
   const bgOpacity = Math.min(100, Math.max(0, output?.backgroundOpacity ?? 80)) / 100;
 
@@ -5829,24 +6186,22 @@ function AudienceOutputContent({ output, settings, slide, background, hideBackgr
       >
       {bg?.type === 'color' && <div className="absolute inset-0 w-full h-full pointer-events-none" style={{ backgroundColor: bg.color || '#000', opacity: bgOpacity }} />}
 
-      {bg?.type === 'ndi' && (
-        <div className="absolute inset-0 w-full h-full bg-slate-950 flex items-center justify-center overflow-hidden pointer-events-none">
-          <div className="text-center z-10 select-none">
-            <Radio size={32} className="text-red-500 mx-auto animate-pulse mb-2" />
-            <span className="text-xs font-mono text-white/90 block uppercase tracking-wider">{bg.fileName || 'NDI Live Camera Feed'}</span>
-            <span className="text-[10px] font-mono text-emerald-400">1080p60 • LIVE NDI IN</span>
-          </div>
-        </div>
+      {/* A camera, screen or NDI source */}
+      {bg?.type === 'input' && bg.input && (
+        <LiveInputView input={bg.input} quality="high" className="absolute inset-0 w-full h-full pointer-events-none" style={{ opacity: bgOpacity }} showProblems={designPreview} />
       )}
 
       {bg?.url && bg.type === 'video' ? (
-        <video ref={videoRef} src={bg.url} className="absolute inset-0 w-full h-full object-cover pointer-events-none" style={{ opacity: bgOpacity }} autoPlay loop muted={muted} playsInline data-bg-media />
+        <BackgroundVideo url={bg.url} playback={!!bg.playback} videoRef={videoRef} opacity={bgOpacity} />
       ) : bg?.url ? (
         <img src={bg.url} className="absolute inset-0 w-full h-full object-cover pointer-events-none" style={{ opacity: bgOpacity }} alt="bg" data-bg-media />
       ) : null}
       </motion.div>
       )}
       </AnimatePresence>
+
+      {/* Media Mixer: the show's layers, above the background (they blend with it) and under overlays and words */}
+      <MixStack layers={mixLayersForScreen(mix?.layers, output?.id, settings?.outputs)} exitFade={mix?.exitFade} preview={designPreview} />
 
       {/* Overlays drawn under the words */}
       <OverlayLayer overlays={overlays} above={false} />
@@ -5857,7 +6212,7 @@ function AudienceOutputContent({ output, settings, slide, background, hideBackgr
       {/* data-text-layer lets the Design canvas tell which words belong to the lyrics */}
       {/* Cleared words stay in place and fade (or leave with the slide's exit), so clearing never cuts */}
       {shownSlide && resolved && !design?.hideLyrics && (
-        <div data-text-layer="lyrics" style={{ display: 'contents' }}>
+        <div data-text-layer="lyrics" style={wordsFaint ? FAINT_WORDS : { display: 'contents' }}>
           <SmartTextLayout
             text={shownSlide.text}
             source={shownSlide.source}
@@ -5873,7 +6228,7 @@ function AudienceOutputContent({ output, settings, slide, background, hideBackgr
       )}
 
       {shownSlide && design?.customBoxes?.filter(box => designPreview || isBoxOnScreen(box)).map(box => (
-        <div key={box.id} data-text-layer={box.id} style={{ display: 'contents' }}>
+        <div key={box.id} data-text-layer={box.id} style={wordsFaint ? FAINT_WORDS : { display: 'contents' }}>
           <SmartTextLayout
             text={box.text}
             type="lyrics"
@@ -6032,6 +6387,7 @@ function ProjectorView() {
               hideBackground={hideBg}
               hideText={hideText || !!displayClearText}
               overlays={isLocked ? (frozenState?.overlays || []) : overlaysFor(liveState.settings?.overlays, liveState.overlays, outputId)}
+              mix={isLocked ? frozenState?.mix : liveState.mix}
               videoRef={projectorVideoRef}
             />
           )}

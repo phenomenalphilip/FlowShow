@@ -1,5 +1,7 @@
 mod files;
 #[cfg(windows)]
+mod live;
+#[cfg(windows)]
 mod ndi;
 
 use std::collections::HashMap;
@@ -8,6 +10,42 @@ use tauri::Manager as _;
 /// WebView settings shared by every FlowShow window (WebView2 needs them identical; tauri.conf.json sets the same
 /// for the main window): output windows keep drawing and animating even when covered or out of sight.
 const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows --disable-component-update --disk-cache-size=33554432";
+
+/// FlowShow's own pages may use cameras (camera inputs), read files the user chose, and list the computer's fonts,
+/// without WebView2 asking "Allow this site…?". Only FlowShow's own addresses are allowed.
+#[cfg(windows)]
+fn allow_flowshow_permissions(window: &tauri::WebviewWindow) {
+  let _ = window.with_webview(|webview| unsafe {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+      COREWEBVIEW2_PERMISSION_KIND, COREWEBVIEW2_PERMISSION_KIND_CAMERA, COREWEBVIEW2_PERMISSION_KIND_FILE_READ_WRITE,
+      COREWEBVIEW2_PERMISSION_KIND_LOCAL_FONTS, COREWEBVIEW2_PERMISSION_STATE_ALLOW,
+    };
+    let Ok(core) = webview.controller().CoreWebView2() else { return };
+    let mut token = 0i64;
+    let _ = core.add_PermissionRequested(
+      &webview2_com::PermissionRequestedEventHandler::create(Box::new(|_, args| {
+        let Some(args) = args else { return Ok(()) };
+        let mut uri = windows::core::PWSTR::null();
+        args.Uri(&mut uri)?;
+        let uri = webview2_com::take_pwstr(uri);
+        let own = ["http://tauri.localhost", "https://tauri.localhost", "tauri://localhost", "http://localhost:", "http://127.0.0.1:"]
+          .iter()
+          .any(|p| uri.starts_with(p));
+        let mut kind = COREWEBVIEW2_PERMISSION_KIND::default();
+        args.PermissionKind(&mut kind)?;
+        if own
+          && (kind == COREWEBVIEW2_PERMISSION_KIND_CAMERA
+            || kind == COREWEBVIEW2_PERMISSION_KIND_FILE_READ_WRITE
+            || kind == COREWEBVIEW2_PERMISSION_KIND_LOCAL_FONTS)
+        {
+          args.SetState(COREWEBVIEW2_PERMISSION_STATE_ALLOW)?;
+        }
+        Ok(())
+      })),
+      &mut token,
+    );
+  });
+}
 
 /// Whether each output window was made see-through
 static TRANSPARENT_WINDOWS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, bool>>> = std::sync::LazyLock::new(Default::default);
@@ -70,7 +108,12 @@ async fn open_output_window(
       .background_color(tauri::window::Color(0, 0, 0, if transparent { 0 } else { 255 }))
       .additional_browser_args(BROWSER_ARGS)
       .build()
-      .map_err(|e| e.to_string())?,
+      .map_err(|e| e.to_string())
+      .inspect(|w| {
+        // Outputs can show cameras without asking
+        #[cfg(windows)]
+        allow_flowshow_permissions(w);
+      })?,
   };
   // A new window gets its system handle a moment after it is made: wait for it (so NDI can capture it straight away)
   #[cfg(windows)]
@@ -211,6 +254,57 @@ async fn pick_media_file(app: tauri::AppHandle, kind: Option<String>) -> Result<
   }
 }
 
+/// Choose a folder of pictures and videos for the Media tab (FlowShow reads it itself, so nothing asks for permission)
+#[tauri::command]
+async fn pick_media_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
+  #[cfg(windows)]
+  {
+    let owner = app.get_webview_window("main").and_then(|w| w.hwnd().ok()).map(|h| h.0 as isize);
+    return std::thread::spawn(move || files::pick_folder(owner)).join().map_err(|_| "the folder dialog stopped".to_string())?;
+  }
+  #[cfg(not(windows))]
+  {
+    let _ = app;
+    Err("choosing folders this way is on Windows for now".into())
+  }
+}
+
+/// The folders, pictures and videos in a media folder
+#[tauri::command]
+async fn list_media_folder(path: String) -> Result<Vec<serde_json::Value>, String> {
+  files::list_media_folder(&path)
+}
+
+/// The address a window shows a live input from (kind "ndi" or "screen"; quality "low" for previews, else full)
+#[tauri::command]
+fn live_url(kind: String, id: String, quality: Option<String>) -> Result<String, String> {
+  #[cfg(windows)]
+  return live::url(&kind, &id, quality.as_deref() == Some("low"));
+  #[cfg(not(windows))]
+  {
+    let _ = (kind, id, quality);
+    Err("live inputs are on Windows for now".into())
+  }
+}
+
+/// This computer's screens, for screen inputs
+#[tauri::command]
+fn live_screens() -> Vec<serde_json::Value> {
+  #[cfg(windows)]
+  return live::screens();
+  #[cfg(not(windows))]
+  return vec![];
+}
+
+/// Each live input being read: viewers, pictures made, problems
+#[tauri::command]
+fn live_status() -> Vec<serde_json::Value> {
+  #[cfg(windows)]
+  return live::status();
+  #[cfg(not(windows))]
+  return vec![];
+}
+
 /// Stop sending an output over NDI
 #[tauri::command]
 fn ndi_stop(label: String) {
@@ -240,6 +334,11 @@ pub fn run() {
             .build(),
         )?;
       }
+      // No "Allow this site…?" boxes in FlowShow's own window (cameras, chosen files, fonts)
+      #[cfg(windows)]
+      if let Some(main) = app.get_webview_window("main") {
+        allow_flowshow_permissions(&main);
+      }
       Ok(())
     })
     // Closing the main window quits FlowShow: every output (screens and NDI) closes with it
@@ -247,7 +346,10 @@ pub fn run() {
       if window.label() == "main" {
         if let tauri::WindowEvent::CloseRequested { .. } = event {
           #[cfg(windows)]
-          ndi::stop_all();
+          {
+            ndi::stop_all();
+            live::stop_all();
+          }
           window.app_handle().exit(0);
         }
       }
@@ -256,14 +358,20 @@ pub fn run() {
     .register_asynchronous_uri_scheme_protocol("media", |_ctx, request, responder| {
       std::thread::spawn(move || responder.respond(files::serve_media(request)));
     })
-    .invoke_handler(tauri::generate_handler![save_export, reveal_file, pick_media_file, open_output_window, close_output_window, ndi_info, ndi_peek, ndi_sources, ndi_snapshot, ndi_start, ndi_stop, ndi_status])
+    .invoke_handler(tauri::generate_handler![
+      save_export, reveal_file, pick_media_file, pick_media_folder, list_media_folder, open_output_window, close_output_window,
+      ndi_info, ndi_peek, ndi_sources, ndi_snapshot, ndi_start, ndi_stop, ndi_status, live_url, live_screens, live_status
+    ])
     .build(tauri::generate_context!())
     .expect("error while building tauri application")
     .run(|_app, event| {
       // Close the NDI sources cleanly when FlowShow quits
       if let tauri::RunEvent::Exit = event {
         #[cfg(windows)]
-        ndi::stop_all();
+        {
+          ndi::stop_all();
+          live::stop_all();
+        }
       }
     });
 }

@@ -1,4 +1,5 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import { useDeleteKey } from '../lib/deleteKey';
 import { AlignCenter, AlignLeft, AlignRight, ArrowDownToLine, ArrowUpToLine, Eye, EyeOff, Image as ImageIcon, Plus, Trash2, Type } from 'lucide-react';
 import { FixedStage } from './FixedStage';
 import { DesignBox, InlineTextEditor } from './DesignCanvas';
@@ -65,6 +66,10 @@ export function OverlayDesignWorkspace({ overlays, overlayId, onPick, onChange, 
     </div>
   );
 
+  // Delete removes the picked text or media (set below, once the overlay is known)
+  const deleteRef = useRef<(() => boolean) | null>(null);
+  useDeleteKey(() => deleteRef.current?.() ?? false);
+
   if (!saved) {
     return (
       <div className="flex-1 min-w-0 min-h-0 flex flex-col bg-[#07070a]">
@@ -112,6 +117,7 @@ export function OverlayDesignWorkspace({ overlays, overlayId, onPick, onChange, 
     const file = await chooseDesignMediaFile();
     if (file) changeMedia(id, { type: file.type, name: file.name, path: file.path, storedId: file.storedId });
   };
+  deleteRef.current = () => { if (!sel || editing) return false; removeSelected(); return true; };
   const removeSelected = () => {
     if (!sel) return;
     change(o => sel.kind === 'text' ? { ...o, texts: o.texts.filter(t => t.id !== sel.id) } : { ...o, media: o.media.filter(m => m.id !== sel.id) });

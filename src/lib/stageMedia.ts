@@ -45,6 +45,9 @@ export function stageMediaUrl(id: string): Promise<string | null> {
   return loading.get(id)!;
 }
 
+/** The media's URL if this window has already loaded it (no waiting) */
+export const cachedStageMediaUrl = (id: string): string | null => urls.get(id) ?? null;
+
 /** React: the media's URL once loaded */
 export function useStageMediaUrl(id: string | undefined): string | null {
   const [url, setUrl] = useState<string | null>(id ? urls.get(id) ?? null : null);

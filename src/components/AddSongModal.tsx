@@ -3,8 +3,12 @@ import { X, Search, Activity } from 'lucide-react';
 import { SlideDefinition } from '../App';
 import { lyricsToSections } from '../lib/slideGroups';
 
-/** A show is a Song (the default) or a Declaration */
+/** A show is a Song or a Declaration (each kind uses its own template) */
 export type ShowCategory = 'Songs' | 'Declarations';
+export const SHOW_CATEGORIES: { value: ShowCategory; label: string; hint: string }[] = [
+  { value: 'Songs', label: 'Song', hint: 'Song slides use the lyrics template of the screens’ styles.' },
+  { value: 'Declarations', label: 'Declaration', hint: 'Declaration slides use the Declarations template of the screens’ styles.' },
+];
 
 type AddSongModalProps = {
   isOpen: boolean;
@@ -14,7 +18,8 @@ type AddSongModalProps = {
 
 export function AddSongModal({ isOpen, onClose, onAddSong }: AddSongModalProps) {
   const [title, setTitle] = useState('');
-  const [category, setCategory] = useState<ShowCategory>('Songs');
+  // No category until one is chosen: every show has to say what it is
+  const [category, setCategory] = useState<ShowCategory | null>(null);
   const isSong = category === 'Songs';
   const [method, setMethod] = useState<'quick' | 'web'>('quick');
   const [lyrics, setLyrics] = useState('');
@@ -54,7 +59,7 @@ export function AddSongModal({ isOpen, onClose, onAddSong }: AddSongModalProps) 
     }));
 
   const handleSubmit = () => {
-    if (!title.trim()) return;
+    if (!title.trim() || !category) return;
     let textToProcess = '';
     
     if (method === 'quick' || !isSong) {
@@ -80,7 +85,7 @@ export function AddSongModal({ isOpen, onClose, onAddSong }: AddSongModalProps) 
 
   const handleClose = () => {
     setTitle('');
-    setCategory('Songs');
+    setCategory(null);
     setLyrics('');
     setMethod('quick');
     setLinesPerSlide(2);
@@ -103,27 +108,28 @@ export function AddSongModal({ isOpen, onClose, onAddSong }: AddSongModalProps) 
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
-          {/* Category: every show is a Song or a Declaration */}
+          {/* Category: every show is a Song or a Declaration (chosen here, changed later by right-click) */}
           <div>
             <label className="block text-[10px] font-bold text-neutral-500 uppercase tracking-widest pl-1 mb-2">Category</label>
             <div className="flex bg-[#030303] rounded-lg p-1.5 border border-white/5 shadow-inner" data-show-category>
-              {([['Songs', 'Song'], ['Declarations', 'Declaration']] as const).map(([value, label]) => (
+              {SHOW_CATEGORIES.map(({ value, label }) => (
                 <button
                   key={value}
                   type="button"
                   onClick={() => setCategory(value)}
+                  data-show-category-choice={value}
                   className={`flex-1 text-sm font-semibold py-2 rounded-md transition-all ${category === value ? 'bg-white/10 text-white shadow-sm' : 'text-neutral-500 hover:text-neutral-300 hover:bg-white/5'}`}
                 >
                   {label}
                 </button>
               ))}
             </div>
-            <p className="text-[11px] text-neutral-500 mt-1.5 pl-1">{isSong ? 'Song slides use the lyrics template of the screens’ styles.' : 'Declaration slides use the Declarations template of the screens’ styles.'}</p>
+            <p className={`text-[11px] mt-1.5 pl-1 ${category ? 'text-neutral-500' : 'text-amber-300/90'}`}>{category ? SHOW_CATEGORIES.find(c => c.value === category)!.hint : 'Choose what this show is: each kind uses its own template.'}</p>
           </div>
 
           {/* Title */}
           <div>
-            <label className="block text-[10px] font-bold text-neutral-500 uppercase tracking-widest pl-1 mb-2">{isSong ? 'Song Title' : 'Declaration Title'}</label>
+            <label className="block text-[10px] font-bold text-neutral-500 uppercase tracking-widest pl-1 mb-2">{category === 'Declarations' ? 'Declaration Title' : 'Song Title'}</label>
             <input 
               type="text" 
               value={title}
@@ -227,7 +233,10 @@ export function AddSongModal({ isOpen, onClose, onAddSong }: AddSongModalProps) 
           </button>
           <button 
             onClick={handleSubmit}
+            title={category ? undefined : 'Choose a category first'}
+            data-show-create
             disabled={
+              !category ||
               !title.trim() || 
               ((method === 'quick' || !isSong) && !lyrics.trim()) || 
               (isSong && method === 'web' && (!selectedResult || !selectedResult.plainLyrics))

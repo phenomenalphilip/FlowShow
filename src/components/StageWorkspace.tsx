@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { useDeleteKey } from '../lib/deleteKey';
 import { askConfirm, askText } from '../lib/appDialogs';
 import { AlignCenter, AlignLeft, AlignRight, ArrowDown, ArrowUp, Check, Copy, Eye, EyeOff, ImagePlus, Pencil, Plus, Trash2, Tv, Type } from 'lucide-react';
 import type { OutputSettings, PresentationStyle, SlideDefinition } from '../App';
@@ -254,6 +255,8 @@ export function StageWorkspace({
     change(l => ({ ...l, items: l.items.filter(i => i.id !== id) }));
     setSelectedItemId(null);
   };
+  // Delete removes the picked item (not while its words are being typed)
+  useDeleteKey(() => { if (!selectedItem || editingWordsOf) return false; removeItem(); return true; });
   const saveWords = (id: string, text: string) => {
     setEditingWordsOf(null);
     changeItem(id, i => ({ ...i, text }));

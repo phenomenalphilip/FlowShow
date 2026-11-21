@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { useDeleteKey } from '../lib/deleteKey';
 import { askText } from '../lib/appDialogs';
 import { AlignCenter, AlignLeft, AlignRight, Check, Copy, Eye, EyeOff, Image as ImageIcon, Monitor as MonitorIcon, Pencil, Play, RotateCcw } from 'lucide-react';
 import { DesignMediaControls, chooseDesignMediaFile, newDesignMedia, type DesignMedia } from '../lib/designMedia';
@@ -252,6 +253,8 @@ export function ScriptureDesignWorkspace({
     if (file) changeMedia(id, { type: file.type, name: file.name, path: file.path, storedId: file.storedId });
   };
   const removeMedia = (id: string) => { setMedia(list => list.filter(m => m.id !== id)); setMediaSel(null); };
+  // Delete removes the picked picture or video
+  useDeleteKey(() => { if (!selectedMedia) return false; removeMedia(selectedMedia.id); return true; });
   const moveMedia = (id: string, dir: 1 | -1) => setMedia(list => {
     const next = [...list];
     const at = next.findIndex(m => m.id === id);

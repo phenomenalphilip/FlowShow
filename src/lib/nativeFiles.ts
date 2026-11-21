@@ -41,6 +41,18 @@ export async function pickMediaFile(kind: 'image' | 'video' | 'media' = 'media')
   return invoke<string | null>('pick_media_file', { kind });
 }
 
+/** Choose a folder of pictures and videos with the Windows dialog (desktop app). Returns its path, or null. */
+export async function pickMediaFolder(): Promise<string | null> {
+  if (!isTauri()) return null;
+  return invoke<string | null>('pick_media_folder');
+}
+
+export interface FolderEntry { name: string; path: string; dir: boolean; type?: 'image' | 'video'; size?: number; modified?: number }
+/** A media folder's folders, pictures and videos (desktop app; folders first) */
+export async function listMediaFolder(path: string): Promise<FolderEntry[]> {
+  return invoke<FolderEntry[]>('list_media_folder', { path });
+}
+
 /** The address the screens load a file on this computer from */
 export const mediaUrl = (path: string) => `http://media.localhost/${encodeURIComponent(path)}`;
 /** A file's path back from its media address (or null if it isn't one) */

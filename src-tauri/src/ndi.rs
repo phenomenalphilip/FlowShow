@@ -86,6 +86,28 @@ type FnFindWait = unsafe extern "C" fn(*mut c_void, u32) -> bool;
 type FnFindGet = unsafe extern "C" fn(*mut c_void, *mut u32) -> *const NdiSource;
 type FnFindDestroy = unsafe extern "C" fn(*mut c_void);
 
+/// Receiving: connect to a source by name, BGRA pictures, full or preview size
+#[repr(C)]
+struct NdiRecvCreateV3 {
+    source_to_connect_to: NdiSource,
+    color_format: i32,
+    bandwidth: i32,
+    allow_video_fields: bool,
+    p_ndi_recv_name: *const i8,
+}
+/// NDIlib_recv_color_format_BGRX_BGRA
+const RECV_COLOR_BGRX_BGRA: i32 = 0;
+/// NDIlib_recv_bandwidth_lowest (NDI's small preview stream) and _highest
+const RECV_BANDWIDTH_LOWEST: i32 = 0;
+const RECV_BANDWIDTH_HIGHEST: i32 = 100;
+/// NDIlib_frame_type_video
+const FRAME_TYPE_VIDEO: i32 = 1;
+
+type FnRecvCreateV3 = unsafe extern "C" fn(*const NdiRecvCreateV3) -> *mut c_void;
+type FnRecvDestroy = unsafe extern "C" fn(*mut c_void);
+type FnRecvCaptureV2 = unsafe extern "C" fn(*mut c_void, *mut NdiVideoFrameV2, *mut c_void, *mut c_void, u32) -> i32;
+type FnRecvFreeVideoV2 = unsafe extern "C" fn(*mut c_void, *const NdiVideoFrameV2);
+
 type FnInitialize = unsafe extern "C" fn() -> bool;
 type FnSendCreate = unsafe extern "C" fn(*const NdiSendCreate) -> *mut c_void;
 type FnSendDestroy = unsafe extern "C" fn(*mut c_void);
@@ -101,6 +123,10 @@ struct NdiLib {
     find_wait: FnFindWait,
     find_get: FnFindGet,
     find_destroy: FnFindDestroy,
+    recv_create_v3: FnRecvCreateV3,
+    recv_destroy: FnRecvDestroy,
+    recv_capture_v2: FnRecvCaptureV2,
+    recv_free_video_v2: FnRecvFreeVideoV2,
     path: String,
 }
 
@@ -145,6 +171,10 @@ fn load_ndi() -> Result<NdiLib, String> {
                 find_wait: std::mem::transmute(sym("NDIlib_find_wait_for_sources")?),
                 find_get: std::mem::transmute(sym("NDIlib_find_get_current_sources")?),
                 find_destroy: std::mem::transmute(sym("NDIlib_find_destroy")?),
+                recv_create_v3: std::mem::transmute(sym("NDIlib_recv_create_v3")?),
+                recv_destroy: std::mem::transmute(sym("NDIlib_recv_destroy")?),
+                recv_capture_v2: std::mem::transmute(sym("NDIlib_recv_capture_v2")?),
+                recv_free_video_v2: std::mem::transmute(sym("NDIlib_recv_free_video_v2")?),
                 path: path.clone(),
             };
             if !initialize() {
@@ -366,6 +396,61 @@ pub fn sources(wait_ms: u32) -> Result<Vec<serde_json::Value>, String> {
         .collect();
     unsafe { (lib.find_destroy)(finder) };
     Ok(found)
+}
+
+// ─── Receiving an NDI source (live inputs) ───
+
+/// One NDI source being received (for a background or a mix layer)
+pub struct Receiver {
+    inst: *mut c_void,
+    lib: &'static NdiLib,
+}
+// The NDI receiver can be used from any thread (one at a time)
+unsafe impl Send for Receiver {}
+
+impl Receiver {
+    /// Connect to a source by its full name ("COMPUTER (Source)"). `low`: NDI's small preview stream, for thumbnails.
+    /// NDI keeps trying in the background, so a source that appears later still connects.
+    pub fn connect(name: &str, low: bool) -> Result<Self, String> {
+        let lib = ndi()?;
+        let c_name = CString::new(name).map_err(|_| "the NDI source name can't contain a zero character".to_string())?;
+        let c_receiver = CString::new("FlowShow").unwrap();
+        let create = NdiRecvCreateV3 {
+            source_to_connect_to: NdiSource { p_ndi_name: c_name.as_ptr(), p_url_address: std::ptr::null() },
+            color_format: RECV_COLOR_BGRX_BGRA,
+            bandwidth: if low { RECV_BANDWIDTH_LOWEST } else { RECV_BANDWIDTH_HIGHEST },
+            allow_video_fields: false,
+            p_ndi_recv_name: c_receiver.as_ptr(),
+        };
+        let inst = unsafe { (lib.recv_create_v3)(&create) };
+        if inst.is_null() {
+            return Err(format!("NDI couldn't start receiving \"{name}\""));
+        }
+        Ok(Self { inst, lib })
+    }
+
+    /// The next picture within `timeout_ms` (None if none came): `f` gets width, height, row length and the BGRA/BGRX pixels
+    pub fn next_video<R>(&self, timeout_ms: u32, f: impl FnOnce(u32, u32, u32, &[u8]) -> R) -> Option<R> {
+        let mut frame: NdiVideoFrameV2 = unsafe { std::mem::zeroed() };
+        let kind = unsafe { (self.lib.recv_capture_v2)(self.inst, &mut frame, std::ptr::null_mut(), std::ptr::null_mut(), timeout_ms) };
+        if kind != FRAME_TYPE_VIDEO {
+            return None;
+        }
+        let usable = !frame.p_data.is_null() && frame.xres > 0 && frame.yres > 0 && (frame.four_cc == FOURCC_BGRA || frame.four_cc == FOURCC_BGRX);
+        let result = usable.then(|| {
+            let stride = if frame.line_stride_in_bytes > 0 { frame.line_stride_in_bytes as u32 } else { frame.xres as u32 * 4 };
+            let pixels = unsafe { std::slice::from_raw_parts(frame.p_data, stride as usize * frame.yres as usize) };
+            f(frame.xres as u32, frame.yres as u32, stride, pixels)
+        });
+        unsafe { (self.lib.recv_free_video_v2)(self.inst, &frame) };
+        result
+    }
+}
+
+impl Drop for Receiver {
+    fn drop(&mut self) {
+        unsafe { (self.lib.recv_destroy)(self.inst) };
+    }
 }
 
 /// Save an output's newest picture as a .bmp file (for checking what is being sent)

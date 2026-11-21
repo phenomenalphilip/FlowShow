@@ -1,4 +1,5 @@
 import React, { startTransition, useEffect, useMemo, useRef, useState } from 'react';
+import { useDeleteKey } from '../lib/deleteKey';
 import { askConfirm, askText } from '../lib/appDialogs';
 import {
   AlignLeft, AlignCenter, AlignRight, Minus, Plus, RotateCcw, Eye, EyeOff, Info, Check, Play, Radio, Scissors, Trash2, Send, X, BookmarkPlus, ChevronLeft, Tag,
@@ -62,6 +63,8 @@ interface LiveDesignWorkspaceProps {
   onResetDesign: (slideIds: string[]) => void;
   /** Take the media (background media and Design-mode pictures/videos) off these slides */
   onRemoveMedia?: (slideIds: string[]) => void;
+  /** Double-click a picture or video: open it in Mix mode */
+  onOpenInMix?: (slideId: string, mediaId: string) => void;
   /** Show this slide's text boxes (and hidden lyrics) on every other screen; returns how many screens */
   onSendTextBoxesToAllScreens: () => number;
   canSplit: boolean;
@@ -134,7 +137,7 @@ const sourceLabel = (info: OutputTemplateInfo) => {
 
 export function LiveDesignWorkspace({
   outputs, selectedOutputId, onSelectOutput, onDesignFor, templates, templateInfo, onAssignTemplate, isDeclarationSlide, backgroundOpacity, onBackgroundOpacity,
-  look, design, onChangeDesign, onCopyDesign, onResetDesign, onRemoveMedia, onSendTextBoxesToAllScreens, canSplit, onSplitSlide, onInsertSlide, onDeleteSlide, onMoveSlides,
+  look, design, onChangeDesign, onCopyDesign, onResetDesign, onRemoveMedia, onOpenInMix, onSendTextBoxesToAllScreens, canSplit, onSplitSlide, onInsertSlide, onDeleteSlide, onMoveSlides,
   onSetSlideGroup, onUseLookForGroup,
   textHidden, status, slideIsOnAir, followingLive,
   renderOutput, slideText, onEditSlideText, songTitle, slides, liveSlideId, canvasSlideId, canvasSlide: canvasSlideProp,
@@ -378,6 +381,13 @@ export function LiveDesignWorkspace({
     setEditing(null);
     if (t !== 'lyrics' && !isSavedBox(t)) { setDraft(null); setSelected('lyrics'); }
   };
+  // Delete removes the picked picture/video or text box (the lyrics can only be hidden)
+  useDeleteKey(() => {
+    if (editing !== null) return false;
+    if (selectedMedia) { removeMedia(selectedMedia.id); return true; }
+    if (selectedBox) { deleteBox(selectedBox.id); return true; }
+    return false;
+  });
   const deleteBox = (id: string) => {
     mutate(d => ({ ...d, customBoxes: (d.customBoxes || []).filter(b => b.id !== id) }), 'commit');
     setSelected('lyrics');
@@ -1020,7 +1030,8 @@ export function LiveDesignWorkspace({
                   rect={m.layout}
                   scale={scale}
                   movable
-                  label={`${m.type === 'video' ? 'Video' : 'Picture'} · drag to move · drag the corners to resize`}
+                  label={`${m.type === 'video' ? 'Video' : 'Picture'} · drag to move · drag the corners to resize · double-click for Mix`}
+                  onDoubleClick={() => { if (canvasSlideId) onOpenInMix?.(canvasSlideId, m.id); }}
                   tag={m.waiting ? { text: 'Waiting for Go live', tone: 'amber' } : undefined}
                   onSelect={() => { setSelectedWord(null); setMediaSel(m.id); }}
                   onChange={(r) => changeMedia(m.id, { layout: r }, 'draft')}
@@ -1065,7 +1076,8 @@ export function LiveDesignWorkspace({
                   scale={scale}
                   movable
                   selected
-                  label={`${selectedMedia.type === 'video' ? 'Video' : 'Picture'} · drag to move · drag the corners to resize`}
+                  label={`${selectedMedia.type === 'video' ? 'Video' : 'Picture'} · drag to move · drag the corners to resize · double-click for Mix`}
+                  onDoubleClick={() => { if (canvasSlideId) onOpenInMix?.(canvasSlideId, selectedMedia.id); }}
                   tag={selectedMedia.waiting ? { text: 'Waiting for Go live', tone: 'amber' } : undefined}
                   onSelect={() => setMediaSel(selectedMedia.id)}
                   onChange={(r) => changeMedia(selectedMedia.id, { layout: r }, 'draft')}

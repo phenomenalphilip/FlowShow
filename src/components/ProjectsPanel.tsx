@@ -20,7 +20,8 @@ interface ProjectsPanelProps {
   setlistOpen: boolean;
   activeItemId?: string | null;
   onOpenProject: (id: string) => void;
-  onOpenItem: (projectId: string, item: SetlistItem) => void;
+  /** One click: open in Preview; double-click (live): send to the screens */
+  onOpenItem: (projectId: string, item: SetlistItem, live?: boolean) => void;
   /** A show from the library, for songs dropped in */
   getSong: (id: string) => { id: string; title: string; slides: SlideDefinition[]; category?: string } | undefined;
   /** Make a new project (in this folder) */
@@ -77,8 +78,8 @@ export function ProjectsPanel({ state, onChange, setlistOpen, activeItemId, onOp
     }
     const media = dt.getData(DRAG_MEDIA);
     if (media) {
-      const m = JSON.parse(media) as { name: string; url: string; type: 'image' | 'video'; ref?: { folder: string; path: string[] } };
-      return { id: `setlist-media-${now}`, type: 'media', title: m.name, subtitle: m.type === 'video' ? 'Video' : 'Image', backgroundUrl: m.url, mediaType: m.type, mediaRef: m.ref };
+      const m = JSON.parse(media) as { name: string; url: string; type: 'image' | 'video'; ref?: { folder: string; path: string[] }; path?: string };
+      return { id: `setlist-media-${now}`, type: 'media', title: m.name, subtitle: m.type === 'video' ? 'Video' : 'Image', backgroundUrl: m.url, mediaType: m.type, mediaRef: m.ref, mediaPath: m.path };
     }
     const verse = dt.getData(DRAG_SCRIPTURE);
     if (verse) {
@@ -191,7 +192,9 @@ export function ProjectsPanel({ state, onChange, setlistOpen, activeItemId, onOp
                 <div
                   {...dragProps}
                   data-setlist-row={item.title}
-                  onClick={() => onOpenItem(project.id, item)}
+                  onClick={() => onOpenItem(project.id, item, false)}
+                  onDoubleClick={() => onOpenItem(project.id, item, true)}
+                  title="Click to open it in Preview · double-click to send it to the screens"
                   className={`flex items-center gap-2 px-2 py-1 rounded cursor-pointer text-xs transition-colors ${active ? 'bg-pink-500/20 text-white font-medium' : 'text-neutral-400 hover:text-white hover:bg-white/5'}`}
                 >
                   <Icon size={12} className={active ? 'text-pink-400 shrink-0' : 'text-neutral-500 shrink-0'} />

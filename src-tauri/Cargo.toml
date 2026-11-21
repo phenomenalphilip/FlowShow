@@ -46,4 +46,10 @@ windows = { version = "=0.61.3", features = [
   "Win32_UI_Shell",
   "Win32_UI_Shell_Common",
   "Win32_System_Com",
+  # Live inputs: screen copies (DXGI output info) and JPEG pictures (Windows Imaging Component)
+  "Win32_Graphics_Gdi",
+  "Win32_Graphics_Imaging",
+  "Win32_System_Com_StructuredStorage",
 ] }
+# WebView2's permission requests (cameras, chosen files, fonts): the same version Tauri already uses
+webview2-com = "=0.38.2"
