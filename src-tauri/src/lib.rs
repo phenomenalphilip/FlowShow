@@ -186,6 +186,10 @@ fn make_output_window(app: &tauri::AppHandle, label: &str, url: &str, title: &st
       // Outputs can show cameras without asking
       #[cfg(windows)]
       allow_flowshow_permissions(w);
+      // FlowShow's logo (it shares the taskbar button with the main window: never let it be blank)
+      if let Some(icon) = app.default_window_icon().cloned() {
+        let _ = w.set_icon(icon);
+      }
     })
 }
 
@@ -404,6 +408,12 @@ pub fn run() {
       #[cfg(windows)]
       if let Some(main) = app.get_webview_window("main") {
         allow_flowshow_permissions(&main);
+      }
+      // FlowShow's logo on its window (and so on the taskbar): set it ourselves, the window doesn't always get it
+      if let (Some(main), Some(icon)) = (app.get_webview_window("main"), app.default_window_icon().cloned()) {
+        let _ = main.set_icon(icon);
+      } else {
+        log::warn!("no window icon to set");
       }
       Ok(())
     })
