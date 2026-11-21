@@ -6297,6 +6297,9 @@ function AudienceOutputContent({ output, settings, slide, background, hideBackgr
 
       {/* Overlays drawn over the words */}
       <OverlayLayer overlays={overlays} above />
+
+      {/* Mix borders: over everything (outside the border's window stays covered, words and overlays too) */}
+      <MixStack layers={mixLayersForScreen(mix?.layers, output?.id, settings?.outputs)} exitFade={mix?.exitFade} preview={designPreview} top />
     </>
   );
 }

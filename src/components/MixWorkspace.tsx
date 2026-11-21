@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useDeleteKey } from '../lib/deleteKey';
 import {
-  ChevronDown, Copy, Eye, EyeOff, Film, FlipHorizontal, Frame, FlipVertical, Image as ImageIcon, Maximize2, Minimize2, Palette,
+  ChevronDown, Copy, Eye, EyeOff, Film, FlipHorizontal, Frame, Type, FlipVertical, Image as ImageIcon, Maximize2, Minimize2, Palette,
   Pencil, Play, Plus, Radio, RefreshCw, RotateCcw, Save, Send, Trash2, ArrowUp, ArrowDown, Video,
 } from 'lucide-react';
 import type { PresentationItem, SlideDefinition } from '../App';
@@ -215,10 +215,10 @@ export function MixWorkspace(p: MixWorkspaceProps) {
     const media: MixMedia = { type: file.type, name: file.name, path: file.path, storedId: file.storedId };
     addLayer(newLayer({ kind: 'media', media }, { kind: 'show' }, baseName(file.name), startBox(media)));
   };
-  /** A coloured frame round the screen (on top of the other layers) */
+  /** A border: a window (rounded to start with) with everything outside it covered in black, over everything */
   const addBorder = () => addLayer(newLayer(
-    { kind: 'border', color: '#ffffff', width: 24, glow: 0, radius: 0 },
-    { kind: 'show' }, 'Border', { ...FULL_SCREEN_RECT },
+    { kind: 'border', shape: 'rounded', outside: '#000000', color: '#ffffff', width: 0, glow: 0, radius: 80 },
+    { kind: 'show' }, 'Border', { x: 0.03, y: 0.05, width: 0.94, height: 0.9 },
   ));
   const addColour = (gradient: boolean) => addLayer(newLayer(
     gradient ? { kind: 'gradient', from: '#1e3a8a', to: '#7c3aed', angle: 135 } : { kind: 'color', color: '#1e3a8a' },
@@ -405,6 +405,26 @@ export function MixWorkspace(p: MixWorkspaceProps) {
 
   const menuItem = 'w-full px-3 py-1.5 flex items-center gap-2 hover:bg-white/10 text-left text-xs text-neutral-200';
   const tracks = [...mix.layers].reverse();
+  // The timeline's rows, top first: borders (over everything), the words, then the other layers (under the words)
+  const rows: (MixLayer | 'words')[] = [...tracks.filter(l => l.source.kind === 'border'), 'words', ...tracks.filter(l => l.source.kind !== 'border')];
+  const gridCols = { gridTemplateColumns: `repeat(${Math.max(slides.length, 1)}, minmax(76px, 1fr))`, gridTemplateRows: '32px' };
+  const wordsLeft = (
+    <div key="words" className="h-8 px-1.5 flex items-center gap-1.5 border-b border-white/5" title="The show's words. The eye hides them here only, to work on the media alone; the screens still show them." data-mix-track="Words">
+      <button type="button" onClick={() => setWordsHidden(!wordsHidden)} className="p-0.5 rounded text-neutral-400 hover:text-white" title={wordsHidden ? 'Show the words here again' : 'Hide the words here (the screens still show them)'} data-mix-hide-words>
+        {wordsHidden ? <EyeOff size={12} /> : <Eye size={12} />}
+      </button>
+      <Type size={11} className="text-neutral-500 shrink-0" />
+      <span className={`text-[11px] truncate ${wordsHidden ? 'text-neutral-500 line-through' : 'text-neutral-300'}`}>Words</span>
+    </div>
+  );
+  const wordsRight = (
+    <div key="words" className="grid h-8 border-b border-white/5" style={gridCols} data-mix-words-row>
+      <div style={{ gridColumn: `1 / ${Math.max(slides.length, 1) + 1}`, gridRow: 1 }}
+        className={`my-1 mx-0.5 rounded border border-white/15 bg-white/10 text-[10px] text-neutral-300 font-semibold flex items-center px-2 ${wordsHidden ? 'opacity-30' : ''}`}>
+        Words{wordsHidden ? ' · hidden here' : ''}
+      </div>
+    </div>
+  );
 
   return (
     <div ref={workspaceRef} className="flex-1 min-w-0 min-h-0 flex flex-col bg-[#07070a] select-none" data-mix-workspace>
@@ -516,10 +536,6 @@ export function MixWorkspace(p: MixWorkspaceProps) {
             <input type="checkbox" checked={p.autoSend} onChange={(e) => p.onAutoSend(e.target.checked)} className="accent-pink-500" data-mix-autosend />
             Send edits at once
           </label>
-          <button type="button" onClick={() => setWordsHidden(!wordsHidden)} className={`${smallBtn} flex items-center gap-1 ${wordsHidden ? 'bg-pink-600/25 text-pink-200' : 'bg-white/5 text-neutral-300 hover:bg-white/10'}`}
-            title={wordsHidden ? 'Show the words (faint) in this preview again' : 'Hide the words in this preview, to work on the media alone (the screens still show them)'} data-mix-hide-words>
-            {wordsHidden ? <EyeOff size={11} /> : <Eye size={11} />} Words
-          </button>
           <button type="button" onClick={() => setGuides(v => !v)} className={`${smallBtn} ${guides ? 'bg-white/10 text-white' : 'bg-white/5 text-neutral-500'}`} title="Show or hide the outlines of the layers">Guides</button>
         </div>
       </div>
@@ -637,7 +653,8 @@ export function MixWorkspace(p: MixWorkspaceProps) {
         <div className="flex min-w-0">
           <div className="w-44 shrink-0 border-r border-[#262635] bg-[#0d0d12]">
             <div className="h-10 px-2 flex items-center text-[10px] uppercase tracking-wider text-neutral-500 border-b border-[#262635]">Layers · top first</div>
-            {tracks.map(l => {
+            {rows.map(l => {
+              if (l === 'words') return wordsLeft;
               const Icon = sourceIcon(l);
               const on = selLayer?.id === l.id;
               return (
@@ -702,7 +719,7 @@ export function MixWorkspace(p: MixWorkspaceProps) {
               </div>
 
               {/* Layers */}
-              {tracks.map(l => (
+              {rows.map(l => l === 'words' ? wordsRight : (
                 <div key={l.id} className="grid h-8 border-b border-white/5" style={{ gridTemplateColumns: `repeat(${Math.max(n, 1)}, minmax(76px, 1fr))`, gridTemplateRows: '32px' }}>
                   {n > 0 && <div className="bg-white/[0.04]" style={{ gridColumn: playIndex + 1, gridRow: 1 }} />}
                   {layerRuns(l, slides).map(run => {
@@ -811,6 +828,46 @@ function ColourPalette({ value, onChange }: { value: string; onChange: (v: strin
   );
 }
 
+type BorderSource = Extract<MixSource, { kind: 'border' }>;
+/** A border's shape, what covers the outside, and the edge line */
+function BorderSettings({ border, onChange }: { border: BorderSource; onChange: (patch: Partial<BorderSource>, phase?: Phase) => void }) {
+  const shape = border.shape || 'rect';
+  const outside = border.outside || '#000000';
+  return (
+    <div className="mt-2 space-y-3" data-mix-border-settings>
+      <p className="text-[11px] text-neutral-500 leading-snug">Drag the shape on the screen to move it, its corners to resize. Everything outside it stays covered, whatever you show.</p>
+      <div className="flex items-center gap-2 text-[11px] text-neutral-400">
+        <span className="w-[72px] shrink-0">Shape</span>
+        <div className="flex rounded overflow-hidden">
+          {([['rect', 'Rectangle'], ['rounded', 'Rounded'], ['oval', 'Oval']] as const).map(([s, label]) => (
+            <button key={s} type="button" onClick={() => onChange({ shape: s })} className={segBtn(shape === s)} data-mix-border-shape={s}>{label}</button>
+          ))}
+        </div>
+      </div>
+      {shape === 'rounded' && (
+        <Slider label="Corners" min={0} max={540} step={1} value={border.radius ?? 80} format={(v) => `${v}px`} onChange={(v, phase) => onChange({ radius: v }, phase)} />
+      )}
+      <div>
+        <div className="flex items-center justify-between text-[11px] text-neutral-400 mb-1">
+          <span>Outside</span>
+          <button type="button" onClick={() => onChange({ outside: outside === 'transparent' ? '#000000' : 'transparent' })} className="text-neutral-500 hover:text-white" data-mix-border-outside-none>
+            {outside === 'transparent' ? 'Cover it' : 'Don’t cover'}
+          </button>
+        </div>
+        {outside === 'transparent'
+          ? <p className="text-[11px] text-neutral-500">Not covered: only the edge line shows.</p>
+          : <ColourPalette value={outside} onChange={(v, phase) => onChange({ outside: v }, phase)} />}
+      </div>
+      <div className="space-y-1.5">
+        <div className="text-[11px] text-neutral-400">Edge line</div>
+        <ColourPalette value={border.color} onChange={(v, phase) => onChange({ color: v }, phase)} />
+        <Slider label="Thickness" min={0} max={120} step={1} value={border.width} format={(v) => v ? `${v}px` : 'none'} onChange={(v, phase) => onChange({ width: v }, phase)} />
+        {border.width > 0 && <Slider label="Glow" min={0} max={200} step={1} value={border.glow} format={(v) => v ? `${v}px` : 'none'} onChange={(v, phase) => onChange({ glow: v }, phase)} />}
+      </div>
+    </div>
+  );
+}
+
 /** Everything about one layer: what it plays, when, how it looks, and on which screens */
 function LayerSettings({ layer, slides, groups, screens, mainScreenId, onChange, onEffect, onReplace, onMove, onDuplicate, onDelete, isTop, isBottom }: {
   layer: MixLayer;
@@ -831,6 +888,7 @@ function LayerSettings({ layer, slides, groups, screens, mainScreenId, onChange,
   useEffect(() => setName(layer.name), [layer.name]);
   const fx = layer.effects || {};
   const isVideo = layer.source.kind === 'media' && layer.source.media.type === 'video';
+  const isBorder = layer.source.kind === 'border';
   const isFull = layer.layout.x === 0 && layer.layout.y === 0 && layer.layout.width === 1 && layer.layout.height === 1;
   const range = layer.span.kind === 'slides' ? (() => {
     const fi = slides.findIndex(s => s.id === (layer.span as any).fromId); const ti = slides.findIndex(s => s.id === (layer.span as any).toId);
@@ -876,7 +934,7 @@ function LayerSettings({ layer, slides, groups, screens, mainScreenId, onChange,
           ) : layer.source.kind === 'color' ? (
             <span>Colour wash</span>
           ) : layer.source.kind === 'border' ? (
-            <span>Border round the {isFull ? 'screen' : 'box'}</span>
+            <span>Border · over everything, words too</span>
           ) : (
             <span>Gradient</span>
           )}
@@ -891,12 +949,7 @@ function LayerSettings({ layer, slides, groups, screens, mainScreenId, onChange,
           </div>
         )}
         {layer.source.kind === 'border' && (
-          <div className="mt-2 space-y-2" data-mix-border-settings>
-            <ColourPalette value={layer.source.color} onChange={(v, phase) => onChange(l => ({ ...l, source: { ...(l.source as any), color: v } }), phase)} />
-            <Slider label="Thickness" min={0} max={200} step={1} value={layer.source.width} format={(v) => `${v}px`} onChange={(v, phase) => onChange(l => ({ ...l, source: { ...(l.source as any), width: v } }), phase)} />
-            <Slider label="Glow" min={0} max={200} step={1} value={layer.source.glow} format={(v) => v ? `${v}px` : 'none'} onChange={(v, phase) => onChange(l => ({ ...l, source: { ...(l.source as any), glow: v } }), phase)} />
-            <Slider label="Corners" min={0} max={300} step={1} value={layer.source.radius} format={(v) => v ? `${v}px` : 'square'} onChange={(v, phase) => onChange(l => ({ ...l, source: { ...(l.source as any), radius: v } }), phase)} />
-          </div>
+          <BorderSettings border={layer.source} onChange={(patch, phase) => onChange(l => ({ ...l, source: { ...(l.source as any), ...patch } }), phase)} />
         )}
         {layer.source.kind === 'gradient' && (
           <div className="mt-2"><Slider label="Angle" min={0} max={360} step={5} value={layer.source.angle} format={(v) => `${v}°`} onChange={(v, phase) => onChange(l => ({ ...l, source: { ...(l.source as any), angle: v } }), phase)} /></div>
@@ -934,12 +987,12 @@ function LayerSettings({ layer, slides, groups, screens, mainScreenId, onChange,
         </button>
       }>
         <Slider label="Opacity" min={0} max={100} step={1} value={layer.opacity ?? 100} format={(v) => `${v}%`} onChange={(v, phase) => onChange({ opacity: v }, phase)} />
-        <label className="flex items-center gap-2 text-[11px] text-neutral-400" title={blendHint}>
+        {!isBorder && <label className="flex items-center gap-2 text-[11px] text-neutral-400" title={blendHint}>
           <span className="w-[72px] shrink-0">Blend</span>
           <select value={layer.blend || 'normal'} onChange={(e) => onChange({ blend: e.target.value as MixBlend })} className={`${selectCls} flex-1`} data-mix-blend>
             {MIX_BLENDS.map(b => <option key={b.value} value={b.value}>{b.label}</option>)}
           </select>
-        </label>
+        </label>}
         {layer.source.kind === 'media' && (
           <div className="flex items-center gap-2 text-[11px] text-neutral-400">
             <span className="w-[72px] shrink-0">Fill the box</span>
@@ -950,7 +1003,7 @@ function LayerSettings({ layer, slides, groups, screens, mainScreenId, onChange,
           </div>
         )}
         <Slider label="Rotation" min={-180} max={180} step={1} value={layer.rotation ?? 0} format={(v) => `${v}°`} onChange={(v, phase) => onChange({ rotation: v || undefined }, phase)} />
-        <div className="flex items-center gap-2 text-[11px] text-neutral-400">
+        {!isBorder && <><div className="flex items-center gap-2 text-[11px] text-neutral-400">
           <span className="w-[72px] shrink-0">Shape</span>
           <div className="flex rounded overflow-hidden">
             {(['square', 'rounded', 'circle'] as const).map(s => (
@@ -964,10 +1017,10 @@ function LayerSettings({ layer, slides, groups, screens, mainScreenId, onChange,
           <span className="w-[72px] shrink-0">Flip</span>
           <button type="button" onClick={() => onChange({ flipX: layer.flipX ? undefined : true })} className={`${smallBtn} flex items-center gap-1 ${layer.flipX ? 'bg-pink-600 text-white' : 'bg-white/5 text-neutral-300 hover:bg-white/10'}`} title="Flip left to right"><FlipHorizontal size={12} /> Across</button>
           <button type="button" onClick={() => onChange({ flipY: layer.flipY ? undefined : true })} className={`${smallBtn} flex items-center gap-1 ${layer.flipY ? 'bg-pink-600 text-white' : 'bg-white/5 text-neutral-300 hover:bg-white/10'}`} title="Flip upside down"><FlipVertical size={12} /> Upside down</button>
-        </div>
+        </div></>}
       </Section>
 
-      <Section title="Effects" right={
+      {!isBorder && <Section title="Effects" right={
         <button type="button" onClick={() => onChange({ effects: undefined })} disabled={!layer.effects} className="text-[11px] text-neutral-400 hover:text-white disabled:opacity-30 flex items-center gap-1"><RotateCcw size={11} /> Reset</button>
       }>
         <Slider label="Brightness" min={0} max={200} step={1} value={fx.brightness ?? 100} format={(v) => `${v}%`} onChange={(v, phase) => onEffect({ brightness: v }, phase)} />
@@ -986,7 +1039,7 @@ function LayerSettings({ layer, slides, groups, screens, mainScreenId, onChange,
         <Slider label="Hue" min={-180} max={180} step={1} value={fx.hue ?? 0} format={(v) => `${v}°`} onChange={(v, phase) => onEffect({ hue: v }, phase)} />
         <Slider label="Blur" min={0} max={60} step={1} value={fx.blur ?? 0} format={(v) => `${v}px`} onChange={(v, phase) => onEffect({ blur: v }, phase)} />
         <Slider label="Vignette" min={0} max={100} step={1} value={fx.vignette ?? 0} format={(v) => `${v}%`} onChange={(v, phase) => onEffect({ vignette: v }, phase)} />
-      </Section>
+      </Section>}
 
       {isVideo && (
         <Section title="Video">

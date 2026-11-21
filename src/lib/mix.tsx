@@ -34,8 +34,12 @@ export type MixSource =
   | { kind: 'input'; input: LiveInput }
   | { kind: 'color'; color: string }
   | { kind: 'gradient'; from: string; to: string; angle: number }
-  /** A coloured frame round the screen (or round its box): thickness, glow and inner corner rounding in px on a 1920×1080 screen */
-  | { kind: 'border'; color: string; width: number; glow: number; radius: number };
+  /**
+   * A border: the layer's box is a window (rectangle, rounded or oval); everything outside it is covered with
+   * `outside` (black by default; 'transparent' = not covered), above everything else, words and overlays too.
+   * An edge line of `color` can run round the window: width (thickness), glow and radius (rounded corners) in px on a 1920×1080 screen.
+   */
+  | { kind: 'border'; shape?: 'rect' | 'rounded' | 'oval'; outside?: string; color: string; width: number; glow: number; radius: number };
 
 /** When a layer plays: a run of slides, every slide of one section (e.g. every Chorus), or the whole show */
 export type MixSpan =
@@ -309,16 +313,6 @@ function MixLayerView({ layer, preview }: { layer: LiveMixLayer; preview?: boole
   if (layer.source.kind === 'color') content = <div style={{ ...fill, background: layer.source.color }} />;
   else if (layer.source.kind === 'input') content = <LiveInputView input={layer.source.input} quality="high" fit={layer.fit || 'cover'} style={fill} showProblems={preview} />;
   else if (layer.source.kind === 'gradient') content = <div style={{ ...fill, background: `linear-gradient(${layer.source.angle}deg, ${layer.source.from}, ${layer.source.to})` }} />;
-  else if (layer.source.kind === 'border') {
-    // The hole in the middle is a rounded box; its huge outer shadow paints the frame, an inner shadow the glow
-    const b = layer.source;
-    const shadows = [`0 0 0 4000px ${b.color}`, b.glow > 0 ? `inset 0 0 ${b.glow}px ${b.glow / 2}px ${b.color}` : ''].filter(Boolean).join(', ');
-    content = (
-      <div style={{ ...fill, overflow: 'hidden' }} data-mix-border>
-        <div style={{ position: 'absolute', inset: Math.max(0, b.width), borderRadius: Math.max(0, b.radius), boxShadow: shadows }} />
-      </div>
-    );
-  }
   else if (!url) {
     content = preview ? (
       <div className="absolute inset-0 flex items-center justify-center text-center bg-black/50 border-4 border-dashed border-amber-400/80 text-amber-200 text-4xl font-semibold p-6" data-mix-missing>
@@ -345,6 +339,7 @@ function MixLayerView({ layer, preview }: { layer: LiveMixLayer; preview?: boole
 
   const fadeIn = layer.fadeIn ?? 1;
   const fadeOut = layer.fadeOut ?? 1;
+  if (layer.source.kind === 'border') return <BorderLayerView layer={layer} box={box} fadeIn={fadeIn} fadeOut={fadeOut} opacity={opacity} />;
   const tinted = (layer.source.kind === 'media' || layer.source.kind === 'input') && !!layer.effects?.tint && (layer.effects.tintAmount ?? 100) > 0;
   return (
     <motion.div
@@ -368,15 +363,54 @@ function MixLayerView({ layer, preview }: { layer: LiveMixLayer; preview?: boole
   );
 }
 
+/** A border layer: the window (its box) shows what is under it; everything outside is covered, and an edge line can run round it */
+function BorderLayerView({ layer, box, fadeIn, fadeOut, opacity }: { layer: LiveMixLayer; box: React.CSSProperties; fadeIn: number; fadeOut: number; opacity: number }) {
+  const b = layer.source as Extract<MixSource, { kind: 'border' }>;
+  const shape = b.shape || 'rect';
+  const outside = b.outside || '#000000';
+  const width = Math.max(0, b.width || 0);
+  const glow = Math.max(0, b.glow || 0);
+  // The window's huge outer shadow covers everything outside it (following its shape); the edge line is its border,
+  // and the glow spreads both ways from the line (drawn over the covering)
+  const shadows = [
+    glow > 0 && width > 0 ? `0 0 ${glow}px ${glow / 2}px ${b.color}` : '',
+    glow > 0 && width > 0 ? `inset 0 0 ${glow}px ${glow / 2}px ${b.color}` : '',
+    outside !== 'transparent' ? `0 0 0 6000px ${outside}` : '',
+  ].filter(Boolean).join(', ');
+  const windowStyle: React.CSSProperties = {
+    ...box,
+    overflow: undefined,
+    boxSizing: 'border-box',
+    borderRadius: shape === 'oval' ? '50%' : shape === 'rounded' ? Math.max(0, b.radius || 0) : 0,
+    border: width > 0 ? `${width}px solid ${b.color}` : undefined,
+    boxShadow: shadows || undefined,
+  };
+  return (
+    <motion.div
+      className="absolute inset-0 pointer-events-none overflow-hidden"
+      initial={{ opacity: 0 }}
+      animate={{ opacity, transition: { duration: fadeIn, ease: 'easeOut' } }}
+      variants={{ gone: (exitFade?: number) => ({ opacity: 0, transition: { duration: exitFade ?? fadeOut, ease: 'easeOut' } }) }}
+      exit="gone"
+      data-mix-layer={layer.id}
+      data-mix-border
+    >
+      <div style={windowStyle} data-mix-border-window />
+    </motion.div>
+  );
+}
+
 /**
  * The mix on a screen: above the background, under overlays and the words. Layers fade in and out;
  * a layer that stays on keeps playing. Blend modes mix with the background below.
  */
-export function MixStack({ layers, exitFade, preview = false }: { layers: LiveMixLayer[] | undefined; exitFade?: number; preview?: boolean }) {
+export function MixStack({ layers, exitFade, preview = false, top = false }: { layers: LiveMixLayer[] | undefined; exitFade?: number; preview?: boolean; top?: boolean }) {
+  // Borders go on top of everything (words and overlays too); the other layers under the words
+  const shown = (layers || []).filter(l => (l.source.kind === 'border') === top);
   return (
-    <div className="absolute inset-0 pointer-events-none" data-mix-stack>
+    <div className="absolute inset-0 pointer-events-none" style={top ? { zIndex: 60 } : undefined} data-mix-stack={top ? 'top' : 'under'}>
       <AnimatePresence custom={exitFade}>
-        {(layers || []).map(l => React.createElement(MixLayerView as any, { key: l.id, layer: l, preview }))}
+        {shown.map(l => React.createElement(MixLayerView as any, { key: l.id, layer: l, preview }))}
       </AnimatePresence>
     </div>
   );
