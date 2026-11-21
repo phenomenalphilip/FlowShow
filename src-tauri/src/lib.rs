@@ -144,6 +144,12 @@ async fn open_output_window(
   if fullscreen {
     window.set_fullscreen(true).map_err(|e| e.to_string())?;
   }
+  // Keeping an output off the taskbar can take FlowShow's own button with it (they share it): put that back
+  if skip_taskbar {
+    if let Some(main) = app.get_webview_window("main") {
+      let _ = main.set_skip_taskbar(false);
+    }
+  }
   // The page draws again (it draws nothing while hidden)
   let _ = window.eval("window.__flowshowShown = true; window.dispatchEvent(new Event('flowshow-output-shown'));");
   // Windows hands the keyboard to a window that has just appeared: give it back to FlowShow's main window,
@@ -193,7 +199,9 @@ fn prepare_output_window(app: tauri::AppHandle, label: String, url: String, titl
   }
   TRANSPARENT_WINDOWS.lock().unwrap().insert(label.clone(), false);
   OUTPUT_URLS.lock().unwrap().insert(label.clone(), url.clone());
-  make_output_window(&app, &label, &url, &format!("FlowShow - {title}"), false, true).map(|_| ())
+  // Not "kept off the taskbar" here: a hidden window isn't on it anyway, and asking Windows to remove one window's
+  // taskbar button can take away FlowShow's own button (they share it). Showing it sets that as needed.
+  make_output_window(&app, &label, &url, &format!("FlowShow - {title}"), false, false).map(|_| ())
 }
 
 /// Close an output window. keep: only hide it, ready for next time (screen outputs); otherwise it is destroyed
