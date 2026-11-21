@@ -34,6 +34,8 @@ import { FILE_SAVED_EVENT, SavedFile, revealFile } from './lib/nativeFiles';
 import { NdiBadge } from './components/NdiStatus';
 import { get, set } from 'idb-keyval';
 import { SmartTextLayout } from './components/SmartTextLayout';
+import { RemoteButton } from './components/RemotePanel';
+import { useRemote, useRemoteCommands, useRemotePublish } from './lib/remote';
 import { NoConverterError, PAGE_FITS, PageThumb, isPdfFile, openLibreOfficePage, pdfToPictures, powerPointToPdf, storePages, type PageFit } from './lib/pages';
 import { FixedStage } from './components/FixedStage';
 import { BibleVersion, getBibleList, getBible, saveBible, deleteBible, initDatabase } from './lib/bibleDb';
@@ -1971,6 +1973,36 @@ function ControlPanel() {
      setLiveState(prev => ({ ...prev, ...releaseHeld(prev), slide: undefined, globalBackground: null, clearText: false, clearedOutputs: {}, mix: clearedMix(prev.mix) }));
      setPreviewSlide(null);
   };
+
+  // ─── The phone remote: what the phones see, and what they ask for ───
+  const remote = useRemote();
+  const remoteShow = getOpenShow();
+  useRemotePublish('show', remoteShow ? {
+    id: remoteShow.id,
+    title: remoteShow.title,
+    slides: remoteShow.slides.filter(s => !s.disabled).map(s => ({ id: s.id, text: s.text.split('\n').slice(0, 3).join('\n'), group: s.group, page: !!s.page })),
+  } : null, remote.running);
+  useRemotePublish('live', { slideId: liveState.slide?.id ?? null, clearText: !!liveState.clearText }, remote.running);
+  useRemotePublish('setlist', {
+    openId: activeTab === 'setlist' ? activeSetlistItemId : null,
+    items: serviceSetlist.items.map(i => ({ id: i.id, title: i.title, subtitle: i.subtitle, header: i.type === 'header' })),
+  }, remote.running);
+  useRemoteCommands((c) => {
+    // Next / Previous do exactly what the arrow keys do
+    const key = (k: string) => window.dispatchEvent(new KeyboardEvent('keydown', { key: k, code: k, bubbles: true }));
+    if (c.kind === 'next') key('ArrowRight');
+    else if (c.kind === 'previous') key('ArrowLeft');
+    else if (c.kind === 'clear-text') toggleClearText();
+    else if (c.kind === 'clear-background') setGlobalBackground(null);
+    else if (c.kind === 'clear-all') clearAll();
+    else if (c.kind === 'slide') {
+      const slide = getOpenShow()?.slides.find(s => s.id === c.id);
+      if (slide && !slide.disabled) { setPreviewSlide(slide); goLive(slide); }
+    } else if (c.kind === 'setlist') {
+      const item = serviceSetlist.items.find(i => i.id === c.id);
+      if (item && item.type !== 'header') openSetlistItem(serviceSetlist.id, item, false);
+    }
+  });
 
   const handleSplitSlide = (index: number) => {
     if (activeTab !== 'songs' || !songsList[activeItemIndex]) return;
@@ -4452,14 +4484,8 @@ function ControlPanel() {
 
         {/* Right: Quick Action Controls */}
         <div className="flex items-center gap-2 justify-self-end">
-          {/* Remote / Squiggle icon */}
-          <button 
-            onClick={() => void showMessage('FlowShow Remote is connected and listening.')}
-            className="p-1 text-pink-400 hover:text-pink-300 transition-colors" 
-            title="Remote Connection"
-          >
-            <Wifi size={16} />
-          </button>
+          {/* The phone remote: on/off, address and PIN */}
+          <RemoteButton />
 
           {/* Settings Modal Button */}
           <button 

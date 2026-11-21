@@ -1,4 +1,5 @@
 mod convert;
+mod remote;
 mod files;
 #[cfg(windows)]
 mod live;
@@ -322,6 +323,24 @@ async fn convert_to_pdf(request: tauri::ipc::Request<'_>) -> Result<tauri::ipc::
   Ok(tauri::ipc::Response::new(pdf))
 }
 
+/// The phone remote: start it (address and PIN), stop it, see how it is, and tell it what FlowShow shows
+#[tauri::command]
+fn remote_start(app: tauri::AppHandle) -> Result<remote::Info, String> {
+  remote::start(app)
+}
+#[tauri::command]
+fn remote_stop() {
+  remote::stop();
+}
+#[tauri::command]
+fn remote_info() -> remote::Info {
+  remote::info()
+}
+#[tauri::command]
+fn remote_publish(kind: String, json: String) {
+  remote::publish(&kind, &json);
+}
+
 /// Can PowerPoint files be imported here? "PowerPoint", "LibreOffice" or null (neither installed)
 #[tauri::command]
 async fn pdf_converter() -> Option<String> {
@@ -469,7 +488,7 @@ pub fn run() {
     .invoke_handler(tauri::generate_handler![
       save_export, reveal_file, pick_media_file, pick_media_folder, list_media_folder, open_output_window, close_output_window, prepare_output_window,
       ndi_info, ndi_peek, ndi_sources, ndi_snapshot, ndi_start, ndi_stop, ndi_status, live_url, live_screens, live_status,
-      convert_to_pdf, open_web_page, pdf_converter
+      convert_to_pdf, open_web_page, pdf_converter, remote_start, remote_stop, remote_info, remote_publish
     ])
     .build(tauri::generate_context!())
     .expect("error while building tauri application")

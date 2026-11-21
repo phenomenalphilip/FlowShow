@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0b10">
+<title>FlowShow Remote</title>
+<style>
+  :root { --bg: #0b0b10; --panel: #15151d; --line: #26262f; --text: #f4f4f5; --dim: #a1a1aa; --accent: #ec4899; --live: #ef4444; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  body { display: flex; flex-direction: column; }
+  header { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--line); padding-top: max(12px, env(safe-area-inset-top)); }
+  header .brand { font-weight: 900; color: var(--accent); letter-spacing: .04em; }
+  header .title { flex: 1; min-width: 0; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  header button { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; font-size: 14px; font-weight: 600; }
+  #status { font-size: 12px; color: var(--dim); }
+  main { flex: 1; overflow-y: auto; padding: 12px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  .slide { position: relative; background: var(--panel); border: 2px solid var(--line); border-radius: 12px; padding: 10px 10px 10px 34px; min-height: 76px; font-size: 14px; line-height: 1.35; text-align: left; color: var(--text); white-space: pre-line; overflow: hidden; }
+  .slide .n { position: absolute; left: 8px; top: 9px; font-size: 11px; font-weight: 800; color: var(--dim); }
+  .slide .g { display: block; font-size: 10px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); margin-bottom: 3px; }
+  .slide.live { border-color: var(--live); box-shadow: 0 0 0 1px var(--live) inset; }
+  .slide.page { text-align: center; padding: 22px 8px; color: var(--dim); }
+  .empty { color: var(--dim); text-align: center; margin-top: 40px; font-size: 15px; }
+  footer { border-top: 1px solid var(--line); padding: 10px 12px; padding-bottom: max(10px, env(safe-area-inset-bottom)); display: grid; gap: 8px; }
+  .nav { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .nav button { font-size: 20px; font-weight: 800; padding: 18px 0; border-radius: 14px; border: none; color: #fff; background: #2a2a36; }
+  .nav button.next { background: var(--accent); }
+  .clear { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+  .clear button { font-size: 13px; font-weight: 700; padding: 12px 0; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); color: var(--text); }
+  .clear button.on { border-color: var(--accent); color: var(--accent); }
+  #drawer { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: none; }
+  #drawer.open { display: block; }
+  #drawer .panel { position: absolute; left: 0; top: 0; bottom: 0; width: min(85vw, 360px); background: var(--panel); border-right: 1px solid var(--line); overflow-y: auto; padding: 14px; padding-top: max(14px, env(safe-area-inset-top)); }
+  #drawer h2 { font-size: 13px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); margin: 4px 0 10px; }
+  .item { display: block; width: 100%; text-align: left; background: none; border: none; border-radius: 10px; color: var(--text); padding: 12px 10px; font-size: 16px; }
+  .item.open { background: rgba(236,72,153,.15); color: var(--accent); font-weight: 700; }
+  .item .sub { display: block; font-size: 12px; color: var(--dim); font-weight: 400; margin-top: 2px; }
+  .header-row { font-size: 11px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); padding: 14px 10px 4px; }
+  #login { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; padding: 24px; text-align: center; }
+  #login .brand { font-size: 28px; }
+  #login input { font-size: 32px; letter-spacing: .4em; text-align: center; width: 220px; padding: 12px; border-radius: 14px; border: 1px solid var(--line); background: var(--panel); color: var(--text); }
+  #login button { font-size: 18px; font-weight: 800; padding: 14px 40px; border-radius: 14px; border: none; background: var(--accent); color: #fff; }
+  #login .err { color: #f87171; min-height: 1.2em; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+  <div id="login">
+    <div class="brand">FlowShow Remote</div>
+    <div style="color: var(--dim)">Type the PIN shown in FlowShow (the remote button, top right).</div>
+    <input id="pin" inputmode="numeric" autocomplete="one-time-code" maxlength="4" placeholder="····">
+    <button id="go">Connect</button>
+    <div class="err" id="err"></div>
+  </div>
+
+  <div id="app" class="hidden" style="display: contents">
+    <header>
+      <button id="menu" aria-label="Setlist">☰</button>
+      <div class="title" id="title">FlowShow</div>
+      <span id="status">…</span>
+    </header>
+    <main id="slides"></main>
+    <footer>
+      <div class="nav">
+        <button id="prev">◀ Previous</button>
+        <button id="next" class="next">Next ▶</button>
+      </div>
+      <div class="clear">
+        <button id="clearText">Clear text</button>
+        <button id="clearBg">Clear background</button>
+        <button id="clearAll">Clear all</button>
+      </div>
+    </footer>
+    <div id="drawer"><div class="panel"><h2>Setlist</h2><div id="setlist"></div></div></div>
+  </div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  let key = sessionStorage.getItem('fs-remote-key');
+  let show = null, live = {}, setlist = null, events = null;
+
+  const send = (command) => fetch('/command?k=' + key, { method: 'POST', body: JSON.stringify(command) })
+    .then(r => { if (r.status === 403) signOut(); })
+    .catch(() => {});
+
+  function signOut() {
+    key = null; sessionStorage.removeItem('fs-remote-key');
+    if (events) events.close();
+    $('app').classList.add('hidden'); $('login').classList.remove('hidden');
+  }
+
+  async function login() {
+    $('err').textContent = '';
+    const r = await fetch('/login', { method: 'POST', body: $('pin').value.trim() }).catch(() => null);
+    if (!r) { $('err').textContent = "Can't reach FlowShow. Same Wi-Fi?"; return; }
+    if (!r.ok) { $('err').textContent = await r.text(); return; }
+    key = await r.text();
+    sessionStorage.setItem('fs-remote-key', key);
+    connect();
+  }
+  $('go').onclick = login;
+  $('pin').addEventListener('keydown', (e) => { if (e.key === 'Enter') login(); });
+
+  function connect() {
+    $('login').classList.add('hidden'); $('app').classList.remove('hidden');
+    if (events) events.close();
+    events = new EventSource('/events?k=' + key);
+    events.onopen = () => { $('status').textContent = 'connected'; };
+    events.onerror = () => {
+      $('status').textContent = 'reconnecting…';
+      // A rejected key (FlowShow restarted the remote, so the PIN changed): back to the PIN
+      fetch('/check?k=' + key).then(r => { if (r.status === 403) signOut(); }).catch(() => {});
+    };
+    events.addEventListener('show', (e) => { show = JSON.parse(e.data); render(); });
+    events.addEventListener('live', (e) => { live = JSON.parse(e.data); render(); });
+    events.addEventListener('setlist', (e) => { setlist = JSON.parse(e.data); renderSetlist(); });
+  }
+
+  function render() {
+    $('title').textContent = show ? show.title : 'FlowShow';
+    const box = $('slides');
+    box.innerHTML = '';
+    if (!show || !show.slides || !show.slides.length) {
+      box.innerHTML = '<div class="empty">Nothing open in FlowShow yet.<br>Open a song, declaration or presentation there, or pick one from the setlist (☰).</div>';
+    } else {
+      const grid = document.createElement('div');
+      grid.className = 'grid';
+      show.slides.forEach((s, i) => {
+        const b = document.createElement('button');
+        b.className = 'slide' + (s.page ? ' page' : '') + (live.slideId === s.id ? ' live' : '');
+        b.dataset.slide = s.id;
+        const n = document.createElement('span'); n.className = 'n'; n.textContent = i + 1; b.appendChild(n);
+        if (s.group) { const g = document.createElement('span'); g.className = 'g'; g.textContent = s.group; b.appendChild(g); }
+        b.appendChild(document.createTextNode(s.page ? 'Page ' + (i + 1) : (s.text || '').split('\n').slice(0, 3).join('\n')));
+        b.onclick = () => send({ kind: 'slide', id: s.id });
+        grid.appendChild(b);
+      });
+      box.appendChild(grid);
+      const on = grid.querySelector('.live');
+      if (on && !render.scrolled) { on.scrollIntoView({ block: 'center' }); }
+    }
+    $('clearText').classList.toggle('on', !!live.clearText);
+  }
+
+  function renderSetlist() {
+    const box = $('setlist');
+    box.innerHTML = '';
+    if (!setlist || !setlist.items.length) { box.innerHTML = '<div class="empty">No setlist open in FlowShow.</div>'; return; }
+    for (const it of setlist.items) {
+      if (it.header) { const h = document.createElement('div'); h.className = 'header-row'; h.textContent = it.title; box.appendChild(h); continue; }
+      const b = document.createElement('button');
+      b.className = 'item' + (it.id === setlist.openId ? ' open' : '');
+      b.textContent = it.title;
+      if (it.subtitle) { const s = document.createElement('span'); s.className = 'sub'; s.textContent = it.subtitle; b.appendChild(s); }
+      b.onclick = () => { send({ kind: 'setlist', id: it.id }); $('drawer').classList.remove('open'); };
+      box.appendChild(b);
+    }
+  }
+
+  $('next').onclick = () => send({ kind: 'next' });
+  $('prev').onclick = () => send({ kind: 'previous' });
+  $('clearText').onclick = () => send({ kind: 'clear-text' });
+  $('clearBg').onclick = () => send({ kind: 'clear-background' });
+  $('clearAll').onclick = () => send({ kind: 'clear-all' });
+  $('menu').onclick = () => $('drawer').classList.add('open');
+  $('drawer').onclick = (e) => { if (e.target === $('drawer')) $('drawer').classList.remove('open'); };
+
+  if (key) connect();
+})();
+</script>
+</body>
+</html>
