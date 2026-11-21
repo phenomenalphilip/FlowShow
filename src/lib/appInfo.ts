@@ -1,6 +1,6 @@
 /** About FlowShow */
 export const APP_NAME = 'FlowShow';
-export const APP_VERSION = '2.0.0';
+export const APP_VERSION = '2.1.0';
 export const APP_AUTHOR = 'Phenomenal Philip';
 export const APP_ORGANISATION = 'The Fort Church Media';
 export const APP_YEAR = 2026;
