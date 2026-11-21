@@ -11,14 +11,16 @@ use tauri::Manager as _;
 /// for the main window): output windows keep drawing and animating even when covered or out of sight.
 const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows --disable-component-update --disk-cache-size=33554432";
 
-/// FlowShow's own pages may use cameras (camera inputs), read files the user chose, and list the computer's fonts,
+/// FlowShow's own pages may use cameras (camera inputs), read files the user chose, list the computer's fonts,
+/// see the layout of all the displays (to find the screens), read pasted words and play video,
 /// without WebView2 asking "Allow this site…?". Only FlowShow's own addresses are allowed.
 #[cfg(windows)]
 fn allow_flowshow_permissions(window: &tauri::WebviewWindow) {
   let _ = window.with_webview(|webview| unsafe {
     use webview2_com::Microsoft::Web::WebView2::Win32::{
-      COREWEBVIEW2_PERMISSION_KIND, COREWEBVIEW2_PERMISSION_KIND_CAMERA, COREWEBVIEW2_PERMISSION_KIND_FILE_READ_WRITE,
-      COREWEBVIEW2_PERMISSION_KIND_LOCAL_FONTS, COREWEBVIEW2_PERMISSION_STATE_ALLOW,
+      COREWEBVIEW2_PERMISSION_KIND, COREWEBVIEW2_PERMISSION_KIND_AUTOPLAY, COREWEBVIEW2_PERMISSION_KIND_CAMERA,
+      COREWEBVIEW2_PERMISSION_KIND_CLIPBOARD_READ, COREWEBVIEW2_PERMISSION_KIND_FILE_READ_WRITE,
+      COREWEBVIEW2_PERMISSION_KIND_LOCAL_FONTS, COREWEBVIEW2_PERMISSION_KIND_WINDOW_MANAGEMENT, COREWEBVIEW2_PERMISSION_STATE_ALLOW,
     };
     let Ok(core) = webview.controller().CoreWebView2() else { return };
     let mut token = 0i64;
@@ -36,7 +38,10 @@ fn allow_flowshow_permissions(window: &tauri::WebviewWindow) {
         if own
           && (kind == COREWEBVIEW2_PERMISSION_KIND_CAMERA
             || kind == COREWEBVIEW2_PERMISSION_KIND_FILE_READ_WRITE
-            || kind == COREWEBVIEW2_PERMISSION_KIND_LOCAL_FONTS)
+            || kind == COREWEBVIEW2_PERMISSION_KIND_LOCAL_FONTS
+            || kind == COREWEBVIEW2_PERMISSION_KIND_WINDOW_MANAGEMENT
+            || kind == COREWEBVIEW2_PERMISSION_KIND_CLIPBOARD_READ
+            || kind == COREWEBVIEW2_PERMISSION_KIND_AUTOPLAY)
         {
           args.SetState(COREWEBVIEW2_PERMISSION_STATE_ALLOW)?;
           // Remembered, so camera names can be listed later without switching a camera on first

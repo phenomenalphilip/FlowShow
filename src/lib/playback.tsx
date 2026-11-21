@@ -73,9 +73,14 @@ export function useMediaTags(): MediaTags {
 // ─── Keeping every screen with the player ───
 
 const CHANNEL = 'flowshow_playback';
-interface PlaybackSync { kind: 'playback-sync'; url: string; time: number; playing: boolean; loop: boolean; at: number }
+/** offset: seconds the screens' picture runs ahead of the sound (Lip sync: projectors and TVs show the picture late) */
+interface PlaybackSync { kind: 'playback-sync'; url: string; time: number; playing: boolean; loop: boolean; at: number; offset?: number }
 
-/** A screen's video follows the playback player (time, play/pause, loop); it never plays sound itself */
+/**
+ * A screen's video follows the playback player (time, play/pause, loop); it never plays sound itself.
+ * It stays with the sound all the time: small differences are caught up by playing a little faster or slower
+ * (unnoticeable), and only a big one jumps.
+ */
 export function usePlaybackFollower(ref: React.RefObject<HTMLVideoElement | null>, url: string | null) {
   useEffect(() => {
     if (!url || typeof BroadcastChannel === 'undefined') return;
@@ -85,8 +90,21 @@ export function usePlaybackFollower(ref: React.RefObject<HTMLVideoElement | null
       const v = ref.current;
       if (!v || s?.kind !== 'playback-sync' || s.url !== url) return;
       v.loop = s.loop;
-      const target = s.time + (s.playing ? (Date.now() - s.at) / 1000 : 0);
-      if (Number.isFinite(target) && Math.abs(v.currentTime - target) > 0.3) v.currentTime = target;
+      const target = s.time + (s.playing ? (Date.now() - s.at) / 1000 : 0) + (s.offset || 0);
+      if (!Number.isFinite(target)) return;
+      const diff = target - v.currentTime;
+      if (!s.playing) {
+        if (Math.abs(diff) > 0.04) v.currentTime = Math.max(0, target);
+        v.playbackRate = 1;
+      } else if (Math.abs(diff) > 0.7 || v.paused) {
+        // Far off (or starting): jump, a little ahead, since the jump itself takes a moment
+        v.currentTime = Math.max(0, target + 0.08);
+        v.playbackRate = 1;
+      } else if (Math.abs(diff) > 0.02) {
+        v.playbackRate = Math.min(1.1, Math.max(0.9, 1 + diff * 0.6));
+      } else {
+        v.playbackRate = 1;
+      }
       if (s.playing && v.paused) v.play().catch(() => {});
       if (!s.playing && !v.paused) v.pause();
     };
@@ -117,6 +135,12 @@ export function PlaybackBar({ url, name, onEnded, onStop }: { url: string; name:
   const [muted, setMuted] = useState(false);
   const [scrub, setScrub] = useState<number | null>(null);
   const [showVolume, setShowVolume] = useState(false);
+  // Lip sync (ms): how much earlier the screens show the picture than the sound plays (for projectors and TVs that
+  // show the picture late). Remembered on this computer.
+  const [lipSync, setLipSync] = useState(() => { try { return Number(localStorage.getItem('fs-playback-lipsync') ?? 0) || 0; } catch { return 0; } });
+  const lipSyncRef = useRef(lipSync);
+  lipSyncRef.current = lipSync;
+  useEffect(() => { try { localStorage.setItem('fs-playback-lipsync', String(lipSync)); } catch { /* fine */ } }, [lipSync]);
   const chRef = useRef<BroadcastChannel | null>(null);
 
   useEffect(() => {
@@ -126,11 +150,11 @@ export function PlaybackBar({ url, name, onEnded, onStop }: { url: string; name:
   const tell = () => {
     const v = ref.current;
     if (!v) return;
-    chRef.current?.postMessage({ kind: 'playback-sync', url, time: v.currentTime, playing: !v.paused && !v.ended, loop: v.loop, at: Date.now() } as PlaybackSync);
+    chRef.current?.postMessage({ kind: 'playback-sync', url, time: v.currentTime, playing: !v.paused && !v.ended, loop: v.loop, at: Date.now(), offset: lipSyncRef.current / 1000 } as PlaybackSync);
   };
-  // Keep the screens in step (and tell them often enough to catch a window that opens late)
+  // Keep the screens in step (often, so they stay close to the sound, and to catch a window that opens late)
   useEffect(() => {
-    const id = window.setInterval(tell, 500);
+    const id = window.setInterval(tell, 250);
     return () => window.clearInterval(id);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [url]);
@@ -207,12 +231,24 @@ export function PlaybackBar({ url, name, onEnded, onStop }: { url: string; name:
             {muted || volume === 0 ? <VolumeX size={15} /> : <Volume2 size={15} />}
           </button>
           {showVolume && (
-            <div className="absolute right-0 top-full mt-1 z-50 px-2 py-2 rounded-lg border border-white/10 bg-[#18181b] shadow-2xl flex items-center gap-2" onPointerLeave={() => setShowVolume(false)} data-playback-volume-pop>
-              <button type="button" onClick={() => setMuted(m => !m)} className={btn} title={muted ? 'Unmute' : 'Mute'} data-playback-mute>
-                {muted || volume === 0 ? <VolumeX size={14} /> : <Volume2 size={14} />}
-              </button>
-              <input type="range" min={0} max={1} step={0.05} value={muted ? 0 : volume} onChange={(e) => { setVolume(Number(e.target.value)); setMuted(false); }} className="w-24 accent-pink-500 cursor-pointer" data-playback-volume />
-              <span className="text-[10px] font-mono text-neutral-400 w-8 text-right">{Math.round((muted ? 0 : volume) * 100)}%</span>
+            <div className="absolute right-0 top-full mt-1 z-50 px-2 py-2 rounded-lg border border-white/10 bg-[#18181b] shadow-2xl space-y-2" onPointerLeave={() => setShowVolume(false)} data-playback-volume-pop>
+              <div className="flex items-center gap-2">
+                <button type="button" onClick={() => setMuted(m => !m)} className={btn} title={muted ? 'Unmute' : 'Mute'} data-playback-mute>
+                  {muted || volume === 0 ? <VolumeX size={14} /> : <Volume2 size={14} />}
+                </button>
+                <input type="range" min={0} max={1} step={0.05} value={muted ? 0 : volume} onChange={(e) => { setVolume(Number(e.target.value)); setMuted(false); }} className="w-24 accent-pink-500 cursor-pointer" data-playback-volume />
+                <span className="text-[10px] font-mono text-neutral-400 w-8 text-right">{Math.round((muted ? 0 : volume) * 100)}%</span>
+              </div>
+              {/* Lip sync: if the sound comes before the picture on the screens, move it right */}
+              <div className="border-t border-white/5 pt-2" title="If the sound comes before the picture on the screens (projectors and TVs often show the picture late), move this right until they match. Remembered on this computer.">
+                <div className="flex items-center justify-between text-[10px] text-neutral-400 mb-0.5">
+                  <span>Lip sync</span>
+                  <button type="button" onClick={() => setLipSync(0)} className="font-mono text-neutral-300 hover:text-white" title="Back to 0" data-playback-lipsync-value>
+                    {lipSync === 0 ? '0 ms' : `${lipSync > 0 ? 'picture ' : 'sound '}${Math.abs(lipSync)} ms earlier`}
+                  </button>
+                </div>
+                <input type="range" min={-300} max={500} step={10} value={lipSync} onChange={(e) => setLipSync(Number(e.target.value))} className="w-[190px] accent-pink-500 cursor-pointer" data-playback-lipsync />
+              </div>
             </div>
           )}
         </div>
