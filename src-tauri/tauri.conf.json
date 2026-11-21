@@ -51,7 +51,8 @@
     "category": "Productivity",
     "windows": {
       "nsis": {
-        "installerHooks": "./installer-hooks.nsh"
+        "installerHooks": "./installer-hooks.nsh",
+        "installerIcon": "icons/icon.ico"
       }
     }
   }
