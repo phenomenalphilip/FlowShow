@@ -90,6 +90,8 @@ export interface PresentationStyle {
   scriptureStageLayoutId?: string;
   /** Stage styles: the stage layout for the slides of Declaration shows (missing = the lyrics layout) */
   declarationStageLayoutId?: string;
+  /** Stage styles: the stage layout for presentation pages (PDF / PowerPoint; missing = "current and next") */
+  presentationStageLayoutId?: string;
   backgroundColor: string;
   backgroundMedia?: { url: string; type: 'image' | 'video'; fileName?: string } | null;
   transition: 'none' | 'fade' | 'slide' | 'zoom';

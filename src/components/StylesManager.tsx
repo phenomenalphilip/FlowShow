@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Plus, Trash, Pencil, Check, X, Sparkles, MonitorPlay, Tv } from 'lucide-react';
 import { BUILT_IN_STYLE_IDS, PresentationStyle, ScreenKind, styleKind } from '../lib/model';
 import { PresentationTemplate } from '../lib/templates';
-import { STAGE_LAYOUTS, STAGE_SAMPLES, StageLayout, stageLayoutFor, STAGE_SLOT_FIELD, STAGE_SLOT_LABEL, stageSlotSlide } from '../lib/stageLayouts';
+import { STAGE_LAYOUTS, STAGE_SAMPLES, StageLayout, stageLayoutFor, STAGE_SLOT_FIELD, STAGE_SLOT_LABEL, stageSlotSlide, STAGE_SLOTS } from '../lib/stageLayouts';
 import { InlineTemplateGrid } from './TemplateGalleryModal';
 import { FixedStage } from './FixedStage';
 import { StageScreen } from './StageScreen';
@@ -203,7 +203,7 @@ export function StylesManager({ styles, stageLayouts, templates, onAdd, onUpdate
             <>
               {/* Stage layouts, one for lyrics and one for scripture, with a preview of each */}
               <Section title="Stage layouts">
-                {(['lyrics', 'declaration', 'scripture'] as const).map(type => {
+                {STAGE_SLOTS.map(type => {
                   const layout = stageLayoutFor(selected, stageSlotSlide(type), stageLayouts);
                   const field = STAGE_SLOT_FIELD[type];
                   return (

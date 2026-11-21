@@ -16,7 +16,15 @@ export interface SlidePage {
   storedId: string;
   /** e.g. "Sermon.pdf · page 3" */
   name: string;
+  /** How it fills the audience screens: the whole page (default), fill the screen (crops), or stretch */
+  fit?: PageFit;
 }
+export type PageFit = 'contain' | 'cover' | 'fill';
+export const PAGE_FITS: { value: PageFit; label: string; hint: string }[] = [
+  { value: 'contain', label: 'Whole page', hint: 'All of the page, black around it' },
+  { value: 'cover', label: 'Fill the screen', hint: 'No black: the page is cropped (a portrait page loses its top and bottom)' },
+  { value: 'fill', label: 'Stretch', hint: 'Fills the screen exactly; the page is stretched out of shape' },
+];
 
 /** Pages are made this wide at most (sharp on a 1080p screen, and on 4K text stays readable) */
 const MAX_WIDTH = 2560;
@@ -117,7 +125,7 @@ export function PagePicture({ page, cleared = false, fadeSeconds = 0.6 }: { page
       transition={{ duration: fadeSeconds, ease: 'easeOut' }}
       data-slide-page={page.name}
     >
-      {url && <img src={url} alt="" draggable={false} className="absolute inset-0 w-full h-full object-contain" />}
+      {url && <img src={url} alt="" draggable={false} className="absolute inset-0 w-full h-full" style={{ objectFit: page.fit || 'contain' }} />}
     </motion.div>
   );
 }

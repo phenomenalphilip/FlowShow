@@ -28,7 +28,11 @@ export type StageItemKind =
   /** A picture or video (always drawn under the words) */
   | 'media'
   /** The countdown in use (started in the Timers tab) */
-  | 'timer';
+  | 'timer'
+  /** Presentations (PDF / PowerPoint): the page on the screens now, as a picture */
+  | 'current-page'
+  /** Presentations: the next page, as a picture (with a label above it) */
+  | 'next-page';
 
 export interface StageItem {
   id: string;
@@ -92,6 +96,14 @@ export const STAGE_ITEM_KINDS: Record<StageItemKind, { label: string; hint: stri
     label: 'Picture or video', hint: 'A background, logo or video (always under the words)',
     start: { rect: { x: 0, y: 0, width: 1, height: 1 }, opacity: 100, fit: 'cover' },
   },
+  'current-page': {
+    label: 'Current page', hint: 'Presentations: the page on the screens now',
+    start: { rect: { x: 0.03, y: 0.1, width: 0.64, height: 0.64 } },
+  },
+  'next-page': {
+    label: 'Next page', hint: 'Presentations: the page coming next',
+    start: { text: 'Next', rect: { x: 0.7, y: 0.06, width: 0.27, height: 0.36 } },
+  },
   text: {
     label: 'Text', hint: 'Your own words',
     start: { text: 'Your text', rect: { x: 0.3, y: 0.45, width: 0.4, height: 0.1 }, style: { fontSize: '60px', color: '#ffffff', textAlign: 'center' } },
@@ -101,6 +113,7 @@ export const STAGE_ITEM_KINDS: Record<StageItemKind, { label: string; hint: stri
 export const DEFAULT_LYRICS_STAGE_LAYOUT = 'stage-lyrics';
 export const DEFAULT_SCRIPTURE_STAGE_LAYOUT = 'stage-scripture';
 export const DEFAULT_DECLARATION_STAGE_LAYOUT = 'stage-declaration';
+export const DEFAULT_PRESENTATION_STAGE_LAYOUT = 'stage-presentation';
 
 const CLOCK: StageItem = {
   id: 'clock', kind: 'clock', rect: { x: 0.67, y: 0.03, width: 0.3, height: 0.07 },
@@ -152,6 +165,30 @@ export const STAGE_LAYOUTS: StageLayout[] = [
   },
 ];
 
+// Presentations (PDF / PowerPoint pages)
+STAGE_LAYOUTS.push(
+  {
+    id: DEFAULT_PRESENTATION_STAGE_LAYOUT,
+    name: 'Presentation: current and next',
+    description: 'Like PowerPoint\'s presenter view: the page on the screens big, the next page smaller, and the time.',
+    items: [
+      { id: 'title', kind: 'song-title', rect: { x: 0.03, y: 0.025, width: 0.62, height: 0.06 }, style: { fontSize: '40px', fontWeight: 700, color: '#a3a3a3' } },
+      { id: 'current', kind: 'current-page', rect: { x: 0.021, y: 0.1, width: 0.646, height: 0.646 } },
+      { id: 'next', kind: 'next-page', text: 'Next', rect: { x: 0.69, y: 0.06, width: 0.29, height: 0.37 } },
+      { id: 'clock', kind: 'clock', rect: { x: 0.69, y: 0.5, width: 0.29, height: 0.12 }, style: { fontSize: '110px', fontWeight: 700, color: '#ffffff', textAlign: 'center' } },
+      { id: 'timer', kind: 'timer', rect: { x: 0.69, y: 0.64, width: 0.29, height: 0.1 }, style: { fontSize: '80px', fontWeight: 800, color: '#fbbf24', textAlign: 'center' } },
+    ],
+  },
+  {
+    id: 'stage-presentation-single',
+    name: 'Presentation: one page',
+    description: 'The page on the screens, as big as it fits.',
+    items: [
+      { id: 'current', kind: 'current-page', rect: { x: 0.02, y: 0.02, width: 0.96, height: 0.96 } },
+    ],
+  },
+);
+
 const BUILT_IN_IDS = new Set(STAGE_LAYOUTS.map(l => l.id));
 export const isReadyMadeStageLayout = (id: string) => BUILT_IN_IDS.has(id);
 
@@ -163,10 +200,14 @@ export const getStageLayout = (id: string | undefined, custom: StageLayout[] = [
 
 /** The layout a stage style uses for this slide; the ready-made ones when the style has none (or it was deleted) */
 export const stageLayoutFor = (
-  style: { lyricsStageLayoutId?: string; scriptureStageLayoutId?: string; declarationStageLayoutId?: string } | undefined,
-  slide: { type?: string; declaration?: boolean } | null | undefined,
+  style: { lyricsStageLayoutId?: string; scriptureStageLayoutId?: string; declarationStageLayoutId?: string; presentationStageLayoutId?: string } | undefined,
+  slide: { type?: string; declaration?: boolean; page?: unknown } | null | undefined,
   custom: StageLayout[] = [],
 ): StageLayout => {
+  // A page of a PDF or PowerPoint: the presentation layout
+  if (slide?.page) {
+    return getStageLayout(style?.presentationStageLayoutId, custom) || getStageLayout(DEFAULT_PRESENTATION_STAGE_LAYOUT)!;
+  }
   const scripture = slide?.type === 'scripture';
   // Declarations have a layout of their own (never the lyrics one), so the two can be designed apart
   if (slide?.declaration && !scripture) {
@@ -176,21 +217,32 @@ export const stageLayoutFor = (
     || getStageLayout(scripture ? DEFAULT_SCRIPTURE_STAGE_LAYOUT : DEFAULT_LYRICS_STAGE_LAYOUT)!;
 };
 
-/** The three kinds of slides a stage style has a layout for */
-export type StageSlot = 'lyrics' | 'declaration' | 'scripture';
-export const STAGE_SLOT_FIELD: Record<StageSlot, 'lyricsStageLayoutId' | 'declarationStageLayoutId' | 'scriptureStageLayoutId'> = {
-  lyrics: 'lyricsStageLayoutId', declaration: 'declarationStageLayoutId', scripture: 'scriptureStageLayoutId',
+/** The kinds of slides a stage style has a layout for */
+export type StageSlot = 'lyrics' | 'declaration' | 'scripture' | 'presentation';
+export const STAGE_SLOTS: StageSlot[] = ['lyrics', 'declaration', 'scripture', 'presentation'];
+export const STAGE_SLOT_FIELD: Record<StageSlot, 'lyricsStageLayoutId' | 'declarationStageLayoutId' | 'scriptureStageLayoutId' | 'presentationStageLayoutId'> = {
+  lyrics: 'lyricsStageLayoutId', declaration: 'declarationStageLayoutId', scripture: 'scriptureStageLayoutId', presentation: 'presentationStageLayoutId',
 };
 /** A slide of this kind, for choosing its layout */
-export const stageSlotSlide = (slot: StageSlot) => slot === 'scripture' ? { type: 'scripture' } : { type: 'lyrics', declaration: slot === 'declaration' };
+export const stageSlotSlide = (slot: StageSlot) => slot === 'presentation' ? STAGE_SAMPLES.presentation.slide : slot === 'scripture' ? { type: 'scripture' } : { type: 'lyrics', declaration: slot === 'declaration' };
+/** Which slot a slide belongs to */
+export const stageSlotOf = (slide: { type?: string; declaration?: boolean; page?: unknown } | null | undefined): StageSlot | null =>
+  !slide ? null : slide.page ? 'presentation' : slide.type === 'scripture' ? 'scripture' : slide.declaration ? 'declaration' : 'lyrics';
 export const STAGE_SLOT_LABEL: Record<StageSlot, { title: string; noun: string }> = {
   lyrics: { title: 'Lyrics / Songs', noun: 'song' },
   declaration: { title: 'Declarations', noun: 'declaration' },
   scripture: { title: 'Scripture', noun: 'scripture' },
+  presentation: { title: 'Presentations', noun: 'presentation' },
 };
 
 /** Sample slides for previews and for designing when nothing of that kind is live */
-export const STAGE_SAMPLES: Record<'lyrics' | 'declaration' | 'scripture', { slide: SlideDefinition; next: SlideDefinition; songTitle?: string }> = {
+export const STAGE_SAMPLES: Record<StageSlot, { slide: SlideDefinition; next: SlideDefinition; songTitle?: string }> = {
+  // Sample pages (no picture: they show as page outlines with their name)
+  presentation: {
+    slide: { id: 'sample-7', type: 'media', text: '', page: { storedId: '', name: 'Sample presentation · page 1' } },
+    next: { id: 'sample-8', type: 'media', text: '', page: { storedId: '', name: 'Sample presentation · page 2' } },
+    songTitle: 'Sample presentation',
+  },
   declaration: {
     slide: { id: 'sample-5', type: 'lyrics', declaration: true, text: 'I am the righteousness of God\nIn Christ Jesus' },
     next: { id: 'sample-6', type: 'lyrics', declaration: true, text: 'No weapon formed against me\nShall prosper' },

@@ -5,7 +5,7 @@ import { AlignCenter, AlignLeft, AlignRight, ArrowDown, ArrowUp, Check, Copy, Ey
 import type { OutputSettings, PresentationStyle, SlideDefinition } from '../lib/model';
 import {
   STAGE_ITEM_KINDS, STAGE_LAYOUTS, STAGE_SAMPLES, StageItem, StageItemKind, StageLayout, StageRect,
-  allStageLayouts, isReadyMadeStageLayout, stageLayoutFor, StageSlot, STAGE_SLOT_FIELD, STAGE_SLOT_LABEL, stageSlotSlide, stageDrawOrder,
+  allStageLayouts, isReadyMadeStageLayout, stageLayoutFor, stageSlotOf, StageSlot, STAGE_SLOT_FIELD, STAGE_SLOT_LABEL, stageSlotSlide, stageDrawOrder,
 } from '../lib/stageLayouts';
 import { saveStageMedia } from '../lib/stageMedia';
 import { pickMediaFile, isVideoPath, fileNameOf } from '../lib/nativeFiles';
@@ -70,7 +70,7 @@ export function StageWorkspace({
   const firstLive = output ? getLive(output).slide : null;
 
   // Which of the style's two layouts is being designed
-  const [slot, setSlot] = useState<Slot>(firstLive?.type === 'scripture' ? 'scripture' : firstLive?.declaration ? 'declaration' : 'lyrics');
+  const [slot, setSlot] = useState<Slot>(stageSlotOf(firstLive) || 'lyrics');
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   // An unfinished change (mid-drag, colour being picked): canvas only, never on the stage screens
   const [draft, setDraft] = useState<StageLayout | null>(null);
@@ -302,7 +302,7 @@ export function StageWorkspace({
 
   // The canvas shows the live slide when it fits this layout, otherwise sample words
   const live = getLive(output);
-  const liveSlot: Slot | null = live.slide ? (live.slide.type === 'scripture' ? 'scripture' : live.slide.declaration ? 'declaration' : 'lyrics') : null;
+  const liveSlot: Slot | null = stageSlotOf(live.slide);
   const liveFits = !!live.slide && !live.hideText && liveSlot === slot;
   const sample = STAGE_SAMPLES[slot];
   const data = liveFits
@@ -369,6 +369,7 @@ export function StageWorkspace({
               <button type="button" onClick={() => setSlot('lyrics')} className={segBtn(slot === 'lyrics')}>For songs</button>
               <button type="button" onClick={() => setSlot('declaration')} className={segBtn(slot === 'declaration')}>For declarations</button>
               <button type="button" onClick={() => setSlot('scripture')} className={segBtn(slot === 'scripture')}>For scripture</button>
+              <button type="button" onClick={() => setSlot('presentation')} className={segBtn(slot === 'presentation')} data-stage-slot-presentation>For presentations</button>
             </div>
             <select value={layout.id} onChange={(e) => chooseLayout(e.target.value)} className={`${selectCls} max-w-[220px]`} title={`The layout this style uses for ${STAGE_SLOT_LABEL[slot].noun} slides`}>
               <optgroup label="Ready-made">

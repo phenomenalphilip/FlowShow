@@ -34,7 +34,7 @@ import { FILE_SAVED_EVENT, SavedFile, revealFile } from './lib/nativeFiles';
 import { NdiBadge } from './components/NdiStatus';
 import { get, set } from 'idb-keyval';
 import { SmartTextLayout } from './components/SmartTextLayout';
-import { NoConverterError, PageThumb, isPdfFile, openLibreOfficePage, pdfToPictures, powerPointToPdf, storePages } from './lib/pages';
+import { NoConverterError, PAGE_FITS, PageThumb, isPdfFile, openLibreOfficePage, pdfToPictures, powerPointToPdf, storePages, type PageFit } from './lib/pages';
 import { FixedStage } from './components/FixedStage';
 import { BibleVersion, getBibleList, getBible, saveBible, deleteBible, initDatabase } from './lib/bibleDb';
 import { parseBibleXml, BibleFileError, countVerses } from './lib/xmlParser';
@@ -1933,6 +1933,12 @@ function ControlPanel() {
 
   /** A show becomes a Song or a Declaration. Its slides then use that kind's template on every screen
    *  (Declarations: the Declarations template). Setlist copies follow. */
+  /** How a presentation's pages fill the audience screens (every page, and setlist copies) */
+  const setPresentationFit = (id: string, fit: PageFit) => {
+    const show = songsList.find(s => s.id === id);
+    if (!show) return;
+    updateSlidesEverywhere(new Set(show.slides.filter(s => s.page).map(s => s.id)), s => s.page ? { ...s, page: { ...s.page, fit: fit === 'contain' ? undefined : fit } } : s);
+  };
   const setShowCategory = (id: string, category: 'Songs' | 'Declarations') => {
     const show = songsList.find(s => s.id === id);
     if (!show || (show.category === 'Declarations' ? 'Declarations' : 'Songs') === category) return;
@@ -3904,7 +3910,19 @@ function ControlPanel() {
               <div>
                 <span className="text-neutral-500 block text-[10px]">Category</span>
                 {activeSong?.category === 'Presentations' ? (
-                  <span className="text-neutral-300" title="Imported from a PDF or PowerPoint: its slides are pictures">Presentation</span>
+                  <span className="block">
+                    <span className="text-neutral-300" title="Imported from a PDF or PowerPoint: its slides are pictures">Presentation</span>
+                    <span className="text-neutral-500 block text-[10px] mt-2">Pages on the screens</span>
+                    <select
+                      value={activeSong.slides.find(s => s.page)?.page?.fit || 'contain'}
+                      onChange={(e) => setPresentationFit(activeSong.id, e.target.value as PageFit)}
+                      className="mt-0.5 bg-[#09090B] border border-white/10 text-neutral-200 rounded px-2 py-1 text-xs outline-none focus:border-pink-500 cursor-pointer"
+                      title={PAGE_FITS.map(f => `${f.label}: ${f.hint}`).join('\n')}
+                      data-page-fit-select
+                    >
+                      {PAGE_FITS.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
+                    </select>
+                  </span>
                 ) : activeSong && songsList.some(sg => sg.id === activeSong.id) ? (
                   <select
                     value={activeSong.category === 'Declarations' ? 'Declarations' : 'Songs'}
@@ -4568,6 +4586,24 @@ function ControlPanel() {
                    }
                    setContextMenu(null);
                  }}><Edit2 size={14}/> Rename {contextMenu.type === 'song' ? 'Song' : 'Bible'}</button>
+               {contextMenu.type === 'song' && songsList.find(s => s.id === contextMenu.id)?.category === 'Presentations' && (() => {
+                 const show = songsList.find(s => s.id === contextMenu.id)!;
+                 const current = show.slides.find(s => s.page)?.page?.fit || 'contain';
+                 return (
+                   <>
+                     <div className="h-px w-full bg-white/5 my-1" />
+                     <div className="px-4 pt-1 pb-0.5 text-[10px] uppercase tracking-wider text-neutral-500">Pages on the screens</div>
+                     {PAGE_FITS.map(f => (
+                       <button key={f.value} className="w-full text-left px-4 py-1.5 hover:bg-white/5 text-neutral-300 hover:text-white text-sm transition-colors flex items-center gap-2"
+                         title={f.hint}
+                         onClick={() => { setPresentationFit(show.id, f.value); setContextMenu(null); }} data-page-fit={f.value}>
+                         <span className="w-3.5">{current === f.value && <Check size={13} className="text-pink-400" />}</span>
+                         {f.label}
+                       </button>
+                     ))}
+                   </>
+                 );
+               })()}
                {contextMenu.type === 'song' && songsList.find(s => s.id === contextMenu.id)?.category !== 'Presentations' && (() => {
                  const show = songsList.find(s => s.id === contextMenu.id);
                  const current = show?.category === 'Declarations' ? 'Declarations' : 'Songs';
